@@ -1,10 +1,10 @@
 {
-  "tapBurstForce": 480.0,
-  "sustainedMaxForce": 480.0,
-  "sustainedMinForce": 480.0,
-  "steerTorque": 6.0,
-  "boatMaxSpeed": 14.0,
-  "waterLinearDrag": 0.4,
-  "gasDrainRate": 12.0,
-  "gasRegenRate": 18.0
+  "tapBurstForce": 480.00,
+  "sustainedMaxForce": 480.00,
+  "sustainedMinForce": 480.00,
+  "steerTorque": 6.00,
+  "boatMaxSpeed": 14.00,
+  "waterLinearDrag": 0.400,
+  "gasDrainRate": 12.00,
+  "gasRegenRate": 18.00
 }

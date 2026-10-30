@@ -1,4 +1,4 @@
-﻿// =============================================================================
+// =============================================================================
 
 // Fart Together - Authentic Native C++17 Game Engine
 
@@ -937,7 +937,7 @@ struct PirateGasState {
 
 };
 
-// Unified Level Entity Architecture (Obstacles, Rocks, Trees, Checkpoints, Props)
+// Unified Level Entity Architecture (Obstacles, Rocks, Trees, Checkpoints, Props, Custom Colliders)
 enum EntityType {
     ENT_OBS_A1 = 0,   // GM_3D_ObstacleA1.obj (Spiked wall bumper)
     ENT_OBS_B2 = 1,   // GM_3D_ObstacleB2.obj (Tipping bar)
@@ -948,7 +948,7 @@ enum EntityType {
     ENT_OBS_C4 = 6,   // GM_3D_ObstacleC4.obj (Quad spiked spinner)
     ENT_OBS_C5 = 7,   // GM_3D_ObstacleC5.obj (Vertical spiked wheel)
     ENT_OBS_F3 = 8,   // GM_3D_ObstacleF3.obj (Swinging barrier)
-    ENT_OBS_F10 = 9,  // GM_3D_ObstacleF10.obj (Large rotating gate)
+    ENT_OBS_F10 = 9,  // GM_3D_ObstacleF10.obj (Split: Arms & Downward Hammer)
     ENT_OBS_F11 = 10, // GM_3D_ObstacleF11.obj (Blue spiked drum cylinder)
     ENT_OBS_F13 = 11, // GM_3D_ObstacleF13.obj (Medium rotating arm)
     ENT_OBS_F14 = 12, // GM_3D_ObstacleF14_P1.obj (Sliding barrier)
@@ -957,9 +957,20 @@ enum EntityType {
     ENT_ROCK_1 = 15,  // GM_3D_Obstacle_Rock1.obj
     ENT_ROCK_2 = 16,  // GM_3D_Obstacle_Rock2.obj
     ENT_GUST = 17,    // Wind Gust zone
-    ENT_TREE_JUNGLE = 18, // GM_3D_JungleTree.obj (Authentic two-tone palm tree)
-    ENT_CHECKPOINT = 19,  // GM_3D_CheckPointV1.obj
-    ENT_COUNT = 20
+    ENT_CHECKPOINT = 18,  // GM_3D_CheckPointV1.obj (Unified editable Checkpoint)
+    ENT_TREE_JUNGLE = 19, // GM_3D_JungleTree.obj
+    // 10 Custom Collision Shapes (Plan v6.0 Task 4 & 5)
+    ENT_COL_SQUARE = 20,   // Square base collision box
+    ENT_COL_RECT = 21,     // Rectangle / Wall collision box
+    ENT_COL_CIRCLE = 22,   // Circle horizontal collision
+    ENT_COL_CUBE = 23,     // 3D Cube
+    ENT_COL_CYLINDER = 24, // 3D Cylinder
+    ENT_COL_CAPSULE = 25,  // 3D Capsule
+    ENT_COL_SPHERE = 26,   // 3D Sphere
+    ENT_COL_WEDGE = 27,    // Wedge / Ramp
+    ENT_COL_FALL_ZONE = 28,// Fall into abyss zone
+    ENT_COL_KILL_ZONE = 29,// Explode / Kill boat zone
+    ENT_COUNT = 30
 };
 
 static const char* ENTITY_TYPE_NAMES[] = {
@@ -968,18 +979,31 @@ static const char* ENTITY_TYPE_NAMES[] = {
     "OBS_F3_SWING", "OBS_F10_GATE", "OBS_F11_DRUM", "OBS_F13_ARM",
     "OBS_F14_SLIDER", "OBS_F18_SPIKE", "OBS_F23_DUAL",
     "ROCK_DARK_1", "ROCK_DARK_2", "WIND_GUST",
-    "TREE_JUNGLE", "CHECKPOINT_GATE"
+    "CHECKPOINT_GATE", "TREE_JUNGLE",
+    "COL_SQUARE", "COL_RECT_WALL", "COL_CIRCLE", "COL_CUBE",
+    "COL_CYLINDER", "COL_CAPSULE", "COL_SPHERE", "COL_WEDGE",
+    "COL_FALL_ZONE", "COL_KILL_ZONE"
 };
 
 struct LevelEntity {
     int id;
     EntityType type;
     Vector3 position;
+    float rotationX;
     float rotationY;
+    float rotationZ;
+    int flipX;
+    int flipY;
+    int flipZ;
     float scale;
     float animTimer;
     float animSpeed;
     float radius;
+    float sizeX;
+    float sizeY;
+    float sizeZ;
+    int colBehavior; // 0=Solid Wall, 1=Fall/Abyss, 2=Kill/Explode, 3=Bounce Pad
+    bool cpPassed;
     Model* model;
     // Bumper specific state
     float bumperExpandTimer;
@@ -1028,6 +1052,8 @@ struct ObstacleModels {
     Model mC5;
     Model mF3;
     Model mF10;
+    Model mF10_Arms;
+    Model mF10_Hammer;
     Model mF11;
     Model mF13;
     Model mF14;
@@ -1039,22 +1065,91 @@ struct ObstacleModels {
     Model mCP;
 };
 
+// Real Water Mesh Triangle Grid for accurate surface elevation and cliff-edge falling
+struct WaterTri2D {
+    float x0, z0, x1, z1, x2, z2;
+    float minX, maxX, minZ, maxZ, avgY;
+};
+static std::vector<WaterTri2D> gWaterTris;
+
+static void BuildWaterTriangleGrid(const Model& waterModel, Vector3 offset) {
+    gWaterTris.clear();
+    for (int mi = 0; mi < waterModel.meshCount; mi++) {
+        const Mesh& m = waterModel.meshes[mi];
+        const float* v = m.vertices;
+        if (!v) continue;
+        if (m.indices && m.triangleCount > 0) {
+            for (int t = 0; t < m.triangleCount; t++) {
+                int i0 = m.indices[t * 3 + 0];
+                int i1 = m.indices[t * 3 + 1];
+                int i2 = m.indices[t * 3 + 2];
+                float x0 = v[i0*3+0] + offset.x, y0 = v[i0*3+1] + offset.y, z0 = v[i0*3+2] + offset.z;
+                float x1 = v[i1*3+0] + offset.x, y1 = v[i1*3+1] + offset.y, z1 = v[i1*3+2] + offset.z;
+                float x2 = v[i2*3+0] + offset.x, y2 = v[i2*3+1] + offset.y, z2 = v[i2*3+2] + offset.z;
+                WaterTri2D wt;
+                wt.x0 = x0; wt.z0 = z0; wt.x1 = x1; wt.z1 = z1; wt.x2 = x2; wt.z2 = z2;
+                wt.minX = fminf(x0, fminf(x1, x2)) - 0.50f;
+                wt.maxX = fmaxf(x0, fmaxf(x1, x2)) + 0.50f;
+                wt.minZ = fminf(z0, fminf(z1, z2)) - 0.50f;
+                wt.maxZ = fmaxf(z0, fmaxf(z1, z2)) + 0.50f;
+                wt.avgY = (y0 + y1 + y2) / 3.0f;
+                gWaterTris.push_back(wt);
+            }
+        }
+    }
+}
+
+static bool IsPointOverWaterMesh(float px, float pz, float& outWaterY) {
+    // 1. Check circular start pond
+    float dxPond = px - 15.43f, dzPond = pz - 84.0f;
+    if (pz >= 74.0f && (dxPond * dxPond + dzPond * dzPond) <= (15.8f * 15.8f)) {
+        outWaterY = 0.55f;
+        return true;
+    }
+    // 2. Check water triangles of GM_3D_Demo_Water.obj
+    for (const auto& t : gWaterTris) {
+        if (px < t.minX || px > t.maxX || pz < t.minZ || pz > t.maxZ) continue;
+        float dX = px - t.x2, dZ = pz - t.z2;
+        float dX21 = t.x2 - t.x1, dZ12 = t.z1 - t.z2;
+        float D = dZ12 * (t.x0 - t.x2) + dX21 * (t.z0 - t.z2);
+        if (fabsf(D) < 1e-5f) continue;
+        float s = (dZ12 * dX + dX21 * dZ) / D;
+        float tVal = ((t.z2 - t.z0) * dX + (t.x0 - t.x2) * dZ) / D;
+        if (s >= -0.08f && tVal >= -0.08f && (s + tVal) <= 1.08f) {
+            outWaterY = t.avgY;
+            return true;
+        }
+    }
+    return false;
+}
+
+// 2D distance helper for Gizmo ray interaction
+static float DistPointToSegment2D(Vector2 p, Vector2 a, Vector2 b) {
+    Vector2 ab = { b.x - a.x, b.y - a.y };
+    Vector2 ap = { p.x - a.x, p.y - a.y };
+    float lenSq = ab.x * ab.x + ab.y * ab.y;
+    if (lenSq < 1.0f) return Vector2Distance(p, a);
+    float t = Clamp((ap.x * ab.x + ap.y * ab.y) / lenSq, 0.0f, 1.0f);
+    Vector2 proj = { a.x + ab.x * t, a.y + ab.y * t };
+    return Vector2Distance(p, proj);
+}
+
 static void GetEntityAnimatedTransform(const LevelEntity& ent, Vector3& outPos, float& outYaw, float& outPitch, float& outRoll) {
     outPos   = ent.position;
     outYaw   = ent.rotationY;
-    outPitch = 0.0f;
-    outRoll  = 0.0f;
+    outPitch = ent.rotationX;
+    outRoll  = ent.rotationZ;
 
     switch (ent.type) {
         case ENT_OBS_B2:
         case ENT_OBS_C1:
-            // Video 3: Semicircle 180 deg swing around local X axis
+            // Semicircle 180 deg swing around local X axis
             outPitch = -90.0f + sinf(ent.animTimer * 1.85f + (float)ent.id) * 90.0f;
             break;
 
         case ENT_OBS_F10:
-            // Video 4: Semicircle 180 deg swing around local Z axis
-            outRoll = -90.0f + sinf(ent.animTimer * 1.85f + (float)ent.id) * 90.0f;
+            // Video 2: Arms rotate along symmetrical arc from left bank to right bank (-73.07° ± 73.07°)
+            outRoll = -73.07f + sinf(ent.animTimer * 1.85f + (float)ent.id) * 73.07f;
             break;
 
         case ENT_OBS_F13:
@@ -1065,34 +1160,30 @@ static void GetEntityAnimatedTransform(const LevelEntity& ent, Vector3& outPos, 
             break;
 
         case ENT_OBS_F11:
-            // Blue spiked mine: 100% stationary
+            // Blue spiked drum: stationary
             break;
 
         case ENT_OBS_B3:
         case ENT_OBS_B5:
         case ENT_OBS_C4:
-            // Horizontal rotators on water spin around Y
             outYaw = fmodf(ent.rotationY + ent.animTimer * 95.0f, 360.0f);
             break;
 
         case ENT_OBS_C5:
-            // Vertical water wheel rotates around local Z axis
             outRoll = fmodf(ent.animTimer * 80.0f, 360.0f);
             break;
 
         case ENT_OBS_C2:
-            // Suspended pendulum hammer
             outRoll = sinf(ent.animTimer * 2.0f + (float)ent.id) * 48.0f;
             break;
 
         case ENT_OBS_F3:
         case ENT_OBS_F23:
-            // Horizontal swinging gates
-            outYaw = ent.rotationY + sinf(ent.animTimer * 2.0f + (float)ent.id) * 55.0f;
+            // Video 1 (OBS_F3_SWING): Full 180 deg swing (-90° to +90°)!
+            outYaw = ent.rotationY + sinf(ent.animTimer * 1.85f) * 90.0f;
             break;
 
         case ENT_OBS_F14: {
-            // Horizontal sliding barrier
             float slide = sinf(ent.animTimer * 2.0f + (float)ent.id) * 1.8f;
             float rad = ent.rotationY * DEG2RAD;
             outPos.x += cosf(rad) * slide;
@@ -1113,7 +1204,13 @@ static Vector3 GetObstacleHazardWorldPos(const LevelEntity& ent) {
     Vector3 localHazard = { 0.0f, 0.0f, 0.0f };
     if (ent.type == ENT_OBS_B2)  localHazard = { 0.0f, 0.0f,  4.4f * s };
     if (ent.type == ENT_OBS_C1)  localHazard = { 0.0f, 0.0f,  3.7f * s };
-    if (ent.type == ENT_OBS_F10) localHazard = { -7.2f * s, 0.0f, 0.0f };
+    if (ent.type == ENT_OBS_F10) {
+        float rad = animRoll * DEG2RAD;
+        const float wristX = -7.23f, wristY = 2.20f;
+        float newWristX = wristX * cosf(rad) - wristY * sinf(rad);
+        float newWristY = wristX * sinf(rad) + wristY * cosf(rad);
+        localHazard = Vector3{ newWristX * s, (newWristY - 2.20f) * s, 0.0f };
+    }
     if (ent.type == ENT_OBS_F13) localHazard = { -4.6f * s, 0.0f, 0.0f };
 
     Matrix m = MatrixIdentity();
@@ -1123,8 +1220,12 @@ static Vector3 GetObstacleHazardWorldPos(const LevelEntity& ent) {
     return Vector3Add(animPos, Vector3Transform(localHazard, m));
 }
 
+static ObstacleModels gObsModels;
+static const char* LEVEL_LAYOUT_PATH = "level_layout.json";
+
 static bool CheckObstacleOBBCollision(Vector3 raftPos, const LevelEntity& ent, Vector3 animPos, float animYawDeg, float animRollDeg) {
-    if (ent.type >= ENT_TREE_JUNGLE || ent.type == ENT_GUST || ent.type == ENT_ROCK_1 || ent.type == ENT_ROCK_2 || ent.type == ENT_OBS_F18) return false;
+    if (ent.type == ENT_TREE_JUNGLE || ent.type == ENT_GUST || ent.type == ENT_ROCK_1 || ent.type == ENT_ROCK_2 || ent.type == ENT_OBS_F18 || ent.type == ENT_CHECKPOINT) return false;
+    if (ent.type >= ENT_COL_SQUARE) return false; // Handled by custom collision shapes
 
     const float boatR = 0.88f;
     float s = (ent.scale > 0.01f) ? ent.scale : 1.0f;
@@ -1132,7 +1233,6 @@ static bool CheckObstacleOBBCollision(Vector3 raftPos, const LevelEntity& ent, V
     // For elevated swinging arm hazards (B2, C1, F10, F13), check exact 3D hazard head position
     if (ent.type == ENT_OBS_B2 || ent.type == ENT_OBS_C1 || ent.type == ENT_OBS_F10 || ent.type == ENT_OBS_F13) {
         Vector3 hPos = GetObstacleHazardWorldPos(ent);
-        // Only hit if hazard head is near water level (within 1.4m of boat vertical center)
         if (fabsf((raftPos.y + 0.35f) - hPos.y) < 1.4f) {
             float dx = raftPos.x - hPos.x;
             float dz = raftPos.z - hPos.z;
@@ -1141,7 +1241,6 @@ static bool CheckObstacleOBBCollision(Vector3 raftPos, const LevelEntity& ent, V
                 return true;
             }
         }
-        // Also check pivot base collision near water
         float dyBase = fabsf((raftPos.y + 0.35f) - animPos.y);
         if (dyBase < 1.5f) {
             float dxBase = raftPos.x - animPos.x;
@@ -1153,7 +1252,6 @@ static bool CheckObstacleOBBCollision(Vector3 raftPos, const LevelEntity& ent, V
         return false;
     }
 
-    // Wall-mounted Spiked Bar (ENT_OBS_A1)
     if (ent.type == ENT_OBS_A1) {
         if (fabsf(raftPos.y - animPos.y) > 2.0f) return false;
         float dx = raftPos.x - animPos.x;
@@ -1164,7 +1262,6 @@ static bool CheckObstacleOBBCollision(Vector3 raftPos, const LevelEntity& ent, V
         return (fabsf(lx) < (0.48f * s + boatR)) && (fabsf(lz) < (2.40f * s + 0.65f));
     }
 
-    // Check vertical clearance first
     float dy = fabsf((raftPos.y + 0.35f) - animPos.y);
     if (ent.type == ENT_OBS_C5) {
         if (dy > 4.6f * s) return false;
@@ -1172,7 +1269,6 @@ static bool CheckObstacleOBBCollision(Vector3 raftPos, const LevelEntity& ent, V
         return false;
     }
 
-    // Transform boat position into obstacle's local horizontal space
     float rad = -animYawDeg * DEG2RAD;
     float dx = raftPos.x - animPos.x;
     float dz = raftPos.z - animPos.z;
@@ -1195,14 +1291,16 @@ static bool CheckObstacleOBBCollision(Vector3 raftPos, const LevelEntity& ent, V
     return (fabsf(localX) < (hx + boatR)) && (fabsf(localZ) < (hz + boatR));
 }
 
-static ObstacleModels gObsModels;
-
-static const char* LEVEL_LAYOUT_PATH = "level_layout.json";
-
 void AssignEntityModelAndProps(LevelEntity& e) {
     if (e.scale <= 0.01f || !std::isfinite(e.scale)) e.scale = 1.0f;
     if (e.radius <= 0.01f || !std::isfinite(e.radius)) e.radius = 2.0f;
     if (e.animSpeed < 0.0f || !std::isfinite(e.animSpeed)) e.animSpeed = 1.0f;
+    if (e.flipX == 0) e.flipX = 1;
+    if (e.flipY == 0) e.flipY = 1;
+    if (e.flipZ == 0) e.flipZ = 1;
+    if (e.sizeX <= 0.05f) e.sizeX = e.radius;
+    if (e.sizeY <= 0.05f) e.sizeY = 2.0f;
+    if (e.sizeZ <= 0.05f) e.sizeZ = e.radius;
 
     switch (e.type) {
         case ENT_OBS_A1:  e.model = &gObsModels.mA1;  e.radius = 1.85f * e.scale; break;
@@ -1222,10 +1320,24 @@ void AssignEntityModelAndProps(LevelEntity& e) {
         case ENT_OBS_F23: e.model = &gObsModels.mF23; e.radius = 2.80f * e.scale; break;
         case ENT_ROCK_1:  e.model = &gObsModels.mR1;  e.radius = 2.10f * e.scale; break;
         case ENT_ROCK_2:  e.model = &gObsModels.mR2;  e.radius = 2.30f * e.scale; break;
-        case ENT_GUST:        e.model = nullptr;          e.radius = 4.50f * e.scale; break;
-        case ENT_TREE_JUNGLE:  e.model = &gObsModels.mTree; e.radius = 1.35f * e.scale; break;
-        case ENT_CHECKPOINT:   e.model = &gObsModels.mCP;   e.radius = 3.50f * e.scale; break;
-        default:               e.type = ENT_OBS_A1; e.model = &gObsModels.mA1; e.radius = 1.85f * e.scale; break;
+        case ENT_GUST:         e.model = nullptr;         e.radius = 4.50f * e.scale; break;
+        case ENT_CHECKPOINT:   e.model = &gObsModels.mCP;  e.radius = 3.50f * e.scale; break;
+        case ENT_TREE_JUNGLE:  e.model = &gObsModels.mTree;e.radius = 1.35f * e.scale; break;
+        // Custom Collision Shapes
+        case ENT_COL_SQUARE:
+        case ENT_COL_RECT:
+        case ENT_COL_CIRCLE:
+        case ENT_COL_CUBE:
+        case ENT_COL_CYLINDER:
+        case ENT_COL_CAPSULE:
+        case ENT_COL_SPHERE:
+        case ENT_COL_WEDGE:
+        case ENT_COL_FALL_ZONE:
+        case ENT_COL_KILL_ZONE:
+            e.model = nullptr;
+            e.radius = (e.sizeX > 0.1f) ? e.sizeX : 2.0f;
+            break;
+        default: e.type = ENT_OBS_A1; e.model = &gObsModels.mA1; e.radius = 1.85f * e.scale; break;
     }
 }
 
@@ -1244,13 +1356,25 @@ void SaveLevelLayoutJSON(const std::string& path, const std::vector<LevelEntity>
             "    \"x\": %.3f,\n"
             "    \"y\": %.3f,\n"
             "    \"z\": %.3f,\n"
+            "    \"rotX\": %.2f,\n"
             "    \"rotY\": %.2f,\n"
+            "    \"rotZ\": %.2f,\n"
+            "    \"flipX\": %d,\n"
+            "    \"flipY\": %d,\n"
+            "    \"flipZ\": %d,\n"
             "    \"scale\": %.2f,\n"
             "    \"speed\": %.2f,\n"
-            "    \"radius\": %.2f\n"
+            "    \"radius\": %.2f,\n"
+            "    \"sizeX\": %.2f,\n"
+            "    \"sizeY\": %.2f,\n"
+            "    \"sizeZ\": %.2f,\n"
+            "    \"colBehavior\": %d\n"
             "  }%s\n",
             (int)i, (int)e.type, e.position.x, e.position.y, e.position.z,
-            e.rotationY, e.scale, e.animSpeed, e.radius,
+            e.rotationX, e.rotationY, e.rotationZ,
+            e.flipX, e.flipY, e.flipZ,
+            e.scale, e.animSpeed, e.radius,
+            e.sizeX, e.sizeY, e.sizeZ, e.colBehavior,
             (i + 1 < list.size()) ? "," : "");
     }
     fprintf(f, "]\n");
@@ -1288,23 +1412,48 @@ bool LoadLevelLayoutJSON(const std::string& path, std::vector<LevelEntity>& list
         int t = 0;
         if (ParseJsonIntField(objStart, objEnd, "\"type\"", t)) {
             if (t < 0 || t >= (int)ENT_COUNT) t = 0;
-            float x = 0.0f, y = 0.0f, z = 0.0f, rotY = 0.0f, scale = 1.0f, spd = 1.0f, rad = 2.0f;
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            float rotX = 0.0f, rotY = 0.0f, rotZ = 0.0f;
+            int flipX = 1, flipY = 1, flipZ = 1;
+            float scale = 1.0f, spd = 1.0f, rad = 2.0f;
+            float szX = 2.0f, szY = 2.0f, szZ = 2.0f;
+            int colBeh = 0;
+
             ParseJsonFloatField(objStart, objEnd, "\"x\"", x);
             ParseJsonFloatField(objStart, objEnd, "\"y\"", y);
             ParseJsonFloatField(objStart, objEnd, "\"z\"", z);
+            ParseJsonFloatField(objStart, objEnd, "\"rotX\"", rotX);
             ParseJsonFloatField(objStart, objEnd, "\"rotY\"", rotY);
+            ParseJsonFloatField(objStart, objEnd, "\"rotZ\"", rotZ);
+            ParseJsonIntField(objStart, objEnd, "\"flipX\"", flipX);
+            ParseJsonIntField(objStart, objEnd, "\"flipY\"", flipY);
+            ParseJsonIntField(objStart, objEnd, "\"flipZ\"", flipZ);
             ParseJsonFloatField(objStart, objEnd, "\"scale\"", scale);
             ParseJsonFloatField(objStart, objEnd, "\"speed\"", spd);
             ParseJsonFloatField(objStart, objEnd, "\"radius\"", rad);
+            ParseJsonFloatField(objStart, objEnd, "\"sizeX\"", szX);
+            ParseJsonFloatField(objStart, objEnd, "\"sizeY\"", szY);
+            ParseJsonFloatField(objStart, objEnd, "\"sizeZ\"", szZ);
+            ParseJsonIntField(objStart, objEnd, "\"colBehavior\"", colBeh);
 
             LevelEntity e{};
             e.id = nextId++;
             e.type = static_cast<EntityType>(t);
             e.position = Vector3{ x, y, z };
+            e.rotationX = rotX;
             e.rotationY = rotY;
+            e.rotationZ = rotZ;
+            e.flipX = (flipX != 0) ? flipX : 1;
+            e.flipY = (flipY != 0) ? flipY : 1;
+            e.flipZ = (flipZ != 0) ? flipZ : 1;
             e.scale = (scale > 0.01f) ? scale : 1.0f;
             e.animSpeed = (spd >= 0.0f) ? spd : 1.0f;
             e.radius = (rad > 0.01f) ? rad : 2.0f;
+            e.sizeX = (szX > 0.05f) ? szX : e.radius;
+            e.sizeY = (szY > 0.05f) ? szY : 2.0f;
+            e.sizeZ = (szZ > 0.05f) ? szZ : e.radius;
+            e.colBehavior = colBeh;
+            e.cpPassed = false;
             AssignEntityModelAndProps(e);
             list.push_back(e);
         }
@@ -1313,13 +1462,13 @@ bool LoadLevelLayoutJSON(const std::string& path, std::vector<LevelEntity>& list
     UnloadFileText(rawText);
     return !list.empty();
 }
-
 int main(int argc, char** argv) {
 
     bool testScreenshotMode = false;
     bool testEditorMode = false;
     bool testDeathMode = false;
     bool testLanMode = false;
+    bool testCatalogMode = false;
     int testSelectIdx = -1;
     bool useCustomTestCam = false;
     Vector3 customTestCamPos = { 0, 0, 0 };
@@ -1336,6 +1485,7 @@ int main(int argc, char** argv) {
         if (strcmp(argv[i], "--test-screen") == 0 && i + 1 < argc) testScreenArg = argv[++i];
         if (strcmp(argv[i], "--test-screenshot") == 0) testScreenshotMode = true;
         if (strcmp(argv[i], "--test-editor") == 0) testEditorMode = true;
+        if (strcmp(argv[i], "--test-catalog") == 0) { testCatalogMode = true; testEditorMode = true; }
         if (strcmp(argv[i], "--test-death") == 0) testDeathMode = true;
         if (strcmp(argv[i], "--test-lan") == 0) testLanMode = true;
         if (strcmp(argv[i], "--test-select") == 0 && i + 1 < argc) testSelectIdx = atoi(argv[++i]);
@@ -1381,6 +1531,12 @@ int main(int argc, char** argv) {
     // 3D Model Live Preview and Editor Inspector state
     RenderTexture2D previewRT = LoadRenderTexture(280, 125);
     bool inspectorCollapsed = false;
+    bool leftDockCollapsed = false;
+    bool visualCatalogOpen = testCatalogMode;
+    int editorGizmoMode = 0; // 0=Select, 1=Move, 2=Rotate, 3=Scale
+    int gActiveGizmoAxis = -1; // -1=none, 0=X, 1=Y, 2=Z
+    int hierarchyScroll = 0;
+    int catalogScroll = 0;
 
     TraceLog(LOG_INFO, "Loading authentic shaders, textures, and 3D meshes...");
 
@@ -1531,7 +1687,9 @@ int main(int argc, char** argv) {
     gObsModels.mC4  = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_ObstacleC4.obj").c_str());
     gObsModels.mC5  = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_ObstacleC5.obj").c_str());
     gObsModels.mF3  = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_ObstacleF3.obj").c_str());
-    gObsModels.mF10 = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_ObstacleF10.obj").c_str());
+    gObsModels.mF10        = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_ObstacleF10.obj").c_str());
+    gObsModels.mF10_Arms   = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_ObstacleF10_Arms.obj").c_str());
+    gObsModels.mF10_Hammer = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_ObstacleF10_Hammer.obj").c_str());
     gObsModels.mF11 = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_ObstacleF11.obj").c_str());
     gObsModels.mF13 = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_ObstacleF13.obj").c_str());
     gObsModels.mF14 = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_ObstacleF14_P1.obj").c_str());
@@ -1619,6 +1777,8 @@ int main(int argc, char** argv) {
     ApplyMat(gObsModels.mC5);
     ApplyMat(gObsModels.mF3);
     ApplyMat(gObsModels.mF10);
+    ApplyMat(gObsModels.mF10_Arms);
+    ApplyMat(gObsModels.mF10_Hammer);
     ApplyMat(gObsModels.mF13);
     ApplyMat(gObsModels.mF14);
     ApplyMat(gObsModels.mF18);
@@ -1685,6 +1845,8 @@ int main(int argc, char** argv) {
     // World Transforms
 
     Vector3 trackOffset  = Vector3{ 38.44f, 0.57f, 156.14f };
+    // Task 4: Build actual 2D water triangle grid from GM_3D_Demo_Water.obj + trackOffset
+    BuildWaterTriangleGrid(waterModel, trackOffset);
 
     int trackOffLoc = GetShaderLocation(shaderWater, "trackOffset");
 
@@ -1725,6 +1887,9 @@ int main(int argc, char** argv) {
         float respawnTimer;
 
         DeathCause lastDeathCause;
+        Vector3 lastCheckpointPos;
+        float lastCheckpointRotY;
+        bool hasCheckpoint;
 
     } raft;
 
@@ -1755,32 +1920,9 @@ int main(int argc, char** argv) {
     raft.respawnTimer = 0.0f;
 
     raft.lastDeathCause = DEATH_NONE;
-
-    // Checkpoint markers along the route
-
-    struct RouteCheckpoint {
-
-        Vector3 pos;
-
-        float rotY;
-
-        Model* model;
-
-        bool passed;
-
-    };
-
-    std::vector<RouteCheckpoint> checkpoints = {
-        { startGatePos, 0.0f, &startModel, false },
-        { Vector3{ 41.88f, 0.55f, 19.79f }, -35.0f, &cp1Model, false },
-        { Vector3{ 30.38f, 0.55f, -10.64f }, 90.0f, &cp1Model, false },
-        { Vector3{ -49.10f, 9.85f, -103.86f }, 90.0f, &cp2Model, false },
-        { Vector3{ -122.48f, 8.95f, -91.45f }, 90.0f, &cp2Model, false },
-        { Vector3{ -174.31f, 8.95f, -58.82f }, 0.0f, &cp2Model, false },
-        { Vector3{ -198.09f, 8.95f, -103.12f }, 90.0f, &cp2Model, false },
-        { Vector3{ -336.19f, 8.95f, -103.23f }, 90.0f, &cp2Model, false },
-        { finishGatePos, 90.0f, &finishModel, false }
-    };
+    raft.lastCheckpointPos = Vector3{ 15.55f, 0.58f, 90.80f };
+    raft.lastCheckpointRotY = 3.14159f;
+    raft.hasCheckpoint = false;
 
     std::vector<LevelEntity> levelEntities;
     if (!LoadLevelLayoutJSON(LEVEL_LAYOUT_PATH, levelEntities)) {
@@ -2297,10 +2439,9 @@ int main(int argc, char** argv) {
                 if (raft.velocity.x > 0.0f) raft.velocity.x *= -0.4f;
             }
         } else {
-            float riverBankW = 9.5f;
-            if (fabsf(crossDist) > riverBankW) {
-                overWater = false;
-            }
+            // Task 4: Accurate water mesh boundary check — stops buoyancy on dry cliffs / air!
+            float dummyY = 0.55f;
+            overWater = IsPointOverWaterMesh(raft.position.x, raft.position.z, dummyY);
         }
 
         // Downstream slope acceleration ONLY on waterfalls/ramps (Z < 30)
@@ -2315,7 +2456,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Buoyancy on Actual Water Mesh vs Free-Fall in Abyss
+        // Buoyancy on Actual Water Mesh vs Free-Fall in Abyss (Plan v6.0 Task 4)
         float actualWaterY = 0.55f;
         float distToWaterMesh = 0.0f;
         Vector3 nearestWaterPt = raft.position;
@@ -2327,7 +2468,7 @@ int main(int argc, char** argv) {
             raft.velocity.y += (heave * 45.0f - raft.velocity.y * 8.0f) * dt;
         } else if (!overWater) {
             raft.velocity.y -= 32.0f * dt;
-            if (raft.position.y < (actualWaterY - 12.0f) && !raft.isDestroyed) {
+            if (raft.position.y < (actualWaterY - 6.5f) && !raft.isDestroyed) {
                 TriggerBoatDeath(DEATH_VOID);
             }
         }
@@ -2349,6 +2490,61 @@ int main(int argc, char** argv) {
         raft.pitch = Lerp(raft.pitch, 0.0f, 10.0f * dt);
         raft.roll  = Lerp(raft.roll, Clamp(raft.angularVelocityY * 0.025f, -0.08f, 0.08f), 10.0f * dt);
         raft.speed = horizSpeed;
+
+        // 5. Check Custom Collision Shapes (10 types) & Obstacles
+        for (const auto& ent : levelEntities) {
+            if (ent.type >= ENT_COL_SQUARE && ent.type <= ENT_COL_KILL_ZONE) {
+                float rad = -ent.rotationY * DEG2RAD;
+                float dx = raft.position.x - ent.position.x;
+                float dz = raft.position.z - ent.position.z;
+                float dy = raft.position.y - ent.position.y;
+                float lx = dx * cosf(rad) - dz * sinf(rad);
+                float lz = dx * sinf(rad) + dz * cosf(rad);
+                float hx = (ent.sizeX > 0.05f) ? ent.sizeX : ent.radius;
+                float hz = (ent.sizeZ > 0.05f) ? ent.sizeZ : ent.radius;
+                float hy = (ent.sizeY > 0.05f) ? ent.sizeY : 2.0f;
+                const float boatR = 0.88f;
+
+                bool inside = false;
+                if (ent.type == ENT_COL_CIRCLE || ent.type == ENT_COL_CYLINDER || ent.type == ENT_COL_SPHERE) {
+                    inside = (dx*dx + dz*dz) < ((hx + boatR) * (hx + boatR)) && (fabsf(dy) < (hy + 0.6f));
+                } else {
+                    inside = (fabsf(lx) < (hx + boatR)) && (fabsf(lz) < (hz + boatR)) && (fabsf(dy) < (hy + 0.6f));
+                }
+
+                if (inside) {
+                    if (ent.colBehavior == 1 || ent.type == ENT_COL_FALL_ZONE) {
+                        overWater = false;
+                    } else if (ent.colBehavior == 2 || ent.type == ENT_COL_KILL_ZONE) {
+                        if (!raft.isDestroyed && raft.invulnerableTimer <= 0.0f) {
+                            TriggerBoatDeath(DEATH_OBSTACLE);
+                        }
+                    } else if (ent.colBehavior == 3) {
+                        Vector3 push = Vector3Normalize(Vector3Subtract(raft.position, ent.position));
+                        raft.velocity = Vector3Scale(push, 18.0f);
+                        PlaySound(fartSounds[3]);
+                    } else { // 0 = Solid Wall
+                        float penX = (hx + boatR) - fabsf(lx);
+                        float penZ = (hz + boatR) - fabsf(lz);
+                        if (penX < penZ) {
+                            float sign = (lx >= 0.0f) ? 1.0f : -1.0f;
+                            float wpx = sign * penX * cosf(-rad);
+                            float wpz = -sign * penX * sinf(-rad);
+                            raft.position.x += wpx;
+                            raft.position.z += wpz;
+                            raft.velocity.x *= -0.3f;
+                        } else {
+                            float sign = (lz >= 0.0f) ? 1.0f : -1.0f;
+                            float wpx = sign * penZ * sinf(-rad);
+                            float wpz = sign * penZ * cosf(-rad);
+                            raft.position.x += wpx;
+                            raft.position.z += wpz;
+                            raft.velocity.z *= -0.3f;
+                        }
+                    }
+                }
+            }
+        }
 
         // 5. Check Obstacle & Hazard Collisions (Rocks & F18 Rebound are Non-Fatal!)
         for (auto& ent : levelEntities) {
@@ -2523,15 +2719,13 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             }
 
             if (raft.respawnTimer <= 0.0f) {
-                if (raft.currentCP <= 0) {
+                // Task 2: Respawn directly at the unified editable checkpoint entity!
+                if (raft.hasCheckpoint) {
+                    raft.position = raft.lastCheckpointPos;
+                    raft.rotationY = raft.lastCheckpointRotY;
+                } else {
                     raft.position = Vector3{ 15.55f, 0.58f, 90.80f };
                     raft.rotationY = 3.14159f;
-                } else {
-                    int cpIdx = Clamp(raft.currentCP - 1, 0, (int)checkpoints.size() - 1);
-                    raft.position = checkpoints[cpIdx].pos + Vector3{ 0.0f, 0.4f, 0.0f };
-                    float cpT = FindClosestSplineT(checkpoints[cpIdx].pos);
-                    Vector3 cpTan = GetSplineTangent(cpT);
-                    raft.rotationY = atan2f(cpTan.x, cpTan.z);
                 }
                 raft.velocity = Vector3{ 0.0f, 0.0f, 0.0f };
                 raft.angularVelocityY = 0.0f;
@@ -2550,24 +2744,27 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
         if (raft.invulnerableTimer > 0.0f) raft.invulnerableTimer -= dt;
 
-        // Checkpoints Check
-
-        for (size_t i = 0; i < checkpoints.size(); i++) {
-
-            float dist = Vector3Distance(raft.position, checkpoints[i].pos);
-
-            if (dist < 14.0f && !checkpoints[i].passed && (int)i == raft.currentCP) {
-
-                checkpoints[i].passed = true;
-
-                raft.currentCP++;
-
-                PlaySound(fartSounds[0]);
-
-                if (i == checkpoints.size() - 1) raceFinished = true;
-
+        // Checkpoints & Finish Check (Plan v6.0 Task 2)
+        if (!editorMode && !raft.isDestroyed) {
+            for (auto& ent : levelEntities) {
+                if (ent.type == ENT_CHECKPOINT) {
+                    float dist = Vector3Distance(raft.position, ent.position);
+                    if (dist < 6.5f * ent.scale && !ent.cpPassed) {
+                        ent.cpPassed = true;
+                        raft.lastCheckpointPos  = Vector3{ ent.position.x, ent.position.y + 0.25f, ent.position.z };
+                        float cpSplineT = FindClosestSplineT(ent.position);
+                        Vector3 cpTan   = GetSplineTangent(cpSplineT);
+                        raft.lastCheckpointRotY = atan2f(cpTan.x, cpTan.z);
+                        raft.hasCheckpoint      = true;
+                        raft.currentCP++;
+                        PlaySound(fartSounds[0]);
+                    }
+                }
             }
-
+            if (Vector3Distance(raft.position, finishGatePos) < 12.0f && !raceFinished) {
+                raceFinished = true;
+                PlaySound(fartSounds[0]);
+            }
         }
 
         // Particle Updates
@@ -2670,8 +2867,81 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             camera.position = editorCamPos;
             camera.target = Vector3Add(editorCamPos, fwd);
 
-            // Raycast Click Selection in 3D
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && mousePos.x < (GetScreenWidth() - 340)) {
+            // Compute panel bounds to prevent clicking through UI
+            float leftDockW = leftDockCollapsed ? 0.0f : 270.0f;
+            float rightDockW = inspectorCollapsed ? 0.0f : 320.0f;
+            float rightDockX = (float)GetScreenWidth() - rightDockW;
+            bool mouseOverUI = (mousePos.y < 44.0f) || (mousePos.x < leftDockW) || (mousePos.x > rightDockX);
+            if (visualCatalogOpen && mousePos.x >= (leftDockW + 10.0f) && mousePos.x <= (leftDockW + 250.0f) && mousePos.y >= 44.0f) {
+                mouseOverUI = true;
+            }
+
+            // 3D Gizmo and Raycast Selection
+            if (selectedObs >= 0 && selectedObs < (int)levelEntities.size()) {
+                LevelEntity& sel = levelEntities[selectedObs];
+                Vector3 oPos = sel.position;
+                Vector2 sOrig  = GetWorldToScreen(oPos, camera);
+                Vector2 sXEnd  = GetWorldToScreen(Vector3Add(oPos, Vector3{ 3.2f, 0.0f, 0.0f }), camera);
+                Vector2 sYEnd  = GetWorldToScreen(Vector3Add(oPos, Vector3{ 0.0f, 3.2f, 0.0f }), camera);
+                Vector2 sZEnd  = GetWorldToScreen(Vector3Add(oPos, Vector3{ 0.0f, 0.0f, 3.2f }), camera);
+
+                Vector2 sFlipX = GetWorldToScreen(Vector3Add(oPos, Vector3{ -1.8f, 0.0f, 0.0f }), camera);
+                Vector2 sFlipY = GetWorldToScreen(Vector3Add(oPos, Vector3{ 0.0f, -1.8f, 0.0f }), camera);
+                Vector2 sFlipZ = GetWorldToScreen(Vector3Add(oPos, Vector3{ 0.0f, 0.0f, -1.8f }), camera);
+
+                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !mouseOverUI) {
+                    if (Vector2Distance(mousePos, sFlipX) < 18.0f) {
+                        sel.flipX *= -1;
+                        sel.rotationY = fmodf(-sel.rotationY + 360.0f, 360.0f);
+                        editorMsg = "Flipped Selected Object along X Axis!";
+                        editorMsgTimer = 2.0f;
+                    } else if (Vector2Distance(mousePos, sFlipY) < 18.0f) {
+                        sel.flipY *= -1;
+                        sel.rotationZ = fmodf(sel.rotationZ + 180.0f, 360.0f);
+                        editorMsg = "Flipped Selected Object along Y Axis!";
+                        editorMsgTimer = 2.0f;
+                    } else if (Vector2Distance(mousePos, sFlipZ) < 18.0f) {
+                        sel.flipZ *= -1;
+                        sel.rotationY = fmodf(sel.rotationY + 180.0f, 360.0f);
+                        editorMsg = "Flipped Selected Object along Z Axis!";
+                        editorMsgTimer = 2.0f;
+                    } else {
+                        float dX = DistPointToSegment2D(mousePos, sOrig, sXEnd);
+                        float dY = DistPointToSegment2D(mousePos, sOrig, sYEnd);
+                        float dZ = DistPointToSegment2D(mousePos, sOrig, sZEnd);
+                        float minD = fminf(dX, fminf(dY, dZ));
+                        if (minD < 20.0f) {
+                            if (minD == dX) gActiveGizmoAxis = 0;
+                            else if (minD == dY) gActiveGizmoAxis = 1;
+                            else gActiveGizmoAxis = 2;
+                        }
+                    }
+                }
+
+                if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+                    gActiveGizmoAxis = -1;
+                }
+
+                if (gActiveGizmoAxis >= 0 && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                    Vector2 mDelta = GetMouseDelta();
+                    Vector2 axisEnd = (gActiveGizmoAxis == 0) ? sXEnd : ((gActiveGizmoAxis == 1) ? sYEnd : sZEnd);
+                    Vector2 screenDir = { axisEnd.x - sOrig.x, axisEnd.y - sOrig.y };
+                    float screenLen = Vector2Length(screenDir);
+                    if (screenLen > 1.0f) {
+                        screenDir.x /= screenLen;
+                        screenDir.y /= screenLen;
+                        float pixelsMoved = mDelta.x * screenDir.x + mDelta.y * screenDir.y;
+                        float worldPerPixel = 3.2f / screenLen;
+                        float deltaWorld = pixelsMoved * worldPerPixel;
+                        if (gActiveGizmoAxis == 0) sel.position.x += deltaWorld;
+                        if (gActiveGizmoAxis == 1) sel.position.y += deltaWorld;
+                        if (gActiveGizmoAxis == 2) sel.position.z += deltaWorld;
+                    }
+                }
+            }
+
+            // Raycast click selection when not dragging gizmo
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !mouseOverUI && gActiveGizmoAxis == -1) {
                 Ray mRay = GetScreenToWorldRay(mousePos, camera);
                 float bestDist = 9999.0f;
                 int hitIdx = -1;
@@ -2691,25 +2961,20 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 }
             }
 
-            // Keyboard Manipulation of Selected Entity (Continuous hold support!)
+            // Keyboard Manipulation of Selected Entity
             if (selectedObs >= 0 && selectedObs < (int)levelEntities.size()) {
                 auto& o = levelEntities[selectedObs];
                 float editSpd = (IsKeyDown(KEY_LEFT_SHIFT) ? 10.0f : 4.0f) * dt;
                 
-                // J / L = Move X
                 if (IsKeyDown(KEY_J)) o.position.x -= editSpd;
                 if (IsKeyDown(KEY_L)) o.position.x += editSpd;
-                // I / K = Move Z (along stream)
                 if (IsKeyDown(KEY_I)) o.position.z += editSpd;
                 if (IsKeyDown(KEY_K)) o.position.z -= editSpd;
-                // U / O = Move Y (height)
                 if (IsKeyDown(KEY_U)) o.position.y += editSpd;
                 if (IsKeyDown(KEY_O)) o.position.y -= editSpd;
-                // R / T = Rotate Y
                 if (IsKeyDown(KEY_R)) o.rotationY -= 65.0f * dt;
                 if (IsKeyDown(KEY_T)) o.rotationY += 65.0f * dt;
 
-                // Focus on object (Unity 'F' key)
                 if (IsKeyPressed(KEY_F)) {
                     editorCamPos = Vector3Add(o.position, Vector3{ 0.0f, 3.5f, 6.0f });
                     editorCamYaw = 3.14159f;
@@ -2872,40 +3137,106 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
             DrawModel(waterModel, trackOffset, 1.0f, WHITE);
 
-            // D. Checkpoints & Gates
+            // D. Start Gate & Finish Gate (Intermediate checkpoints rendered from levelEntities!)
+            rlPushMatrix();
+                rlTranslatef(startGatePos.x, startGatePos.y, startGatePos.z);
+                rlRotatef(0.0f, 0, 1, 0);
+                DrawModel(startModel, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
+            rlPopMatrix();
 
-            for (const auto& cp : checkpoints) {
-
-                Color tint = cp.passed ? COLOR_ACCENT_GREEN : WHITE;
-
-                rlPushMatrix();
-
-                    rlTranslatef(cp.pos.x, cp.pos.y, cp.pos.z);
-
-                    rlRotatef(cp.rotY, 0, 1, 0);
-
-                    DrawModel(*cp.model, Vector3{ 0, 0, 0 }, 1.0f, tint);
-
-                rlPopMatrix();
-
-            }
+            rlPushMatrix();
+                rlTranslatef(finishGatePos.x, finishGatePos.y, finishGatePos.z);
+                rlRotatef(90.0f, 0, 1, 0);
+                DrawModel(finishModel, Vector3{ 0, 0, 0 }, 1.0f, raceFinished ? COLOR_ACCENT_GREEN : WHITE);
+            rlPopMatrix();
 
             // A. Authentic Start Basin inside Canyon Walls & Water Mesh (Zero fake cylinders)
 
             // E. Draw All Level Entities (Obstacles, Rocks, Trees, Checkpoints)
         for (const auto& ent : levelEntities) {
-            if (ent.model != nullptr) {
-                Vector3 animPos;
-                float animYaw, animRoll;
-                float animPitch = 0.0f; GetEntityAnimatedTransform(ent, animPos, animYaw, animPitch, animRoll);
+            Vector3 animPos;
+            float animYaw, animRoll;
+            float animPitch = 0.0f;
+            GetEntityAnimatedTransform(ent, animPos, animYaw, animPitch, animRoll);
 
+            // Task 3: ENT_OBS_F10 split rendering with hammer ALWAYS pointing down towards ground!
+            if (ent.type == ENT_OBS_F10) {
+                rlPushMatrix();
+                rlTranslatef(animPos.x, animPos.y, animPos.z);
+                rlRotatef(animYaw, 0.0f, 1.0f, 0.0f);
+                float s = (ent.scale > 0.01f) ? ent.scale : 1.0f;
+                float sx = s * (float)ent.flipX;
+                float sy = s * (float)ent.flipY;
+                float sz = s * (float)ent.flipZ;
+                rlScalef(sx, sy, sz);
+
+                // 1. Draw arms rotating by animRoll around pivot (0,0,0)
+                rlPushMatrix();
+                    rlRotatef(animRoll, 0.0f, 0.0f, 1.0f);
+                    DrawModel(gObsModels.mF10_Arms, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
+                rlPopMatrix();
+
+                // 2. Draw hammer hanging from wrist (-7.23, 2.20) with roll = 0.0f (always pointing down towards ground)
+                float rad = animRoll * DEG2RAD;
+                const float wristX = -7.23f, wristY = 2.20f;
+                float newWristX = wristX * cosf(rad) - wristY * sinf(rad);
+                float newWristY = wristX * sinf(rad) + wristY * cosf(rad);
+                rlPushMatrix();
+                    rlTranslatef(newWristX - wristX, newWristY - wristY, 0.0f);
+                    DrawModel(gObsModels.mF10_Hammer, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
+                rlPopMatrix();
+
+                rlPopMatrix();
+                continue;
+            }
+
+            // Task 2: Checkpoint gate rendering with active green tint
+            if (ent.type == ENT_CHECKPOINT) {
+                Color tint = ent.cpPassed ? COLOR_ACCENT_GREEN : WHITE;
+                rlPushMatrix();
+                rlTranslatef(animPos.x, animPos.y, animPos.z);
+                rlRotatef(animYaw, 0.0f, 1.0f, 0.0f);
+                float s = (ent.scale > 0.01f) ? ent.scale : 1.0f;
+                rlScalef(s * (float)ent.flipX, s * (float)ent.flipY, s * (float)ent.flipZ);
+                DrawModel(gObsModels.mCP, Vector3{ 0, 0, 0 }, 1.0f, tint);
+                rlPopMatrix();
+                continue;
+            }
+
+            // Task 4: Custom Collision Shapes rendering in editor mode
+            if (ent.type >= ENT_COL_SQUARE && ent.type <= ENT_COL_KILL_ZONE) {
+                if (editorMode) {
+                    Color colTint = Color{ 0, 180, 255, 140 }; // Solid Wall
+                    if (ent.colBehavior == 1 || ent.type == ENT_COL_FALL_ZONE) colTint = Color{ 255, 160, 0, 140 }; // Fall Zone
+                    else if (ent.colBehavior == 2 || ent.type == ENT_COL_KILL_ZONE) colTint = Color{ 240, 40, 40, 160 }; // Kill Zone
+                    else if (ent.colBehavior == 3) colTint = Color{ 220, 50, 220, 150 }; // Bounce Pad
+
+                    rlPushMatrix();
+                    rlTranslatef(animPos.x, animPos.y, animPos.z);
+                    rlRotatef(animYaw, 0.0f, 1.0f, 0.0f);
+                    float hx = (ent.sizeX > 0.05f) ? ent.sizeX : ent.radius;
+                    float hz = (ent.sizeZ > 0.05f) ? ent.sizeZ : ent.radius;
+                    float hy = (ent.sizeY > 0.05f) ? ent.sizeY : 2.0f;
+                    if (ent.type == ENT_COL_CIRCLE || ent.type == ENT_COL_CYLINDER) {
+                        DrawCylinderWires(Vector3{ 0, 0, 0 }, hx, hx, hy * 2.0f, 16, colTint);
+                    } else if (ent.type == ENT_COL_SPHERE) {
+                        DrawSphereWires(Vector3{ 0, 0, 0 }, hx, 12, 12, colTint);
+                    } else {
+                        DrawCubeWires(Vector3{ 0, 0, 0 }, hx * 2.0f, hy * 2.0f, hz * 2.0f, colTint);
+                    }
+                    rlPopMatrix();
+                }
+                continue;
+            }
+
+            if (ent.model != nullptr) {
                 rlPushMatrix();
                 rlTranslatef(animPos.x, animPos.y, animPos.z);
                 rlRotatef(animYaw, 0.0f, 1.0f, 0.0f);
                 if (fabsf(animPitch) > 0.01f) rlRotatef(animPitch, 1.0f, 0.0f, 0.0f);
                 if (fabsf(animRoll)  > 0.01f) rlRotatef(animRoll,  0.0f, 0.0f, 1.0f);
                 float s = (ent.scale > 0.01f) ? ent.scale : 1.0f;
-                rlScalef(s, s, s);
+                rlScalef(s * (float)ent.flipX, s * (float)ent.flipY, s * (float)ent.flipZ);
                 int isTreeFlag = (ent.type == ENT_TREE_JUNGLE) ? 1 : 0;
                 SetShaderValue(shaderLighting, uIsJungleTreeLoc, &isTreeFlag, SHADER_UNIFORM_INT);
                 DrawModel(*ent.model, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
@@ -3136,12 +3467,18 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                         BoundingBox selBBox = { Vector3Subtract(oPos, Vector3{ r, 1.4f, r }), Vector3Add(oPos, Vector3{ r, 1.4f, r }) };
                         DrawBoundingBox(selBBox, YELLOW);
 
-                        DrawLine3D(oPos, Vector3Add(oPos, Vector3{ 2.2f, 0, 0 }), RED);   // X Axis (Red)
-                        DrawLine3D(oPos, Vector3Add(oPos, Vector3{ 0, 2.2f, 0 }), GREEN); // Y Axis (Green)
-                        DrawLine3D(oPos, Vector3Add(oPos, Vector3{ 0, 0, 2.2f }), BLUE);  // Z Axis (Blue)
-                        DrawSphere(Vector3Add(oPos, Vector3{ 2.2f, 0, 0 }), 0.15f, RED);
-                        DrawSphere(Vector3Add(oPos, Vector3{ 0, 2.2f, 0 }), 0.15f, GREEN);
-                        DrawSphere(Vector3Add(oPos, Vector3{ 0, 0, 2.2f }), 0.15f, BLUE);
+                        // Task 5: 3D Interactive Gizmo with X/Y/Z arrows and negative Flip cubes!
+                        DrawLine3D(oPos, Vector3Add(oPos, Vector3{ 3.2f, 0, 0 }), RED);
+                        DrawLine3D(oPos, Vector3Add(oPos, Vector3{ 0, 3.2f, 0 }), GREEN);
+                        DrawLine3D(oPos, Vector3Add(oPos, Vector3{ 0, 0, 3.2f }), BLUE);
+                        DrawSphere(Vector3Add(oPos, Vector3{ 3.2f, 0, 0 }), 0.22f, RED);
+                        DrawSphere(Vector3Add(oPos, Vector3{ 0, 3.2f, 0 }), 0.22f, GREEN);
+                        DrawSphere(Vector3Add(oPos, Vector3{ 0, 0, 3.2f }), 0.22f, BLUE);
+
+                        // Negative Flip handles (-X, -Y, -Z)
+                        DrawCube(Vector3Add(oPos, Vector3{ -1.8f, 0, 0 }), 0.35f, 0.35f, 0.35f, Color{ 220, 50, 50, 220 });
+                        DrawCube(Vector3Add(oPos, Vector3{ 0, -1.8f, 0 }), 0.35f, 0.35f, 0.35f, Color{ 50, 200, 50, 220 });
+                        DrawCube(Vector3Add(oPos, Vector3{ 0, 0, -1.8f }), 0.35f, 0.35f, 0.35f, Color{ 50, 100, 220, 220 });
                     }
                 }
             }
@@ -3189,11 +3526,13 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             DrawRectangle(trackStartX, trackY, trackWidth, 5, Color{ 255, 255, 255, 230 });
             DrawRectangleLines(trackStartX, trackY, trackWidth, 5, Color{ 15, 23, 42, 200 });
 
-            for (size_t cp = 0; cp < checkpoints.size(); cp++) {
-                float cpT = FindClosestSplineT(checkpoints[cp].pos);
-                float frac = Clamp(cpT / (float)(SPLINE_POINT_COUNT - 1), 0.0f, 1.0f);
-                int tickX = trackStartX + (int)(trackWidth * frac);
-                DrawRectangle(tickX - 1, trackY - 3, 3, 11, checkpoints[cp].passed ? COLOR_ACCENT_GREEN : Color{ 30, 41, 59, 255 });
+            for (const auto& ent : levelEntities) {
+                if (ent.type == ENT_CHECKPOINT) {
+                    float cpT = FindClosestSplineT(ent.position);
+                    float frac = Clamp(cpT / (float)(SPLINE_POINT_COUNT - 1), 0.0f, 1.0f);
+                    int tickX = trackStartX + (int)(trackWidth * frac);
+                    DrawRectangle(tickX - 1, trackY - 3, 3, 11, ent.cpPassed ? COLOR_ACCENT_GREEN : Color{ 30, 41, 59, 255 });
+                }
             }
 
             DrawTexturePro(texFinish, Rectangle{ 0, 0, (float)texFinish.width, (float)texFinish.height },
@@ -3307,153 +3646,418 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             }
         }
 
-        // 6. Interactive 3D Level Editor Inspector Panel (Authentic Godot 4 Engine Style)
+        // 6. Professional Godot 4-Dock Editor Architecture (Plan v6.0 Task 5)
         if (editorMode) {
-            float panelW = 340.0f;
-            float panelH = 820.0f;
-            Rectangle panelRec = { (float)GetScreenWidth() - panelW - 14, 52, panelW, panelH };
+            float screenW = (float)GetScreenWidth();
+            float screenH = (float)GetScreenHeight();
 
-            auto DrawGodotBtn = [&](Rectangle rec, const char* label, Color bgCol, Color textCol, bool bold = false) -> bool {
+            auto DrawGButton = [&](Rectangle rec, const char* label, Color bgCol, Color textCol, bool bold = false) -> bool {
                 bool hov = CheckCollisionPointRec(mousePos, rec);
-                Color fill = hov ? ColorBrightness(bgCol, 0.18f) : bgCol;
+                Color fill = hov ? ColorBrightness(bgCol, 0.20f) : bgCol;
                 DrawRectangleRounded(rec, 0.2f, 3, fill);
                 DrawRectangleRoundedLinesEx(rec, 0.2f, 3, 1.0f, ColorBrightness(bgCol, 0.35f));
                 Font f = bold ? fontUIBold : fontUI;
-                Vector2 sz = MeasureTextEx(f, label, 13, 0.3f);
-                DrawTextEx(f, label, Vector2{ rec.x + (rec.width - sz.x) * 0.5f, rec.y + (rec.height - sz.y) * 0.5f }, 13, 0.3f, textCol);
+                Vector2 sz = MeasureTextEx(f, label, 12, 0.3f);
+                DrawTextEx(f, label, Vector2{ rec.x + (rec.width - sz.x) * 0.5f, rec.y + (rec.height - sz.y) * 0.5f }, 12, 0.3f, textCol);
                 return hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
             };
 
-            // Inspector Collapse/Expand Arrow Button
-            Rectangle collapseBtn = { inspectorCollapsed ? ((float)GetScreenWidth() - 32.0f) : (panelRec.x - 28.0f), 60.0f, 28.0f, 48.0f };
-            if (DrawGodotBtn(collapseBtn, inspectorCollapsed ? "<" : ">", Color{ 32, 38, 52, 255 }, WHITE, true)) {
+            // -------------------------------------------------------------
+            // A. TOP TOOLBAR (Height 42px)
+            // -------------------------------------------------------------
+            Rectangle topBarRec = { 0, 0, screenW, 42.0f };
+            DrawRectangleRec(topBarRec, Color{ 24, 28, 38, 252 });
+            DrawLine(0, 42, (int)screenW, 42, Color{ 52, 60, 78, 255 });
+
+            float bx = 12.0f;
+            // Tool modes: Select, Move, Rotate, Scale
+            const char* tools[] = { "[Q] Select", "[W] Move", "[E] Rotate", "[R] Scale" };
+            for (int tm = 0; tm < 4; tm++) {
+                Rectangle bRec = { bx, 7.0f, 75.0f, 28.0f };
+                bool active = (editorGizmoMode == tm);
+                Color bCol = active ? Color{ 48, 120, 200, 255 } : Color{ 36, 43, 58, 255 };
+                if (DrawGButton(bRec, tools[tm], bCol, WHITE, active)) {
+                    editorGizmoMode = tm;
+                }
+                bx += 79.0f;
+            }
+            if (IsKeyPressed(KEY_Q)) editorGizmoMode = 0;
+            if (IsKeyPressed(KEY_W)) editorGizmoMode = 1;
+            if (IsKeyPressed(KEY_E)) editorGizmoMode = 2;
+            if (IsKeyPressed(KEY_R)) editorGizmoMode = 3;
+
+            DrawLine((int)bx + 4, 8, (int)bx + 4, 34, Color{ 60, 70, 90, 255 });
+            bx += 12.0f;
+
+            // Instant Axis Flip Buttons (Flip X, Flip Y, Flip Z)
+            Rectangle bFlipX = { bx, 7.0f, 62.0f, 28.0f }; bx += 66.0f;
+            Rectangle bFlipY = { bx, 7.0f, 62.0f, 28.0f }; bx += 66.0f;
+            Rectangle bFlipZ = { bx, 7.0f, 62.0f, 28.0f }; bx += 70.0f;
+
+            if (selectedObs >= 0 && selectedObs < (int)levelEntities.size()) {
+                auto& sel = levelEntities[selectedObs];
+                if (DrawGButton(bFlipX, "Flip X", Color{ 180, 50, 50, 255 }, WHITE, true)) {
+                    sel.flipX *= -1;
+                    sel.rotationY = fmodf(-sel.rotationY + 360.0f, 360.0f);
+                    editorMsg = "Flipped Object along X Axis!";
+                    editorMsgTimer = 2.0f;
+                }
+                if (DrawGButton(bFlipY, "Flip Y", Color{ 45, 150, 60, 255 }, WHITE, true)) {
+                    sel.flipY *= -1;
+                    sel.rotationZ = fmodf(sel.rotationZ + 180.0f, 360.0f);
+                    editorMsg = "Flipped Object along Y Axis!";
+                    editorMsgTimer = 2.0f;
+                }
+                if (DrawGButton(bFlipZ, "Flip Z", Color{ 45, 90, 180, 255 }, WHITE, true)) {
+                    sel.flipZ *= -1;
+                    sel.rotationY = fmodf(sel.rotationY + 180.0f, 360.0f);
+                    editorMsg = "Flipped Object along Z Axis!";
+                    editorMsgTimer = 2.0f;
+                }
+            } else {
+                DrawGButton(bFlipX, "Flip X", Color{ 50, 40, 40, 180 }, Color{ 150, 150, 150, 255 });
+                DrawGButton(bFlipY, "Flip Y", Color{ 40, 50, 40, 180 }, Color{ 150, 150, 150, 255 });
+                DrawGButton(bFlipZ, "Flip Z", Color{ 40, 40, 50, 180 }, Color{ 150, 150, 150, 255 });
+            }
+
+            DrawLine((int)bx + 4, 8, (int)bx + 4, 34, Color{ 60, 70, 90, 255 });
+            bx += 12.0f;
+
+            // Visual Obstacle Catalog Toggle Button
+            Rectangle bCat = { bx, 7.0f, 130.0f, 28.0f }; bx += 136.0f;
+            Color catBg = visualCatalogOpen ? Color{ 160, 90, 30, 255 } : Color{ 36, 43, 58, 255 };
+            if (DrawGButton(bCat, visualCatalogOpen ? "* Catalog: OPEN" : "+ Visual Catalog", catBg, WHITE, true)) {
+                visualCatalogOpen = !visualCatalogOpen;
+            }
+
+            // Purge Hidden Obstacles Button
+            Rectangle bPurge = { bx, 7.0f, 105.0f, 28.0f }; bx += 112.0f;
+            if (DrawGButton(bPurge, "Purge Hidden", Color{ 120, 50, 50, 255 }, WHITE, true)) {
+                int purged = 0;
+                for (int i = (int)levelEntities.size() - 1; i >= 0; i--) {
+                    if (levelEntities[i].position.y < -1.0f) {
+                        levelEntities.erase(levelEntities.begin() + i);
+                        purged++;
+                    }
+                }
+                editorMsg = TextFormat("Purged %d hidden entities!", purged);
+                editorMsgTimer = 2.5f;
+            }
+
+            // Right side of top toolbar: Motion toggle, Save, Play Mode
+            float rbx = screenW - 130.0f;
+            Rectangle bPlay = { rbx, 7.0f, 118.0f, 28.0f }; rbx -= 150.0f;
+            if (DrawGButton(bPlay, "Play Mode (F1)", Color{ 37, 99, 235, 255 }, WHITE, true) || IsKeyPressed(KEY_F1)) {
+                editorMode = false;
+            }
+
+            Rectangle bSave = { rbx, 7.0f, 142.0f, 28.0f }; rbx -= 160.0f;
+            if (DrawGButton(bSave, "Save All (Ctrl+S)", Color{ 34, 139, 34, 255 }, WHITE, true) || (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_S))) {
+                SaveLevelLayoutJSON(LEVEL_LAYOUT_PATH, levelEntities);
+                SavePhysicsConfigJSON("physics_config.json");
+                editorMsg = "Saved Level & Physics to JSON!";
+                editorMsgTimer = 3.0f;
+            }
+
+            Rectangle bMotion = { rbx, 7.0f, 152.0f, 28.0f };
+            Color motCol = editorAnimateObstacles ? Color{ 46, 128, 76, 255 } : Color{ 120, 48, 56, 255 };
+            const char* motLbl = editorAnimateObstacles ? "Motion: NATURAL (P)" : "Motion: FROZEN (P)";
+            if (DrawGButton(bMotion, motLbl, motCol, WHITE, true) || IsKeyPressed(KEY_P)) {
+                editorAnimateObstacles = !editorAnimateObstacles;
+                editorMsg = editorAnimateObstacles ? "Obstacle Motion: NATURAL (1.0x)" : "Obstacle Motion: FROZEN";
+                editorMsgTimer = 2.0f;
+            }
+
+            // -------------------------------------------------------------
+            // B. LEFT DOCK: COLLISION SHAPES & SCENE HIERARCHY (Width 270px)
+            // -------------------------------------------------------------
+            float leftDockW = 270.0f;
+            Rectangle leftCollapseBtn = { leftDockCollapsed ? 0.0f : leftDockW, 46.0f, 22.0f, 40.0f };
+            if (DrawGButton(leftCollapseBtn, leftDockCollapsed ? ">" : "<", Color{ 32, 38, 52, 255 }, WHITE, true)) {
+                leftDockCollapsed = !leftDockCollapsed;
+            }
+
+            if (!leftDockCollapsed) {
+                Rectangle leftRec = { 0, 42.0f, leftDockW, screenH - 42.0f };
+                DrawRectangleRec(leftRec, Color{ 28, 33, 44, 252 });
+                DrawLine((int)leftDockW, 42, (int)leftDockW, (int)screenH, Color{ 52, 60, 78, 255 });
+
+                float ly = 50.0f;
+                // Header
+                DrawTextEx(fontUIBold, "Collision Shapes (10 Types)", Vector2{ 12.0f, ly }, 13, 0.4f, Color{ 255, 215, 0, 255 });
+                ly += 22.0f;
+
+                // 10 Custom Collision Shape Buttons (2 columns)
+                const char* shapeNames[] = {
+                    "+ Square", "+ Rect Wall",
+                    "+ Circle", "+ 3D Cube",
+                    "+ Cylinder", "+ Capsule",
+                    "+ Sphere", "+ Wedge Ramp",
+                    "+ Fall Zone", "+ Kill Box"
+                };
+                EntityType shapeTypes[] = {
+                    ENT_COL_SQUARE, ENT_COL_RECT,
+                    ENT_COL_CIRCLE, ENT_COL_CUBE,
+                    ENT_COL_CYLINDER, ENT_COL_CAPSULE,
+                    ENT_COL_SPHERE, ENT_COL_WEDGE,
+                    ENT_COL_FALL_ZONE, ENT_COL_KILL_ZONE
+                };
+
+                for (int s = 0; s < 10; s += 2) {
+                    Rectangle b1 = { 10.0f, ly, 120.0f, 24.0f };
+                    Rectangle b2 = { 136.0f, ly, 120.0f, 24.0f };
+                    Color cBg = (s >= 8) ? Color{ 140, 50, 40, 255 } : Color{ 40, 55, 80, 255 };
+
+                    auto SpawnShape = [&](EntityType st, int beh) {
+                        LevelEntity ne{};
+                        ne.id = (int)levelEntities.size();
+                        ne.type = st;
+                        Vector3 fwd = { -sinf(editorCamYaw) * cosf(editorCamPitch), sinf(editorCamPitch), -cosf(editorCamYaw) * cosf(editorCamPitch) };
+                        ne.position = Vector3Add(editorCamPos, Vector3Scale(fwd, 6.0f));
+                        ne.scale = 1.0f;
+                        ne.sizeX = 2.0f; ne.sizeY = 2.0f; ne.sizeZ = 2.0f;
+                        ne.radius = 2.0f;
+                        ne.flipX = 1; ne.flipY = 1; ne.flipZ = 1;
+                        ne.colBehavior = beh;
+                        AssignEntityModelAndProps(ne);
+                        levelEntities.push_back(ne);
+                        selectedObs = (int)levelEntities.size() - 1;
+                        editorMsg = TextFormat("Spawned %s!", ENTITY_TYPE_NAMES[st]);
+                        editorMsgTimer = 2.0f;
+                    };
+
+                    if (DrawGButton(b1, shapeNames[s], cBg, WHITE)) {
+                        SpawnShape(shapeTypes[s], (shapeTypes[s] == ENT_COL_FALL_ZONE) ? 1 : ((shapeTypes[s] == ENT_COL_KILL_ZONE) ? 2 : 0));
+                    }
+                    if (DrawGButton(b2, shapeNames[s+1], cBg, WHITE)) {
+                        SpawnShape(shapeTypes[s+1], (shapeTypes[s+1] == ENT_COL_FALL_ZONE) ? 1 : ((shapeTypes[s+1] == ENT_COL_KILL_ZONE) ? 2 : 0));
+                    }
+                    ly += 27.0f;
+                }
+
+                ly += 8.0f;
+                DrawLine(10, (int)ly, (int)leftDockW - 10, (int)ly, Color{ 52, 60, 78, 255 });
+                ly += 10.0f;
+
+                // Collider Behavior Section
+                DrawTextEx(fontUIBold, "Collider Behavior:", Vector2{ 12.0f, ly }, 12, 0.4f, Color{ 142, 202, 230, 255 });
+                ly += 20.0f;
+                const char* behNames[] = { "Solid Wall", "Fall Abyss", "Kill Boat", "Bounce Pad" };
+                Color behCols[] = { Color{ 30, 80, 140, 255 }, Color{ 160, 90, 20, 255 }, Color{ 160, 30, 30, 255 }, Color{ 130, 40, 130, 255 } };
+                for (int b = 0; b < 4; b += 2) {
+                    Rectangle b1 = { 10.0f, ly, 120.0f, 22.0f };
+                    Rectangle b2 = { 136.0f, ly, 120.0f, 22.0f };
+                    if (selectedObs >= 0 && selectedObs < (int)levelEntities.size()) {
+                        auto& sel = levelEntities[selectedObs];
+                        if (DrawGButton(b1, behNames[b], (sel.colBehavior == b) ? ColorBrightness(behCols[b], 0.3f) : behCols[b], WHITE, sel.colBehavior == b)) {
+                            sel.colBehavior = b;
+                            editorMsg = TextFormat("Set Behavior: %s", behNames[b]);
+                            editorMsgTimer = 2.0f;
+                        }
+                        if (DrawGButton(b2, behNames[b+1], (sel.colBehavior == b+1) ? ColorBrightness(behCols[b+1], 0.3f) : behCols[b+1], WHITE, sel.colBehavior == b+1)) {
+                            sel.colBehavior = b + 1;
+                            editorMsg = TextFormat("Set Behavior: %s", behNames[b+1]);
+                            editorMsgTimer = 2.0f;
+                        }
+                    } else {
+                        DrawGButton(b1, behNames[b], Color{ 40, 45, 55, 180 }, Color{ 140, 140, 140, 255 });
+                        DrawGButton(b2, behNames[b+1], Color{ 40, 45, 55, 180 }, Color{ 140, 140, 140, 255 });
+                    }
+                    ly += 25.0f;
+                }
+
+                ly += 8.0f;
+                DrawLine(10, (int)ly, (int)leftDockW - 10, (int)ly, Color{ 52, 60, 78, 255 });
+                ly += 10.0f;
+
+                // Scene Hierarchy Section
+                DrawTextEx(fontUIBold, TextFormat("Scene Hierarchy (%d Entities):", (int)levelEntities.size()), Vector2{ 12.0f, ly }, 12, 0.4f, Color{ 220, 225, 235, 255 });
+                ly += 20.0f;
+
+                // Hierarchy scroll handling
+                if (mousePos.x > 0 && mousePos.x < leftDockW && mousePos.y > ly) {
+                    hierarchyScroll -= (int)(GetMouseWheelMove() * 3.0f);
+                    hierarchyScroll = Clamp(hierarchyScroll, 0, fmaxf(0, (int)levelEntities.size() - 8));
+                }
+
+                int maxVisible = 9;
+                for (int i = hierarchyScroll; i < (int)levelEntities.size() && i < hierarchyScroll + maxVisible; i++) {
+                    Rectangle hRec = { 10.0f, ly, leftDockW - 20.0f, 22.0f };
+                    bool isSel = (selectedObs == i);
+                    Color hCol = isSel ? Color{ 48, 120, 200, 255 } : Color{ 34, 40, 52, 255 };
+                    std::string hLbl = TextFormat("#%d %s", i, ENTITY_TYPE_NAMES[levelEntities[i].type]);
+                    if (hLbl.length() > 24) hLbl = hLbl.substr(0, 22) + "..";
+                    if (DrawGButton(hRec, hLbl.c_str(), hCol, WHITE, isSel)) {
+                        selectedObs = i;
+                    }
+                    ly += 24.0f;
+                }
+
+                if (selectedObs >= 0 && selectedObs < (int)levelEntities.size()) {
+                    Rectangle btnFoc = { 10.0f, screenH - 36.0f, leftDockW - 20.0f, 26.0f };
+                    if (DrawGButton(btnFoc, "Focus Camera (F)", Color{ 40, 100, 70, 255 }, WHITE, true)) {
+                        editorCamPos = Vector3Add(levelEntities[selectedObs].position, Vector3{ 0.0f, 3.5f, 6.0f });
+                        editorCamYaw = 3.14159f;
+                        editorCamPitch = 0.35f;
+                    }
+                }
+            }
+
+            // -------------------------------------------------------------
+            // C. VERTICAL VISUAL OBSTACLE CATALOG (Stacking vertically one under another)
+            // -------------------------------------------------------------
+            if (visualCatalogOpen) {
+                float catW = 230.0f;
+                float catX = leftDockCollapsed ? 12.0f : (leftDockW + 10.0f);
+                float catY = 48.0f;
+                float catH = screenH - 58.0f;
+                Rectangle catRec = { catX, catY, catW, catH };
+
+                DrawRectangleRounded(catRec, 0.04f, 4, Color{ 18, 22, 32, 252 });
+                DrawRectangleRoundedLinesEx(catRec, 0.04f, 4, 1.2f, Color{ 71, 140, 191, 255 });
+
+                DrawTextEx(fontUIBold, "Obstacle Catalog (Vertical)", Vector2{ catX + 12.0f, catY + 10.0f }, 12, 0.4f, Color{ 255, 215, 0, 255 });
+                DrawLine((int)catX + 8, (int)catY + 30, (int)catX + (int)catW - 8, (int)catY + 30, Color{ 52, 60, 78, 255 });
+
+                // Scroll handling for catalog
+                if (CheckCollisionPointRec(mousePos, catRec)) {
+                    catalogScroll -= (int)(GetMouseWheelMove() * 2.0f);
+                    catalogScroll = Clamp(catalogScroll, 0, fmaxf(0, 19 - 9));
+                }
+
+                float cy = catY + 36.0f;
+                const char* catObstacleNames[] = {
+                    "OBS_A1 Bumper", "OBS_B2 Tipping", "OBS_B3 Spinner", "OBS_B5 Rotor",
+                    "OBS_C1 Spiked Arc", "OBS_C2 Pendulum", "OBS_C4 Quad Mace", "OBS_C5 Wheel",
+                    "OBS_F3 Swing Gate", "OBS_F10 Hammer Gate", "OBS_F11 Spiked Drum", "OBS_F13 Rotating Arm",
+                    "OBS_F14 Slider", "OBS_F18 Post", "OBS_F23 Dual Gate",
+                    "Rock Dark 1", "Rock Dark 2", "Wind Gust",
+                    "CHECKPOINT Gate", "Jungle Tree"
+                };
+
+                for (int ci = catalogScroll; ci < 20 && ci < catalogScroll + 10; ci++) {
+                    Rectangle cCard = { catX + 8.0f, cy, catW - 16.0f, 48.0f };
+                    DrawRectangleRounded(cCard, 0.15f, 3, Color{ 28, 34, 48, 255 });
+                    DrawRectangleRoundedLinesEx(cCard, 0.15f, 3, 1.0f, Color{ 48, 58, 80, 255 });
+
+                    // Colored icon indicator
+                    Color icColor = (ci == 18) ? Color{ 46, 204, 113, 255 } : ((ci == 9) ? Color{ 240, 90, 120, 255 } : Color{ 70, 130, 210, 255 });
+                    DrawRectangle((int)cCard.x + 6, (int)cCard.y + 6, 36, 36, Color{ 14, 18, 26, 255 });
+                    DrawRectangleLines((int)cCard.x + 6, (int)cCard.y + 6, 36, 36, icColor);
+                    DrawCircle((int)cCard.x + 24, (int)cCard.y + 24, 10.0f, icColor);
+
+                    DrawTextEx(fontUIBold, catObstacleNames[ci], Vector2{ cCard.x + 48.0f, cCard.y + 10.0f }, 11, 0.3f, WHITE);
+
+                    Rectangle bSpawn = { cCard.x + 48.0f, cCard.y + 26.0f, 60.0f, 16.0f };
+                    if (DrawGButton(bSpawn, "+ Spawn", Color{ 36, 90, 150, 255 }, WHITE)) {
+                        LevelEntity ne{};
+                        ne.id = (int)levelEntities.size();
+                        ne.type = (EntityType)ci;
+                        Vector3 fwd = { -sinf(editorCamYaw) * cosf(editorCamPitch), sinf(editorCamPitch), -cosf(editorCamYaw) * cosf(editorCamPitch) };
+                        ne.position = Vector3Add(editorCamPos, Vector3Scale(fwd, 6.0f));
+                        ne.scale = 1.0f;
+                        ne.flipX = 1; ne.flipY = 1; ne.flipZ = 1;
+                        AssignEntityModelAndProps(ne);
+                        levelEntities.push_back(ne);
+                        selectedObs = (int)levelEntities.size() - 1;
+                        editorMsg = TextFormat("Spawned %s!", catObstacleNames[ci]);
+                        editorMsgTimer = 2.0f;
+                    }
+
+                    cy += 54.0f;
+                }
+            }
+
+            // -------------------------------------------------------------
+            // D. RIGHT DOCK: GODOT INSPECTOR & PHYSICS (Width 320px)
+            // -------------------------------------------------------------
+            float rightDockW = 320.0f;
+            Rectangle rightCollapseBtn = { inspectorCollapsed ? (screenW - 22.0f) : (screenW - rightDockW - 22.0f), 46.0f, 22.0f, 40.0f };
+            if (DrawGButton(rightCollapseBtn, inspectorCollapsed ? "<" : ">", Color{ 32, 38, 52, 255 }, WHITE, true)) {
                 inspectorCollapsed = !inspectorCollapsed;
             }
 
             if (!inspectorCollapsed) {
-                // Drop Shadow & Panel Background
-                DrawRectangleRounded(Rectangle{ panelRec.x + 3, panelRec.y + 4, panelW, panelH }, 0.02f, 4, Color{ 0, 0, 0, 90 });
-                DrawRectangleRounded(panelRec, 0.02f, 4, Color{ 32, 37, 49, 252 });
-                DrawRectangleRoundedLinesEx(panelRec, 0.02f, 4, 1.0f, Color{ 58, 66, 83, 255 });
+                Rectangle rightRec = { screenW - rightDockW, 42.0f, rightDockW, screenH - 42.0f };
+                DrawRectangleRec(rightRec, Color{ 28, 33, 44, 252 });
+                DrawLine((int)rightRec.x, 42, (int)rightRec.x, (int)screenH, Color{ 52, 60, 78, 255 });
 
-                // Dock Tab Bar
-                Rectangle tabRec = { panelRec.x, panelRec.y, 115, 30 };
-                DrawRectangleRec(Rectangle{ panelRec.x, panelRec.y, panelW, 30 }, Color{ 25, 29, 38, 255 });
-                DrawRectangleRec(tabRec, Color{ 32, 37, 49, 255 });
-                DrawRectangle((int)tabRec.x, (int)tabRec.y + 28, (int)tabRec.width, 2, Color{ 71, 140, 191, 255 });
-                DrawTextEx(fontUIBold, "Inspector", Vector2{ tabRec.x + 18, tabRec.y + 7 }, 14, 0.4f, Color{ 240, 243, 246, 255 });
-                DrawTextEx(fontUI, "3D Level View", Vector2{ panelRec.x + panelW - 105, tabRec.y + 8 }, 12, 0.3f, Color{ 140, 148, 163, 255 });
-                DrawLine((int)panelRec.x, (int)panelRec.y + 30, (int)panelRec.x + (int)panelW, (int)panelRec.y + 30, Color{ 58, 66, 83, 255 });
-
-                float py = panelRec.y + 36;
+                float ry = 48.0f;
+                // Tab Header
+                DrawTextEx(fontUIBold, "Inspector & Transform", Vector2{ rightRec.x + 14.0f, ry }, 13, 0.4f, Color{ 240, 243, 246, 255 });
+                ry += 20.0f;
 
                 // 3D Live Model Preview Viewport
-                DrawRectangle((int)panelRec.x + 12, (int)py, 280, 125, Color{ 14, 18, 24, 255 });
-                DrawTextureRec(previewRT.texture, Rectangle{ 0, 0, (float)previewRT.texture.width, -(float)previewRT.texture.height }, Vector2{ panelRec.x + 12, py }, WHITE);
-                DrawRectangleLines((int)panelRec.x + 12, (int)py, 280, 125, Color{ 60, 72, 95, 255 });
-                py += 132;
-
-                // Dedicated Natural Obstacle Motion Toggle Button in Panel
-                Rectangle btnPanelMotion = { panelRec.x + 12, py, panelW - 24, 28 };
-                const char* panelMotionLbl = editorAnimateObstacles ? "â–¶ Natural Motion: ACTIVE (P)" : "â¸ Natural Motion: PAUSED (P)";
-                Color panelMotionCol = editorAnimateObstacles ? Color{ 42, 128, 76, 255 } : Color{ 120, 48, 56, 255 };
-                if (DrawGodotBtn(btnPanelMotion, panelMotionLbl, panelMotionCol, WHITE, true)) {
-                    editorAnimateObstacles = !editorAnimateObstacles;
-                    editorMsg = editorAnimateObstacles ? "Obstacle Motion: PLAYING (Natural)" : "Obstacle Motion: PAUSED";
-                    editorMsgTimer = 2.5f;
-                }
-                py += 34;
+                DrawRectangle((int)rightRec.x + 12, (int)ry, 296, 115, Color{ 14, 18, 24, 255 });
+                DrawTextureRec(previewRT.texture, Rectangle{ 0, 0, (float)previewRT.texture.width, -(float)previewRT.texture.height }, Vector2{ rightRec.x + 12, ry }, WHITE);
+                DrawRectangleLines((int)rightRec.x + 12, (int)ry, 296, 115, Color{ 60, 72, 95, 255 });
+                ry += 122.0f;
 
                 if (selectedObs >= 0 && selectedObs < (int)levelEntities.size()) {
                     auto& o = levelEntities[selectedObs];
-                    DrawTextEx(fontUIBold, TextFormat("Selected: #%d (%s)", selectedObs, ENTITY_TYPE_NAMES[o.type]), Vector2{ panelRec.x + 14, py }, 13, 0.5f, Color{ 142, 202, 230, 255 });
-                    py += 22;
+                    DrawTextEx(fontUIBold, TextFormat("Selected: #%d (%s)", selectedObs, ENTITY_TYPE_NAMES[o.type]), Vector2{ rightRec.x + 14, ry }, 12, 0.4f, Color{ 142, 202, 230, 255 });
+                    ry += 20.0f;
 
-                    // Entity Type Switcher
-                    DrawTextEx(fontUI, "Entity Type:", Vector2{ panelRec.x + 14, py }, 11, 0.3f, Color{ 180, 190, 205, 255 });
-                    py += 15;
-                    Rectangle btnPrevType = { panelRec.x + 12, py, 120, 24 };
-                    Rectangle btnNextType = { panelRec.x + 140, py, 120, 24 };
-                    if (DrawGodotBtn(btnPrevType, "< Prev Type", Color{ 36, 43, 58, 255 }, WHITE, true)) {
+                    // Type switcher
+                    Rectangle btnPrev = { rightRec.x + 12, ry, 140, 22 };
+                    Rectangle btnNext = { rightRec.x + 164, ry, 140, 22 };
+                    if (DrawGButton(btnPrev, "< Prev Type", Color{ 36, 43, 58, 255 }, WHITE, true)) {
                         o.type = (EntityType)(((int)o.type - 1 + ENT_COUNT) % ENT_COUNT);
                         AssignEntityModelAndProps(o);
-                        editorMsg = TextFormat("Type: %s", ENTITY_TYPE_NAMES[o.type]);
-                        editorMsgTimer = 2.0f;
                     }
-                    if (DrawGodotBtn(btnNextType, "Next Type >", Color{ 36, 43, 58, 255 }, WHITE, true)) {
+                    if (DrawGButton(btnNext, "Next Type >", Color{ 36, 43, 58, 255 }, WHITE, true)) {
                         o.type = (EntityType)(((int)o.type + 1) % ENT_COUNT);
                         AssignEntityModelAndProps(o);
-                        editorMsg = TextFormat("Type: %s", ENTITY_TYPE_NAMES[o.type]);
-                        editorMsgTimer = 2.0f;
                     }
-                    py += 28;
+                    ry += 26.0f;
 
-                    // Scale Controls
-                    DrawTextEx(fontUI, TextFormat("Scale: %.2fx (Radius: %.2fm)", o.scale, o.radius), Vector2{ panelRec.x + 14, py }, 11, 0.3f, Color{ 220, 225, 235, 255 });
-                    py += 16;
-                    Rectangle btnScM = { panelRec.x + 12, py, 75, 22 };
-                    Rectangle btnScP = { panelRec.x + 92, py, 75, 22 };
-                    Rectangle btnScR = { panelRec.x + 172, py, 88, 22 };
-                    if (DrawGodotBtn(btnScM, "Scale -0.1", Color{ 36, 43, 58, 255 }, WHITE, true) || IsKeyPressed(KEY_LEFT_BRACKET)) {
-                        o.scale = Clamp(o.scale - 0.1f, 0.2f, 3.5f);
-                        AssignEntityModelAndProps(o);
-                    }
-                    if (DrawGodotBtn(btnScP, "Scale +0.1", Color{ 36, 43, 58, 255 }, WHITE, true) || IsKeyPressed(KEY_RIGHT_BRACKET)) {
-                        o.scale = Clamp(o.scale + 0.1f, 0.2f, 3.5f);
-                        AssignEntityModelAndProps(o);
-                    }
-                    if (DrawGodotBtn(btnScR, "Reset 1.0x", Color{ 36, 43, 58, 255 }, WHITE, true)) {
-                        o.scale = 1.0f;
-                        AssignEntityModelAndProps(o);
-                    }
-                    py += 26;
+                    // Position Controls
+                    DrawTextEx(fontUI, TextFormat("Position: (%.2f, %.2f, %.2f)", o.position.x, o.position.y, o.position.z), Vector2{ rightRec.x + 14, ry }, 11, 0.3f, Color{ 220, 225, 235, 255 });
+                    ry += 15.0f;
+                    Rectangle bXm = { rightRec.x + 12, ry, 68, 20 };
+                    Rectangle bXp = { rightRec.x + 84, ry, 68, 20 };
+                    Rectangle bZm = { rightRec.x + 158, ry, 68, 20 };
+                    Rectangle bZp = { rightRec.x + 230, ry, 68, 20 };
+                    if (DrawGButton(bXm, "X -", Color{ 36, 43, 58, 255 }, WHITE)) o.position.x -= 0.5f;
+                    if (DrawGButton(bXp, "X +", Color{ 36, 43, 58, 255 }, WHITE)) o.position.x += 0.5f;
+                    if (DrawGButton(bZm, "Z -", Color{ 36, 43, 58, 255 }, WHITE)) o.position.z -= 0.5f;
+                    if (DrawGButton(bZp, "Z +", Color{ 36, 43, 58, 255 }, WHITE)) o.position.z += 0.5f;
+                    ry += 24.0f;
 
-                    // Obstacle Animation Speed & Natural Motion Reset
-                    DrawTextEx(fontUI, TextFormat("Animation Speed: %.1fx (%s)", o.animSpeed, (o.animSpeed > 0.05f ? "Natural" : "Stopped")), Vector2{ panelRec.x + 14, py }, 11, 0.3f, Color{ 220, 225, 235, 255 });
-                    py += 15;
-                    Rectangle btnSpdM = { panelRec.x + 12, py, 75, 22 };
-                    Rectangle btnSpdP = { panelRec.x + 92, py, 75, 22 };
-                    Rectangle btnSpdR = { panelRec.x + 172, py, 88, 22 };
-                    if (DrawGodotBtn(btnSpdM, "Speed -0.2", Color{ 36, 43, 58, 255 }, WHITE, true)) {
-                        o.animSpeed = Clamp(o.animSpeed - 0.2f, 0.0f, 4.0f);
-                    }
-                    if (DrawGodotBtn(btnSpdP, "Speed +0.2", Color{ 36, 43, 58, 255 }, WHITE, true)) {
-                        o.animSpeed = Clamp(o.animSpeed + 0.2f, 0.0f, 4.0f);
-                    }
-                    if (DrawGodotBtn(btnSpdR, "Natural 1.0x", Color{ 46, 120, 75, 255 }, WHITE, true)) {
-                        o.animSpeed = 1.0f;
-                        editorMsg = "Restored Natural Obstacle Speed (1.0x)!";
-                        editorMsgTimer = 2.0f;
-                    }
-                    py += 26;
+                    Rectangle bYm = { rightRec.x + 12, ry, 68, 20 };
+                    Rectangle bYp = { rightRec.x + 84, ry, 68, 20 };
+                    Rectangle bRm = { rightRec.x + 158, ry, 68, 20 };
+                    Rectangle bRp = { rightRec.x + 230, ry, 68, 20 };
+                    if (DrawGButton(bYm, "Y -", Color{ 36, 43, 58, 255 }, WHITE)) o.position.y -= 0.25f;
+                    if (DrawGButton(bYp, "Y +", Color{ 36, 43, 58, 255 }, WHITE)) o.position.y += 0.25f;
+                    if (DrawGButton(bRm, "Rot -15", Color{ 36, 43, 58, 255 }, WHITE)) o.rotationY -= 15.0f;
+                    if (DrawGButton(bRp, "Rot +15", Color{ 36, 43, 58, 255 }, WHITE)) o.rotationY += 15.0f;
+                    ry += 26.0f;
 
-                    // Position X/Y/Z Controls
-                    DrawTextEx(fontUI, TextFormat("Position: (%.2f, %.2f, %.2f)", o.position.x, o.position.y, o.position.z), Vector2{ panelRec.x + 14, py }, 11, 0.3f, Color{ 220, 225, 235, 255 });
-                    py += 16;
-                    Rectangle btnXm = { panelRec.x + 12, py, 58, 22 };
-                    Rectangle btnXp = { panelRec.x + 74, py, 58, 22 };
-                    Rectangle btnZm = { panelRec.x + 140, py, 58, 22 };
-                    Rectangle btnZp = { panelRec.x + 202, py, 58, 22 };
-                    if (DrawGodotBtn(btnXm, "X -", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.x -= 0.5f;
-                    if (DrawGodotBtn(btnXp, "X +", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.x += 0.5f;
-                    if (DrawGodotBtn(btnZm, "Z -", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.z -= 0.5f;
-                    if (DrawGodotBtn(btnZp, "Z +", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.z += 0.5f;
-                    py += 26;
+                    // Scale & Size
+                    DrawTextEx(fontUI, TextFormat("Scale: %.2fx | Size: (%.1f, %.1f, %.1f)", o.scale, o.sizeX, o.sizeY, o.sizeZ), Vector2{ rightRec.x + 14, ry }, 11, 0.3f, Color{ 220, 225, 235, 255 });
+                    ry += 15.0f;
+                    Rectangle bScM = { rightRec.x + 12, ry, 88, 20 };
+                    Rectangle bScP = { rightRec.x + 104, ry, 88, 20 };
+                    Rectangle bScR = { rightRec.x + 196, ry, 102, 20 };
+                    if (DrawGButton(bScM, "Scale -0.1", Color{ 36, 43, 58, 255 }, WHITE)) { o.scale = Clamp(o.scale - 0.1f, 0.2f, 4.0f); AssignEntityModelAndProps(o); }
+                    if (DrawGButton(bScP, "Scale +0.1", Color{ 36, 43, 58, 255 }, WHITE)) { o.scale = Clamp(o.scale + 0.1f, 0.2f, 4.0f); AssignEntityModelAndProps(o); }
+                    if (DrawGButton(bScR, "Reset 1.0x", Color{ 36, 43, 58, 255 }, WHITE)) { o.scale = 1.0f; AssignEntityModelAndProps(o); }
+                    ry += 24.0f;
 
-                    Rectangle btnYm = { panelRec.x + 12, py, 58, 22 };
-                    Rectangle btnYp = { panelRec.x + 74, py, 58, 22 };
-                    Rectangle btnRm = { panelRec.x + 140, py, 58, 22 };
-                    Rectangle btnRp = { panelRec.x + 202, py, 58, 22 };
-                    if (DrawGodotBtn(btnYm, "Y -", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.y -= 0.25f;
-                    if (DrawGodotBtn(btnYp, "Y +", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.y += 0.25f;
-                    if (DrawGodotBtn(btnRm, "Rot -15", Color{ 36, 43, 58, 255 }, WHITE, true)) o.rotationY -= 15.0f;
-                    if (DrawGodotBtn(btnRp, "Rot +15", Color{ 36, 43, 58, 255 }, WHITE, true)) o.rotationY += 15.0f;
-                    py += 30;
+                    // Instant Flip buttons in Inspector
+                    Rectangle bIfX = { rightRec.x + 12, ry, 88, 20 };
+                    Rectangle bIfY = { rightRec.x + 104, ry, 88, 20 };
+                    Rectangle bIfZ = { rightRec.x + 196, ry, 102, 20 };
+                    if (DrawGButton(bIfX, TextFormat("Flip X (%d)", o.flipX), Color{ 140, 45, 45, 255 }, WHITE)) { o.flipX *= -1; o.rotationY = fmodf(-o.rotationY + 360.0f, 360.0f); }
+                    if (DrawGButton(bIfY, TextFormat("Flip Y (%d)", o.flipY), Color{ 40, 130, 50, 255 }, WHITE)) { o.flipY *= -1; o.rotationZ = fmodf(o.rotationZ + 180.0f, 360.0f); }
+                    if (DrawGButton(bIfZ, TextFormat("Flip Z (%d)", o.flipZ), Color{ 40, 80, 160, 255 }, WHITE)) { o.flipZ *= -1; o.rotationY = fmodf(o.rotationY + 180.0f, 360.0f); }
+                    ry += 26.0f;
 
-                    // Duplicate & Delete Entity
-                    Rectangle btnDup = { panelRec.x + 12, py, 120, 24 };
-                    Rectangle btnDel = { panelRec.x + 140, py, 120, 24 };
-                    if (DrawGodotBtn(btnDup, "Duplicate", Color{ 48, 85, 120, 255 }, WHITE, true) || (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_D))) {
+                    // Duplicate and Delete
+                    Rectangle bDup = { rightRec.x + 12, ry, 140, 22 };
+                    Rectangle bDel = { rightRec.x + 164, ry, 140, 22 };
+                    if (DrawGButton(bDup, "Duplicate (Ctrl+D)", Color{ 48, 85, 120, 255 }, WHITE, true) || (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_D))) {
                         LevelEntity dup = o;
                         dup.id = (int)levelEntities.size();
                         dup.position.x += 1.5f;
@@ -3462,113 +4066,73 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                         editorMsg = "Entity Duplicated!";
                         editorMsgTimer = 2.0f;
                     }
-                    if (DrawGodotBtn(btnDel, "Delete", Color{ 145, 45, 45, 255 }, WHITE, true) || IsKeyPressed(KEY_DELETE)) {
+                    if (DrawGButton(bDel, "Delete (Del)", Color{ 145, 45, 45, 255 }, WHITE, true) || IsKeyPressed(KEY_DELETE)) {
                         levelEntities.erase(levelEntities.begin() + selectedObs);
                         selectedObs = -1;
                         editorMsg = "Entity Deleted!";
                         editorMsgTimer = 2.0f;
                     }
-                    py += 32;
+                    ry += 28.0f;
                 } else {
-                DrawRectangleRec(Rectangle{ panelRec.x + 12, py, panelW - 24, 70 }, Color{ 24, 28, 37, 255 });
-                DrawRectangleLinesEx(Rectangle{ panelRec.x + 12, py, panelW - 24, 70 }, 1.0f, Color{ 45, 52, 66, 255 });
-                DrawTextEx(fontUI, "No entity selected.", Vector2{ panelRec.x + 24, py + 14 }, 13, 0.3f, Color{ 209, 213, 219, 255 });
-                DrawTextEx(fontUI, "Left-Click any obstacle, tree, or rock to edit.", Vector2{ panelRec.x + 24, py + 36 }, 11, 0.3f, Color{ 148, 156, 172, 255 });
-                py += 82;
-            }
-
-            // Global Scene Actions
-            DrawLine((int)panelRec.x + 10, (int)py, (int)panelRec.x + (int)panelW - 10, (int)py, Color{ 48, 55, 71, 255 });
-            py += 10;
-
-            Rectangle btnAddRec = { panelRec.x + 12, py, panelW - 24, 30 };
-            if (DrawGodotBtn(btnAddRec, "+  Add New Entity (N)", Color{ 42, 50, 68, 255 }, WHITE, true) || IsKeyPressed(KEY_N)) {
-                LevelEntity newE;
-                memset(&newE, 0, sizeof(newE));
-                newE.id = (int)levelEntities.size();
-                newE.type = ENT_OBS_A1;
-                Vector3 fwd = { -sinf(editorCamYaw) * cosf(editorCamPitch), sinf(editorCamPitch), -cosf(editorCamYaw) * cosf(editorCamPitch) };
-                newE.position = Vector3Add(editorCamPos, Vector3Scale(fwd, 6.5f));
-                newE.position.y = 0.50f;
-                newE.scale = 1.0f;
-                AssignEntityModelAndProps(newE);
-                levelEntities.push_back(newE);
-                selectedObs = (int)levelEntities.size() - 1;
-                editorMsg = "New Entity Spawned in View!";
-                editorMsgTimer = 2.5f;
-            }
-            py += 36;
-
-            Rectangle btnResetAllMotion = { panelRec.x + 12, py, panelW - 24, 28 };
-            if (DrawGodotBtn(btnResetAllMotion, "⚡ Set All Obstacles to Natural Motion (1.0x)", Color{ 36, 110, 80, 255 }, WHITE, true)) {
-                for (auto& e : levelEntities) {
-                    e.animSpeed = 1.0f;
+                    DrawRectangleRec(Rectangle{ rightRec.x + 12, ry, rightDockW - 24, 60 }, Color{ 22, 26, 34, 255 });
+                    DrawTextEx(fontUI, "No entity selected.", Vector2{ rightRec.x + 24, ry + 12 }, 12, 0.3f, Color{ 200, 205, 215, 255 });
+                    DrawTextEx(fontUI, "Click in 3D or pick from Scene Hierarchy.", Vector2{ rightRec.x + 24, ry + 32 }, 11, 0.3f, Color{ 140, 150, 165, 255 });
+                    ry += 68.0f;
                 }
-                editorAnimateObstacles = true;
-                editorMsg = "All Obstacles Set to Natural Motion (1.0x)!";
-                editorMsgTimer = 3.0f;
+
+                DrawLine((int)rightRec.x + 10, (int)ry, (int)screenW - 10, (int)ry, Color{ 52, 60, 78, 255 });
+                ry += 10.0f;
+
+                // Gas Propulsion Physics Section (Saved Forever)
+                DrawTextEx(fontUIBold, "Gas Propulsion Physics (JSON):", Vector2{ rightRec.x + 14, ry }, 12, 0.4f, Color{ 255, 215, 0, 255 });
+                ry += 16.0f;
+                DrawTextEx(fontUI, TextFormat("Tap: %.0f N | Hold: %.0f N", gPhysCfg.tapBurstForce, gPhysCfg.sustainedMaxForce), Vector2{ rightRec.x + 14, ry }, 11, 0.3f, Color{ 220, 225, 235, 255 });
+                ry += 14.0f;
+                Rectangle bTpM = { rightRec.x + 12, ry, 68, 20 };
+                Rectangle bTpP = { rightRec.x + 84, ry, 68, 20 };
+                Rectangle bHdM = { rightRec.x + 158, ry, 68, 20 };
+                Rectangle bHdP = { rightRec.x + 230, ry, 68, 20 };
+                if (DrawGButton(bTpM, "Tap -50", Color{ 36, 43, 58, 255 }, WHITE)) gPhysCfg.tapBurstForce = Clamp(gPhysCfg.tapBurstForce - 50.0f, 100.0f, 3000.0f);
+                if (DrawGButton(bTpP, "Tap +50", Color{ 36, 43, 58, 255 }, WHITE)) gPhysCfg.tapBurstForce = Clamp(gPhysCfg.tapBurstForce + 50.0f, 100.0f, 3000.0f);
+                if (DrawGButton(bHdM, "Hold -50", Color{ 36, 43, 58, 255 }, WHITE)) gPhysCfg.sustainedMaxForce = Clamp(gPhysCfg.sustainedMaxForce - 50.0f, 100.0f, 3000.0f);
+                if (DrawGButton(bHdP, "Hold +50", Color{ 36, 43, 58, 255 }, WHITE)) gPhysCfg.sustainedMaxForce = Clamp(gPhysCfg.sustainedMaxForce + 50.0f, 100.0f, 3000.0f);
+                ry += 24.0f;
+
+                DrawTextEx(fontUI, TextFormat("Steer Torque: %.1f | Max Speed: %.1f", gPhysCfg.steerTorque, gPhysCfg.boatMaxSpeed), Vector2{ rightRec.x + 14, ry }, 11, 0.3f, Color{ 220, 225, 235, 255 });
+                ry += 14.0f;
+                Rectangle bTqM = { rightRec.x + 12, ry, 68, 20 };
+                Rectangle bTqP = { rightRec.x + 84, ry, 68, 20 };
+                Rectangle bSpM = { rightRec.x + 158, ry, 68, 20 };
+                Rectangle bSpP = { rightRec.x + 230, ry, 68, 20 };
+                if (DrawGButton(bTqM, "Tq -0.5", Color{ 36, 43, 58, 255 }, WHITE)) gPhysCfg.steerTorque = Clamp(gPhysCfg.steerTorque - 0.5f, 1.0f, 25.0f);
+                if (DrawGButton(bTqP, "Tq +0.5", Color{ 36, 43, 58, 255 }, WHITE)) gPhysCfg.steerTorque = Clamp(gPhysCfg.steerTorque + 0.5f, 1.0f, 25.0f);
+                if (DrawGButton(bSpM, "Spd -1", Color{ 36, 43, 58, 255 }, WHITE)) gPhysCfg.boatMaxSpeed = Clamp(gPhysCfg.boatMaxSpeed - 1.0f, 5.0f, 40.0f);
+                if (DrawGButton(bSpP, "Spd +1", Color{ 36, 43, 58, 255 }, WHITE)) gPhysCfg.boatMaxSpeed = Clamp(gPhysCfg.boatMaxSpeed + 1.0f, 5.0f, 40.0f);
+                ry += 28.0f;
+
+                Rectangle btnSaveJSON = { rightRec.x + 12, ry, rightDockW - 24, 28 };
+                if (DrawGButton(btnSaveJSON, "Save Level & Physics (Ctrl+S)", Color{ 34, 139, 34, 255 }, WHITE, true)) {
+                    SaveLevelLayoutJSON(LEVEL_LAYOUT_PATH, levelEntities);
+                    SavePhysicsConfigJSON("physics_config.json");
+                    editorMsg = "Saved Layout & Physics to JSON!";
+                    editorMsgTimer = 3.0f;
+                }
             }
-            py += 32;
 
-            // Gas Propulsion Physics Section (Saved Forever)
-            DrawTextEx(fontUIBold, "Gas Propulsion Physics (Saved Forever):", Vector2{ panelRec.x + 14, py }, 12, 0.4f, Color{ 255, 215, 0, 255 });
-            py += 18;
-            DrawTextEx(fontUI, TextFormat("Tap Burst: %.0f N  |  Hold Force: %.0f N", gPhysCfg.tapBurstForce, gPhysCfg.sustainedMaxForce), Vector2{ panelRec.x + 14, py }, 11, 0.3f, Color{ 220, 225, 235, 255 });
-            py += 14;
-            Rectangle btnTpM = { panelRec.x + 12, py, 68, 20 };
-            Rectangle btnTpP = { panelRec.x + 84, py, 68, 20 };
-            Rectangle btnHldM = { panelRec.x + 156, py, 68, 20 };
-            Rectangle btnHldP = { panelRec.x + 228, py, 68, 20 };
-            if (DrawGodotBtn(btnTpM, "Tap -50", Color{ 36, 43, 58, 255 }, WHITE, true)) gPhysCfg.tapBurstForce = Clamp(gPhysCfg.tapBurstForce - 50.0f, 100.0f, 3000.0f);
-            if (DrawGodotBtn(btnTpP, "Tap +50", Color{ 36, 43, 58, 255 }, WHITE, true)) gPhysCfg.tapBurstForce = Clamp(gPhysCfg.tapBurstForce + 50.0f, 100.0f, 3000.0f);
-            if (DrawGodotBtn(btnHldM, "Hold -50", Color{ 36, 43, 58, 255 }, WHITE, true)) gPhysCfg.sustainedMaxForce = Clamp(gPhysCfg.sustainedMaxForce - 50.0f, 100.0f, 3000.0f);
-            if (DrawGodotBtn(btnHldP, "Hold +50", Color{ 36, 43, 58, 255 }, WHITE, true)) gPhysCfg.sustainedMaxForce = Clamp(gPhysCfg.sustainedMaxForce + 50.0f, 100.0f, 3000.0f);
-            py += 24;
-
-            DrawTextEx(fontUI, TextFormat("Steer Torque: %.1f  |  Max Speed: %.1f", gPhysCfg.steerTorque, gPhysCfg.boatMaxSpeed), Vector2{ panelRec.x + 14, py }, 11, 0.3f, Color{ 220, 225, 235, 255 });
-            py += 14;
-            Rectangle btnTqM = { panelRec.x + 12, py, 68, 20 };
-            Rectangle btnTqP = { panelRec.x + 84, py, 68, 20 };
-            Rectangle btnSpM = { panelRec.x + 156, py, 68, 20 };
-            Rectangle btnSpP = { panelRec.x + 228, py, 68, 20 };
-            if (DrawGodotBtn(btnTqM, "Tq -0.5", Color{ 36, 43, 58, 255 }, WHITE, true)) gPhysCfg.steerTorque = Clamp(gPhysCfg.steerTorque - 0.5f, 1.0f, 25.0f);
-            if (DrawGodotBtn(btnTqP, "Tq +0.5", Color{ 36, 43, 58, 255 }, WHITE, true)) gPhysCfg.steerTorque = Clamp(gPhysCfg.steerTorque + 0.5f, 1.0f, 25.0f);
-            if (DrawGodotBtn(btnSpM, "Spd -1", Color{ 36, 43, 58, 255 }, WHITE, true)) gPhysCfg.boatMaxSpeed = Clamp(gPhysCfg.boatMaxSpeed - 1.0f, 5.0f, 40.0f);
-            if (DrawGodotBtn(btnSpP, "Spd +1", Color{ 36, 43, 58, 255 }, WHITE, true)) gPhysCfg.boatMaxSpeed = Clamp(gPhysCfg.boatMaxSpeed + 1.0f, 5.0f, 40.0f);
-            py += 28;
-
-            Rectangle btnSaveRec = { panelRec.x + 12, py, panelW - 24, 32 };
-            if (DrawGodotBtn(btnSaveRec, "Save Level & Physics (Ctrl+S)", Color{ 71, 140, 191, 255 }, WHITE, true) || (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_S)) || IsKeyPressed(KEY_F5)) {
-                SaveLevelLayoutJSON(LEVEL_LAYOUT_PATH, levelEntities);
-                SavePhysicsConfigJSON("physics_config.json");
-                editorMsg = "Saved Layout & Physics to JSON!";
-                editorMsgTimer = 3.5f;
-            }
-            py += 44;
-
-            // Godot Status & Shortcut Tray
-            Rectangle trayRec = { panelRec.x + 8, panelRec.y + panelH - 62, panelW - 16, 54 };
-            DrawRectangleRounded(trayRec, 0.15f, 3, Color{ 20, 23, 30, 255 });
-            DrawRectangleRoundedLinesEx(trayRec, 0.15f, 3, 1.0f, Color{ 45, 52, 66, 255 });
-            DrawTextEx(fontUI, "RMB+WASD: Fly Cam  |  F: Focus Selection", Vector2{ trayRec.x + 10, trayRec.y + 8 }, 11, 0.3f, Color{ 156, 163, 175, 255 });
-            DrawTextEx(fontUI, "Hold J/L: X  |  I/K: Z  |  U/O: Y  |  R/T: Rot", Vector2{ trayRec.x + 10, trayRec.y + 24 }, 11, 0.3f, Color{ 156, 163, 175, 255 });
-            DrawTextEx(fontUI, "F1: Exit Editor & Resume Game", Vector2{ trayRec.x + 10, trayRec.y + 38 }, 11, 0.3f, Color{ 147, 197, 253, 255 });
-
-            // Godot Style Toast Notification
+            // Toast Message
             if (editorMsgTimer > 0.0f) {
                 editorMsgTimer -= dt;
                 Vector2 msgSz = MeasureTextEx(fontUIBold, editorMsg.c_str(), 14, 0.4f);
                 int toastW = (int)msgSz.x + 40;
                 int toastH = 34;
                 int toastX = GetScreenWidth() / 2 - toastW / 2;
-                int toastY = 70;
+                int toastY = 56;
                 DrawRectangleRounded(Rectangle{ (float)toastX, (float)toastY, (float)toastW, (float)toastH }, 0.35f, 4, Color{ 25, 30, 42, 245 });
                 DrawRectangleRoundedLinesEx(Rectangle{ (float)toastX, (float)toastY, (float)toastW, (float)toastH }, 0.35f, 4, 1.2f, Color{ 71, 140, 191, 255 });
                 DrawTextEx(fontUIBold, editorMsg.c_str(), Vector2{ (float)toastX + 20, (float)toastY + 9 }, 14, 0.4f, WHITE);
             }
         }
-        }
-                } else if (currentScreen == SCREEN_MAIN_MENU) {
+        } else if (currentScreen == SCREEN_MAIN_MENU) {
             ClearBackground(Color{ 18, 22, 34, 255 });
             if (texMenuBg.id != 0) {
                 DrawTexturePro(texMenuBg, Rectangle{ 0, 0, (float)texMenuBg.width, (float)texMenuBg.height },
