@@ -113,7 +113,7 @@ static const float GAS_RECOVER_PERCENT = 0.35f;
 
 // Pirate Butt Jiggle & Swelling
 
-static const float BUTT_PEAK_SCALE = 1.40f;
+static const float BUTT_PEAK_SCALE = 1.30f;
 
 static const float BUTT_TREMBLE_FREQ = 12.0f;
 
@@ -189,8 +189,8 @@ in vec2 vertexTexCoord;
 in vec3 vertexNormal;
 in vec4 vertexColor;
 uniform mat4 mvp;
-uniform float uButtSwell; // 0.0 to 1.0 (Gradual butt inflation)
-uniform float uEyeBulge;  // 0.0 to 1.0 (Comedic bulging cartoon eyes)
+uniform float uButtSwell; // 0.0 to 0.30 (1.0x to 1.3x butt inflation)
+uniform float uEyeBulge;  // 0.0 to 1.0  (Funny cartoon eyeball pop)
 out vec2 fragTexCoord;
 out vec4 fragColor;
 out vec3 fragNormal;
@@ -198,33 +198,35 @@ out vec3 fragPosition;
 
 void main() {
     fragTexCoord = vertexTexCoord;
-    fragColor = vertexColor;
-    fragNormal = vertexNormal;
+    fragColor    = vertexColor;
+    fragNormal   = vertexNormal;
     fragPosition = vertexPosition;
 
     vec3 pos = vertexPosition;
 
-    // A. Gradual Butt Swell & Balloon Inflation (Local rear butt region)
-    if (pos.z < 0.02 && pos.y > 0.20 && pos.y < 0.58 && uButtSwell > 0.005) {
-        vec3 buttPivot = vec3(0.0, 0.38, -0.05);
-        vec3 dButt = pos - buttPivot;
-        float swellMask = clamp((0.02 - pos.z) / 0.18, 0.0, 1.0) * (1.0 - abs(pos.y - 0.38) / 0.22);
-        swellMask = clamp(swellMask, 0.0, 1.0);
-        pos.z -= uButtSwell * 0.32 * swellMask;
-        pos.x += sign(pos.x) * abs(dButt.x) * uButtSwell * 0.45 * swellMask;
-        pos.y += dButt.y * uButtSwell * 0.35 * swellMask;
+    // A. Butt Swell (*1.3 max scale when uButtSwell = 0.30): Local butt cheeks Z < -0.01, Y in [0.18, 0.52]
+    if (pos.z < -0.01 && pos.y >= 0.18 && pos.y <= 0.52 && uButtSwell > 0.001) {
+        float wy = sin(clamp((pos.y - 0.18) / 0.34, 0.0, 1.0) * 3.14159265);
+        float wz = clamp((-pos.z - 0.01) / 0.12, 0.0, 1.0);
+        float wButt = wy * wz;
+        vec3 buttPivot = vec3(0.0, 0.34, -0.02);
+        pos = mix(pos, buttPivot + (pos - buttPivot) * (1.0 + uButtSwell), wButt);
+        pos.z -= uButtSwell * 0.14 * wButt;
     }
 
-    // B. Comedic Bulging Eyes (Eyeballs have UV.x > 0.65 and sit at |X| <= 0.075, Y in [0.89, 0.97], Z > 0.14)
-    if ((vertexTexCoord.x > 0.65 || (pos.y > 0.89 && pos.y < 0.97 && pos.z > 0.14 && abs(pos.x) < 0.08)) && uEyeBulge > 0.005) {
-        vec3 eyeSocket = vec3(sign(pos.x) * 0.038, 0.930, 0.175);
-        vec3 relEye = pos - eyeSocket;
-        pos = eyeSocket + relEye * (1.0 + uEyeBulge * 1.45) + vec3(0.0, uEyeBulge * 0.03, uEyeBulge * 0.18);
+    // B. Exact Eyeball-Only Bulging (Matches ONLY the 322 sclera + pupil vertices, ZERO snout/jaw/teeth vertices!)
+    bool isPupil  = (vertexTexCoord.x < 0.08) && (vertexTexCoord.y < 0.12 || vertexTexCoord.y > 0.88);
+    bool isSclera = (vertexTexCoord.x > 0.68 && vertexTexCoord.x < 0.75) && (vertexTexCoord.y < 0.05 || vertexTexCoord.y > 0.95);
+    if (pos.y > 0.88 && (isPupil || isSclera) && uEyeBulge > 0.001) {
+        float eyeSign = (pos.x >= 0.0) ? 1.0 : -1.0;
+        vec2 eyeCenterXY = vec2(eyeSign * 0.0456, 0.935);
+        pos.xy = eyeCenterXY + (pos.xy - eyeCenterXY) * (1.0 + uEyeBulge * 0.45);
+        pos.x += eyeSign * uEyeBulge * 0.012;
+        pos.z += uEyeBulge * 0.055;
     }
 
     gl_Position = mvp * vec4(pos, 1.0);
-}
-)";
+})";
 
 static const char* FS_LIGHTING = R"(
 #version 330
@@ -237,7 +239,7 @@ uniform vec4 colDiffuse;
 uniform vec3 lightDir;
 uniform vec3 lightColor;
 uniform vec3 ambientColor;
-uniform float uRedness;     // 0.0 = normal, 1.0 = deep scarlet vascular redness
+uniform float uRedness;     // 0.0 below 60% charge, ramps 0.0 -> 1.0 from 60% to 100% charge
 uniform int uIsJungleTree;  // 1 = procedural two-tone brown trunk + lush green canopy
 out vec4 finalColor;
 
@@ -247,10 +249,8 @@ void main() {
 
     if (uIsJungleTree == 1) {
         if (fragPosition.y < 3.05) {
-            // Rich warm bark brown trunk
             baseRgb = mix(vec3(0.46, 0.28, 0.14), vec3(0.60, 0.39, 0.21), clamp(fragPosition.y / 3.05, 0.0, 1.0));
         } else {
-            // Vibrant layered tropical green foliage
             float hFactor = clamp((fragPosition.y - 3.05) / 4.2, 0.0, 1.0);
             baseRgb = mix(vec3(0.13, 0.50, 0.20), vec3(0.29, 0.76, 0.33), hFactor);
         }
@@ -260,20 +260,18 @@ void main() {
     vec3 L = normalize(lightDir);
     float diff = max(dot(N, L), 0.0);
     float celDiff = smoothstep(0.18, 0.58, diff) * 0.65 + diff * 0.35;
-    // Normalized lighting prevents over-exposure washout!
     vec3 lighting = mix(ambientColor, lightColor, celDiff);
 
-    // Localized Butt Redness Mask (Center: 0.0, 0.39, -0.12)
-    vec3 buttCenter = vec3(0.0, 0.39, -0.12);
-    vec3 buttScale  = vec3(0.35, 0.26, 0.24);
+    // Localized Butt Cheek Redness Mask
+    vec3 buttCenter = vec3(0.0, 0.34, -0.12);
+    vec3 buttScale  = vec3(0.26, 0.20, 0.16);
     float buttDist  = length((fragPosition - buttCenter) / buttScale);
-    float buttMask  = clamp(1.0 - smoothstep(0.35, 1.15, buttDist), 0.0, 1.0);
+    float buttMask  = (fragPosition.z < -0.01) ? clamp(1.0 - smoothstep(0.35, 1.05, buttDist), 0.0, 1.0) : 0.0;
 
-    vec3 redSkin = mix(baseRgb, vec3(0.98, 0.08, 0.12), uRedness * buttMask * 0.92);
+    vec3 redSkin = mix(baseRgb, vec3(0.96, 0.12, 0.12), uRedness * buttMask * 0.92);
     vec3 litColor = redSkin * lighting * colDiffuse.rgb;
     finalColor = vec4(litColor, texColor.a * colDiffuse.a);
-}
-)";
+})";
 
 static const char* VS_WATER = R"(
 
@@ -563,9 +561,9 @@ static std::string ResolveAudioFile(const std::string& fileName) {
 static bool ParseJsonFloatField(const char* objStart, const char* objEnd, const char* key, float& outVal);
 
 struct GasPhysicsConfig {
-    float tapBurstForce     = 900.0f; // Force of quick tap burst
-    float sustainedMaxForce = 900.0f; // Max force of sustained gas hold
-    float sustainedMinForce = 180.0f; // Min force of sustained gas hold
+    float tapBurstForce     = 480.0f; // Force of quick tap burst (equalized with sustained)
+    float sustainedMaxForce = 480.0f; // Max force of sustained gas hold
+    float sustainedMinForce = 480.0f; // Min force of sustained gas hold
     float steerTorque       = 6.0f;   // Steering torque
     float boatMaxSpeed      = 14.0f;  // Maximum boat speed
     float waterLinearDrag   = 0.40f;  // Water linear drag/damping
@@ -916,8 +914,8 @@ struct PirateGasState {
             visualCharge = fmaxf(visualCharge, releaseStartCharge * (releaseTimer / GAS_RELEASE_SECONDS));
         }
 
-        // Gradual Butt Bone Swell (1.0x to 1.45x starting immediately)
-        boneScale = 1.0f + 0.45f * visualCharge;
+        // Gradual Butt Bone Swell (1.0x to 1.30x max)
+        boneScale = 1.0f + (BUTT_PEAK_SCALE - 1.0f) * visualCharge;
 
         // Tremble vibration at 12Hz above 25% charge
         if (visualCharge > 0.25f) {
@@ -927,8 +925,13 @@ struct PirateGasState {
             trembleOffset = 0.0f;
         }
 
-        // Smooth Gradual Vascular Redness (starts at 5% charge and ramps smoothly to 100%!)
-        redness = Clamp((visualCharge - 0.05f) / 0.80f, 0.0f, 1.0f);
+        // Smooth Gradual Vascular Redness (starts strictly at 60% charge!)
+        if (visualCharge >= 0.60f) {
+            float rFrac = Clamp((visualCharge - 0.60f) / 0.40f, 0.0f, 1.0f);
+            redness = rFrac * (0.65f + 0.35f * rFrac);
+        } else {
+            redness = 0.0f;
+        }
 
     }
 
@@ -1045,36 +1048,49 @@ static void GetEntityAnimatedTransform(const LevelEntity& ent, Vector3& outPos, 
     switch (ent.type) {
         case ENT_OBS_B2:
         case ENT_OBS_C1:
-            // Image 2: Two hinged arms rotating vertically around local X axis
-            outPitch = -26.0f + sinf(ent.animTimer * 2.2f + (float)ent.id) * 30.0f;
+            // Video 3: Semicircle 180 deg swing around local X axis
+            outPitch = -90.0f + sinf(ent.animTimer * 1.85f + (float)ent.id) * 90.0f;
             break;
+
         case ENT_OBS_F10:
+            // Video 4: Semicircle 180 deg swing around local Z axis
+            outRoll = -90.0f + sinf(ent.animTimer * 1.85f + (float)ent.id) * 90.0f;
+            break;
+
         case ENT_OBS_F13:
-            // Image 4: Two hinged arms with pink crusher rotating vertically around local Z axis
-            outRoll = -24.0f + sinf(ent.animTimer * 2.2f + (float)ent.id) * 28.0f;
+            // Video 5: Full 360 deg horizontal circle in XZ plane around local Y axis!
+            outYaw   = fmodf(ent.rotationY - ent.animTimer * 120.0f, 360.0f);
+            outPitch = 0.0f;
+            outRoll  = 0.0f;
             break;
+
         case ENT_OBS_F11:
-            // Image 3: Blue spiked mine is 100% stationary!
+            // Blue spiked mine: 100% stationary
             break;
+
         case ENT_OBS_B3:
         case ENT_OBS_B5:
         case ENT_OBS_C4:
             // Horizontal rotators on water spin around Y
-            outYaw = ent.rotationY + ent.animTimer * 95.0f;
+            outYaw = fmodf(ent.rotationY + ent.animTimer * 95.0f, 360.0f);
             break;
+
         case ENT_OBS_C5:
             // Vertical water wheel rotates around local Z axis
-            outRoll = ent.animTimer * 80.0f;
+            outRoll = fmodf(ent.animTimer * 80.0f, 360.0f);
             break;
+
         case ENT_OBS_C2:
             // Suspended pendulum hammer
             outRoll = sinf(ent.animTimer * 2.0f + (float)ent.id) * 48.0f;
             break;
+
         case ENT_OBS_F3:
         case ENT_OBS_F23:
             // Horizontal swinging gates
             outYaw = ent.rotationY + sinf(ent.animTimer * 2.0f + (float)ent.id) * 55.0f;
             break;
+
         case ENT_OBS_F14: {
             // Horizontal sliding barrier
             float slide = sinf(ent.animTimer * 2.0f + (float)ent.id) * 1.8f;
@@ -1083,17 +1099,76 @@ static void GetEntityAnimatedTransform(const LevelEntity& ent, Vector3& outPos, 
             outPos.z -= sinf(rad) * slide;
             break;
         }
+
         default:
             break;
     }
 }
+
+static Vector3 GetObstacleHazardWorldPos(const LevelEntity& ent) {
+    Vector3 animPos; float animYaw, animPitch, animRoll;
+    GetEntityAnimatedTransform(ent, animPos, animYaw, animPitch, animRoll);
+    float s = (ent.scale > 0.01f) ? ent.scale : 1.0f;
+
+    Vector3 localHazard = { 0.0f, 0.0f, 0.0f };
+    if (ent.type == ENT_OBS_B2)  localHazard = { 0.0f, 0.0f,  4.4f * s };
+    if (ent.type == ENT_OBS_C1)  localHazard = { 0.0f, 0.0f,  3.7f * s };
+    if (ent.type == ENT_OBS_F10) localHazard = { -7.2f * s, 0.0f, 0.0f };
+    if (ent.type == ENT_OBS_F13) localHazard = { -4.6f * s, 0.0f, 0.0f };
+
+    Matrix m = MatrixIdentity();
+    if (fabsf(animRoll)  > 0.01f) m = MatrixMultiply(m, MatrixRotateZ(animRoll  * DEG2RAD));
+    if (fabsf(animPitch) > 0.01f) m = MatrixMultiply(m, MatrixRotateX(animPitch * DEG2RAD));
+    m = MatrixMultiply(m, MatrixRotateY(animYaw * DEG2RAD));
+    return Vector3Add(animPos, Vector3Transform(localHazard, m));
+}
+
 static bool CheckObstacleOBBCollision(Vector3 raftPos, const LevelEntity& ent, Vector3 animPos, float animYawDeg, float animRollDeg) {
     if (ent.type >= ENT_TREE_JUNGLE || ent.type == ENT_GUST || ent.type == ENT_ROCK_1 || ent.type == ENT_ROCK_2 || ent.type == ENT_OBS_F18) return false;
+
+    const float boatR = 0.88f;
+    float s = (ent.scale > 0.01f) ? ent.scale : 1.0f;
+
+    // For elevated swinging arm hazards (B2, C1, F10, F13), check exact 3D hazard head position
+    if (ent.type == ENT_OBS_B2 || ent.type == ENT_OBS_C1 || ent.type == ENT_OBS_F10 || ent.type == ENT_OBS_F13) {
+        Vector3 hPos = GetObstacleHazardWorldPos(ent);
+        // Only hit if hazard head is near water level (within 1.4m of boat vertical center)
+        if (fabsf((raftPos.y + 0.35f) - hPos.y) < 1.4f) {
+            float dx = raftPos.x - hPos.x;
+            float dz = raftPos.z - hPos.z;
+            float hRadius = (ent.type == ENT_OBS_F10) ? (0.95f * s) : (0.80f * s);
+            if ((dx * dx + dz * dz) < ((hRadius + boatR) * (hRadius + boatR))) {
+                return true;
+            }
+        }
+        // Also check pivot base collision near water
+        float dyBase = fabsf((raftPos.y + 0.35f) - animPos.y);
+        if (dyBase < 1.5f) {
+            float dxBase = raftPos.x - animPos.x;
+            float dzBase = raftPos.z - animPos.z;
+            if ((dxBase * dxBase + dzBase * dzBase) < ((0.65f * s + boatR) * (0.65f * s + boatR))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Wall-mounted Spiked Bar (ENT_OBS_A1)
+    if (ent.type == ENT_OBS_A1) {
+        if (fabsf(raftPos.y - animPos.y) > 2.0f) return false;
+        float dx = raftPos.x - animPos.x;
+        float dz = raftPos.z - animPos.z;
+        float rad = -animYawDeg * DEG2RAD;
+        float lx = dx * cosf(rad) - dz * sinf(rad);
+        float lz = dx * sinf(rad) + dz * cosf(rad);
+        return (fabsf(lx) < (0.48f * s + boatR)) && (fabsf(lz) < (2.40f * s + 0.65f));
+    }
+
     // Check vertical clearance first
     float dy = fabsf((raftPos.y + 0.35f) - animPos.y);
     if (ent.type == ENT_OBS_C5) {
-        if (dy > 4.6f * ent.scale) return false;
-    } else if (dy > 2.2f * ent.scale) {
+        if (dy > 4.6f * s) return false;
+    } else if (dy > 2.2f * s) {
         return false;
     }
 
@@ -1104,26 +1179,17 @@ static bool CheckObstacleOBBCollision(Vector3 raftPos, const LevelEntity& ent, V
     float localX = dx * cosf(rad) - dz * sinf(rad);
     float localZ = dx * sinf(rad) + dz * cosf(rad);
 
-    const float boatR = 0.88f;
-    float hx = 1.0f * ent.scale, hz = 1.0f * ent.scale;
+    float hx = 1.0f * s, hz = 1.0f * s;
     switch (ent.type) {
-        case ENT_OBS_A1:  hx = 0.38f * ent.scale; hz = 2.35f * ent.scale; break; // Narrow wall pad!
-        case ENT_OBS_B2:  hx = 4.80f * ent.scale; hz = 0.45f * ent.scale; break;
-        case ENT_OBS_B3:  hx = 2.45f * ent.scale; hz = 0.48f * ent.scale; break;
-        case ENT_OBS_B5:  hx = 4.90f * ent.scale; hz = 0.50f * ent.scale; break;
-        case ENT_OBS_C1:  hx = 2.50f * ent.scale; hz = 0.50f * ent.scale; break;
-        case ENT_OBS_C2:  hx = 1.15f * ent.scale; hz = 1.15f * ent.scale; break;
-        case ENT_OBS_C4:  hx = 2.50f * ent.scale; hz = 1.25f * ent.scale; break;
-        case ENT_OBS_C5:  hx = 4.30f * ent.scale; hz = 0.55f * ent.scale; break;
-        case ENT_OBS_F3:  hx = 2.30f * ent.scale; hz = 0.38f * ent.scale; break;
-        case ENT_OBS_F10: hx = 4.50f * ent.scale; hz = 0.55f * ent.scale; break;
-        case ENT_OBS_F11: hx = 0.95f * ent.scale; hz = 0.95f * ent.scale; break;
-        case ENT_OBS_F13: hx = 2.80f * ent.scale; hz = 0.50f * ent.scale; break;
-        case ENT_OBS_F14: hx = 1.30f * ent.scale; hz = 2.20f * ent.scale; break;
-        case ENT_OBS_F18: hx = 0.38f * ent.scale; hz = 0.38f * ent.scale; break;
-        case ENT_OBS_F23: hx = 2.40f * ent.scale; hz = 0.40f * ent.scale; break;
-        case ENT_ROCK_1:  hx = 1.45f * ent.scale; hz = 1.45f * ent.scale; break;
-        case ENT_ROCK_2:  hx = 1.65f * ent.scale; hz = 1.65f * ent.scale; break;
+        case ENT_OBS_B3:  hx = 2.45f * s; hz = 0.48f * s; break;
+        case ENT_OBS_B5:  hx = 4.90f * s; hz = 0.50f * s; break;
+        case ENT_OBS_C2:  hx = 1.15f * s; hz = 1.15f * s; break;
+        case ENT_OBS_C4:  hx = 2.50f * s; hz = 1.25f * s; break;
+        case ENT_OBS_C5:  hx = 4.30f * s; hz = 0.55f * s; break;
+        case ENT_OBS_F3:  hx = 2.30f * s; hz = 0.38f * s; break;
+        case ENT_OBS_F11: hx = 0.95f * s; hz = 0.95f * s; break;
+        case ENT_OBS_F14: hx = 2.80f * s; hz = 0.45f * s; break;
+        case ENT_OBS_F23: hx = 2.80f * s; hz = 0.40f * s; break;
         default: break;
     }
     return (fabsf(localX) < (hx + boatR)) && (fabsf(localZ) < (hz + boatR));
@@ -2013,8 +2079,15 @@ int main(int argc, char** argv) {
                 float gpAxis = GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_X);
                 if (fabsf(gpAxis) > 0.15f) rimMove1 += gpAxis;
             }
-            p1RimAngle += Clamp(rimMove1, -1.0f, 1.0f) * 2.44f * dt; // 140 deg/s angular slide speed
-            p1RimAngle = Clamp(p1RimAngle, -3.10f, -0.15f);
+            if (singlePirateMode) {
+                // Free 360 degree rotation around the boat rim in Solo Mode!
+                p1RimAngle += Clamp(rimMove1, -1.0f, 1.0f) * 2.60f * dt;
+                while (p1RimAngle >  PI) p1RimAngle -= 2.0f * PI;
+                while (p1RimAngle < -PI) p1RimAngle += 2.0f * PI;
+            } else {
+                p1RimAngle += Clamp(rimMove1, -1.0f, 1.0f) * 2.44f * dt;
+                p1RimAngle = Clamp(p1RimAngle, -3.10f, -0.15f);
+            }
 
             bool gp1Down = IsGamepadAvailable(0) && (IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) || GetGamepadAxisMovement(0, GAMEPAD_AXIS_RIGHT_TRIGGER) > 0.3f);
             bool gp1Rel  = IsGamepadAvailable(0) && IsGamepadButtonReleased(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
@@ -2046,10 +2119,11 @@ int main(int argc, char** argv) {
         if (p1InputReleased && gasP1.pressTimer <= GAS_TAP_THRESHOLD_SECONDS && gasP1.pressTimer > 0.01f && !gasP1.gasDepleted && !raft.isDestroyed) {
             if (gasP1.gasEnergy >= GAS_TAP_COST) {
                 gasP1.gasEnergy -= GAS_TAP_COST;
-                float tapPower = (GAS_TAP_BURST_FORCE / BOAT_MASS) * 0.35f;
-                raft.velocity = Vector3Add(raft.velocity, Vector3Scale(p1ThrustWorld, tapPower));
-                float steerTq = (p1OutwardLocal.x * p1ThrustLocal.z - p1OutwardLocal.z * p1ThrustLocal.x);
-                raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 8.0f;
+                float tapDt    = Clamp(gasP1.pressTimer, 0.06f, 0.10f);
+                float tapAccel = (gPhysCfg.tapBurstForce / BOAT_MASS) * tapDt;
+                raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p1ThrustWorld, tapAccel));
+                float steerTq  = (p1OutwardLocal.x * p1ThrustLocal.z - p1OutwardLocal.z * p1ThrustLocal.x);
+                raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * tapDt;
                 EmitFartBurst(p1PosWorld, p1OutwardWorld, 0.4f);
                 PlaySound(sndTap[rand() % 3]);
             }
@@ -2060,10 +2134,10 @@ int main(int argc, char** argv) {
         // Sustained Thrust Application for P1
         if (gasP1.isSustained && !raft.isDestroyed) {
             float curForce = gPhysCfg.sustainedMinForce + (gPhysCfg.sustainedMaxForce - gPhysCfg.sustainedMinForce) * gasP1.sustainedCharge;
-            float accel = (curForce / BOAT_MASS) * dt * 0.85f;
-            raft.velocity = Vector3Add(raft.velocity, Vector3Scale(p1ThrustWorld, accel));
-            float steerTq = (p1OutwardLocal.x * p1ThrustLocal.z - p1OutwardLocal.z * p1ThrustLocal.x);
-            raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * (curForce / gPhysCfg.sustainedMaxForce) * dt * 22.0f;
+            float accel    = (curForce / BOAT_MASS) * dt;
+            raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p1ThrustWorld, accel));
+            float steerTq  = (p1OutwardLocal.x * p1ThrustLocal.z - p1OutwardLocal.z * p1ThrustLocal.x);
+            raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * dt;
             if (rand() % 4 == 0) {
                 EmitFartBurst(p1PosWorld, p1OutwardWorld, gasP1.sustainedCharge);
             }
@@ -2119,12 +2193,13 @@ int main(int argc, char** argv) {
         if (p2InputReleased && gasP2.pressTimer <= GAS_TAP_THRESHOLD_SECONDS && gasP2.pressTimer > 0.01f && !gasP2.gasDepleted && !raft.isDestroyed) {
             if (gasP2.gasEnergy >= GAS_TAP_COST) {
                 gasP2.gasEnergy -= GAS_TAP_COST;
-                float tapPower = (GAS_TAP_BURST_FORCE / BOAT_MASS) * 0.35f;
-                raft.velocity = Vector3Add(raft.velocity, Vector3Scale(p2ThrustWorld, tapPower));
-                float steerTq = (p2OutwardLocal.x * p2ThrustLocal.z - p2OutwardLocal.z * p2ThrustLocal.x);
-                raft.angularVelocityY += steerTq * (BOAT_STEER_TORQUE / BOAT_MASS) * 8.0f;
+                float tapDt    = Clamp(gasP2.pressTimer, 0.06f, 0.10f);
+                float tapAccel = (gPhysCfg.tapBurstForce / BOAT_MASS) * tapDt;
+                raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p2ThrustWorld, tapAccel));
+                float steerTq  = (p2OutwardLocal.x * p2ThrustLocal.z - p2OutwardLocal.z * p2ThrustLocal.x);
+                raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * tapDt;
                 EmitFartBurst(p2PosWorld, p2OutwardWorld, 0.4f);
-                PlaySound(fartSounds[rand() % 6]);
+                PlaySound(sndTap[rand() % 3]);
             }
         }
 
@@ -2186,56 +2261,66 @@ int main(int argc, char** argv) {
         Vector3 riverCenter  = GetSplinePoint(currentSplineT);
         Vector3 riverTangent = GetSplineTangent(currentSplineT);
         Vector3 riverNormal  = Vector3{ riverTangent.z, 0.0f, -riverTangent.x };
+        Vector3 toCenter     = Vector3Subtract(raft.position, riverCenter);
+        float crossDist      = Vector3DotProduct(toCenter, riverNormal);
 
-        // Authentic Hydrodynamics & Spline Distance
+        // ZERO automatic sideways or downstream push — boat moves ONLY by pirate gas thrust!
+        bool inStartPond  = (raft.position.z >= 75.5f && raft.position.x > -5.0f && raft.position.x < 35.0f);
+        bool inStartCanal = (raft.position.z >= 36.5f && raft.position.z < 75.5f && raft.position.x > 10.0f && raft.position.x < 21.0f);
+        bool overWater    = true;
+
+        if (inStartPond) {
+            Vector3 startPondCenter = { 15.43f, 0.0f, 84.0f };
+            float startPondRadius   = 15.5f;
+            Vector3 dLake = { raft.position.x - startPondCenter.x, 0.0f, raft.position.z - startPondCenter.z };
+            float distLake = Vector3Length(dLake);
+            bool nearCanalMouth = (fabsf(raft.position.x - 15.43f) < 2.8f && raft.position.z < 78.5f);
+            if (distLake > startPondRadius && !nearCanalMouth) {
+                Vector3 nLake = Vector3Normalize(dLake);
+                raft.position.x = startPondCenter.x + nLake.x * startPondRadius;
+                raft.position.z = startPondCenter.z + nLake.z * startPondRadius;
+                float vn = raft.velocity.x * nLake.x + raft.velocity.z * nLake.z;
+                if (vn > 0.0f) {
+                    raft.velocity.x -= 1.5f * vn * nLake.x;
+                    raft.velocity.z -= 1.5f * vn * nLake.z;
+                }
+            }
+        } else if (inStartCanal) {
+            // Straight concrete walls of the first canal (from GM_3D_Demo_WallCol.obj: X = 12.65 to 18.21)
+            const float canalMinX = 13.62f; // 12.65 + boatRadius(0.97)
+            const float canalMaxX = 17.24f; // 18.21 - boatRadius(0.97)
+            if (raft.position.x < canalMinX) {
+                raft.position.x = canalMinX;
+                if (raft.velocity.x < 0.0f) raft.velocity.x *= -0.4f;
+            } else if (raft.position.x > canalMaxX) {
+                raft.position.x = canalMaxX;
+                if (raft.velocity.x > 0.0f) raft.velocity.x *= -0.4f;
+            }
+        } else {
+            float riverBankW = 9.5f;
+            if (fabsf(crossDist) > riverBankW) {
+                overWater = false;
+            }
+        }
+
+        // Downstream slope acceleration ONLY on waterfalls/ramps (Z < 30)
+        float maxAllowedSpeed = gPhysCfg.boatMaxSpeed;
+        if (!inStartPond && !inStartCanal && overWater && !raft.isDestroyed && raft.position.z < 30.0f) {
+            float downSlope = Clamp(-riverTangent.y, -0.35f, 0.65f);
+            if (downSlope > 0.08f) {
+                float streamPush = downSlope * 16.0f;
+                raft.velocity.x += riverTangent.x * streamPush * dt;
+                raft.velocity.z += riverTangent.z * streamPush * dt;
+                maxAllowedSpeed = 22.0f;
+            }
+        }
+
+        // Buoyancy on Actual Water Mesh vs Free-Fall in Abyss
         float actualWaterY = 0.55f;
         float distToWaterMesh = 0.0f;
         Vector3 nearestWaterPt = raft.position;
         QueryActualWaterSurface(raft.position, actualWaterY, distToWaterMesh, nearestWaterPt);
 
-        bool inStartPond = (raft.position.z >= 73.0f && raft.position.x > 2.0f && raft.position.x < 28.0f);
-        bool overWater   = inStartPond || (distToWaterMesh < 5.8f);
-
-        // Downstream slope acceleration on water ramps & waterfalls
-        float maxAllowedSpeed = gPhysCfg.boatMaxSpeed;
-        if (!inStartPond && overWater && !raft.isDestroyed) {
-            float downSlope = Clamp(-riverTangent.y, -0.35f, 0.65f);
-            float streamPush = 0.65f + fmaxf(0.0f, downSlope * 18.0f);
-            raft.velocity.x += riverTangent.x * streamPush * dt;
-            raft.velocity.z += riverTangent.z * streamPush * dt;
-            if (downSlope > 0.08f) maxAllowedSpeed = 22.0f; // Fast waterfall slide!
-        }
-
-        // Authentic Start Basin & Canal Wall Elastic Containment (Prevents clipping & swimming on land!)
-        if (inStartPond) {
-            Vector3 pondCenter = { 15.43f, 0.55f, 87.67f };
-            Vector3 dPond = { raft.position.x - pondCenter.x, 0.0f, raft.position.z - pondCenter.z };
-            float rPond = Vector3Length(dPond);
-            bool nearExitGate = (fabsf(raft.position.x - 15.51f) < 3.6f && raft.position.z < 79.5f);
-            if (rPond > 10.5f && !nearExitGate) {
-                Vector3 nPond = Vector3Normalize(dPond);
-                raft.position.x = pondCenter.x + nPond.x * 10.5f;
-                raft.position.z = pondCenter.z + nPond.z * 10.5f;
-                float vn = raft.velocity.x * nPond.x + raft.velocity.z * nPond.z;
-                if (vn > 0.0f) {
-                    raft.velocity.x -= 1.65f * vn * nPond.x;
-                    raft.velocity.z -= 1.65f * vn * nPond.z;
-                }
-            }
-        } else if (distToWaterMesh > 2.6f && distToWaterMesh < 5.8f && raft.position.z > -45.0f) {
-            // Elastic bounce off raised flume/canyon walls
-            Vector3 pushIn = Vector3Normalize(Vector3{ nearestWaterPt.x - raft.position.x, 0.0f, nearestWaterPt.z - raft.position.z });
-            raft.position.x += pushIn.x * (distToWaterMesh - 2.6f) * 0.85f;
-            raft.position.z += pushIn.z * (distToWaterMesh - 2.6f) * 0.85f;
-            float vn = raft.velocity.x * pushIn.x + raft.velocity.z * pushIn.z;
-            if (vn < 0.0f) {
-                raft.velocity.x -= 1.55f * vn * pushIn.x;
-                raft.velocity.z -= 1.55f * vn * pushIn.z;
-                camCtrl.shakeTrauma = fmaxf(camCtrl.shakeTrauma, 0.20f);
-            }
-        }
-
-        // Buoyancy on Actual Water Mesh vs Free-Fall in Abyss
         if (overWater && !raft.isDestroyed) {
             float waveY = actualWaterY + 0.04f + sinf(raft.position.z * 0.32f - runTime * 1.8f) * 0.04f;
             float heave = waveY - raft.position.y;
@@ -2888,10 +2973,8 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
                     // Left Pirate (Player 1: Green Hippo - SeatedB)
             float p1Redness = gasP1.redness;
-            float p1ButtSwell = (gasP1.boneScale - 1.0f) * 2.5f;
-            float p1EyeBulge = fmaxf(gasP1.redness, (gasP1.releaseTimer > 0.0f) ? (gasP1.releaseTimer / GAS_RELEASE_SECONDS) : 0.0f);
-            if (gasP1.isPressing && p1EyeBulge < 0.25f) p1EyeBulge = 0.25f + (gasP1.pressTimer / 1.0f) * 0.75f;
-            p1EyeBulge = Clamp(p1EyeBulge, 0.0f, 1.0f);
+            float p1ButtSwell = gasP1.boneScale - 1.0f; // 0.0 to 0.30 (*1.3 scale)
+            float p1EyeBulge = (gasP1.isPressing || gasP1.releaseTimer > 0.0f) ? Clamp(gasP1.pressTimer / 0.45f, 0.0f, 1.0f) : 0.0f;
             SetShaderValue(shaderLighting, uRednessLoc,   &p1Redness,   SHADER_UNIFORM_FLOAT);
             SetShaderValue(shaderLighting, uButtSwellLoc, &p1ButtSwell, SHADER_UNIFORM_FLOAT);
             SetShaderValue(shaderLighting, uEyeBulgeLoc,  &p1EyeBulge,  SHADER_UNIFORM_FLOAT);
@@ -2911,10 +2994,8 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             if (!singlePirateMode) {
                 // Right Pirate (Player 2: Orange Hippo - Active in LAN mode!)
                 float p2Redness = gasP2.redness;
-                float p2ButtSwell = (gasP2.boneScale - 1.0f) * 2.5f;
-                float p2EyeBulge = fmaxf(gasP2.redness, (gasP2.releaseTimer > 0.0f) ? (gasP2.releaseTimer / GAS_RELEASE_SECONDS) : 0.0f);
-                if (gasP2.isPressing && p2EyeBulge < 0.25f) p2EyeBulge = 0.25f + (gasP2.pressTimer / 1.0f) * 0.75f;
-                p2EyeBulge = Clamp(p2EyeBulge, 0.0f, 1.0f);
+                float p2ButtSwell = gasP2.boneScale - 1.0f; // 0.0 to 0.30 (*1.3 scale)
+                float p2EyeBulge = (gasP2.isPressing || gasP2.releaseTimer > 0.0f) ? Clamp(gasP2.pressTimer / 0.45f, 0.0f, 1.0f) : 0.0f;
                 SetShaderValue(shaderLighting, uRednessLoc,   &p2Redness,   SHADER_UNIFORM_FLOAT);
                 SetShaderValue(shaderLighting, uButtSwellLoc, &p2ButtSwell, SHADER_UNIFORM_FLOAT);
                 SetShaderValue(shaderLighting, uEyeBulgeLoc,  &p2EyeBulge,  SHADER_UNIFORM_FLOAT);
