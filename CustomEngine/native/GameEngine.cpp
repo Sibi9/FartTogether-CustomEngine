@@ -1,4 +1,4 @@
-// =============================================================================
+﻿// =============================================================================
 
 // Fart Together - Authentic Native C++17 Game Engine
 
@@ -969,6 +969,48 @@ struct ObstacleModels {
     Model mCP;
 };
 
+static void GetEntityAnimatedTransform(const LevelEntity& ent, Vector3& outPos, float& outYaw, float& outRoll) {
+    outPos = ent.position;
+    outYaw = ent.rotationY;
+    outRoll = 0.0f;
+
+    if (ent.type == ENT_OBS_B2) {
+        outRoll = sinf(ent.animTimer * 2.0f) * 28.0f; // Seesaw tipping
+    } else if (ent.type == ENT_OBS_B3) {
+        outYaw = ent.rotationY + ent.animTimer * 90.0f; // Continuous rotation
+    } else if (ent.type == ENT_OBS_B5) {
+        outYaw = ent.rotationY + ent.animTimer * 65.0f;
+    } else if (ent.type == ENT_OBS_C1) {
+        outRoll = sinf(ent.animTimer * 2.2f) * 50.0f; // Pendulum swing
+    } else if (ent.type == ENT_OBS_C2) {
+        outRoll = cosf(ent.animTimer * 2.0f) * 55.0f;
+    } else if (ent.type == ENT_OBS_C4) {
+        outYaw = ent.rotationY + ent.animTimer * 110.0f;
+    } else if (ent.type == ENT_OBS_C5) {
+        outRoll = ent.animTimer * 85.0f; // Vertical spinning wheel
+    } else if (ent.type == ENT_OBS_F3) {
+        outYaw = ent.rotationY + sinf(ent.animTimer * 1.5f) * 75.0f;
+    } else if (ent.type == ENT_OBS_F10) {
+        outYaw = ent.rotationY + sinf(ent.animTimer * 1.2f) * 75.0f;
+    } else if (ent.type == ENT_OBS_F11) {
+        // Lateral reciprocating travel across water canal + spinning drum
+        float rad = ent.rotationY * DEG2RAD;
+        float latOffset = sinf(ent.animTimer * 1.8f + (float)ent.id) * 2.2f;
+        outPos.x += cosf(rad) * latOffset;
+        outPos.z -= sinf(rad) * latOffset;
+        outRoll = ent.animTimer * 120.0f;
+    } else if (ent.type == ENT_OBS_F13) {
+        outYaw = ent.rotationY + ent.animTimer * 75.0f;
+    } else if (ent.type == ENT_OBS_F14) {
+        float rad = ent.rotationY * DEG2RAD;
+        float slideOffset = sinf(ent.animTimer * 2.2f) * 2.0f;
+        outPos.x += cosf(rad) * slideOffset;
+        outPos.z -= sinf(rad) * slideOffset;
+    } else if (ent.type == ENT_OBS_F23) {
+        outYaw = ent.rotationY + sinf(ent.animTimer * 1.4f) * 65.0f;
+    }
+}
+
 static bool CheckObstacleOBBCollision(Vector3 raftPos, const LevelEntity& ent, Vector3 animPos, float animYawDeg, float animRollDeg) {
     if (ent.type >= ENT_TREE_JUNGLE || ent.type == ENT_GUST) return false;
     // Check vertical clearance first
@@ -1638,6 +1680,7 @@ int main(int argc, char** argv) {
 
     // Interactive Level & Obstacle Editor (Unity / Godot style)
     bool editorMode = testEditorMode;
+    bool editorAnimateObstacles = true; // Natural obstacle motion enabled by default!
     int selectedObs = (testSelectIdx >= 0) ? testSelectIdx : (testEditorMode ? 0 : -1);
     Vector3 editorCamPos = testEditorMode ? Vector3{ 17.2f, 2.8f, 70.8f } : Vector3{ 15.55f, 6.0f, 75.0f };
     float editorCamYaw = 3.14159f;
@@ -1825,6 +1868,13 @@ int main(int argc, char** argv) {
 
             if (camCtrl.shakeTrauma < 0.0f) camCtrl.shakeTrauma = 0.0f;
 
+        }
+
+        // Update Kinetic Obstacles (Runs both in gameplay and in editor when natural motion is toggled ON!)
+        if (!editorMode || editorAnimateObstacles) {
+            for (auto& ent : levelEntities) {
+                ent.animTimer += dt * ent.animSpeed;
+            }
         }
 
         // TOTAL FREEZE CHECK: If in Level Editor Mode, completely freeze raft, characters and physics!
@@ -2091,48 +2141,11 @@ int main(int argc, char** argv) {
         raft.roll  = Lerp(raft.roll, (crossWaterDist * 0.045f) + (raft.angularVelocityY * 0.12f), 6.0f * dt);
         raft.speed = horizSpeed;
 
-        // 5. Update Kinetic Obstacles & Hazards with Authentic Animations & OBB
+        // 5. Check Obstacle & Hazard Collisions using Unified Animation Transform
         for (auto& ent : levelEntities) {
-            ent.animTimer += dt * ent.animSpeed;
-            Vector3 animPos = ent.position;
-            float animYaw = ent.rotationY;
-            float animRoll = 0.0f;
-
-            if (ent.type == ENT_OBS_B2) {
-                animRoll = sinf(ent.animTimer * 2.0f) * 28.0f; // Seesaw tipping
-            } else if (ent.type == ENT_OBS_B3) {
-                animYaw += dt * 90.0f * ent.animSpeed;
-            } else if (ent.type == ENT_OBS_B5) {
-                animYaw += dt * 65.0f * ent.animSpeed;
-            } else if (ent.type == ENT_OBS_C1) {
-                animRoll = sinf(ent.animTimer * 2.2f) * 50.0f; // Pendulum swing
-            } else if (ent.type == ENT_OBS_C2) {
-                animRoll = cosf(ent.animTimer * 2.0f) * 55.0f;
-            } else if (ent.type == ENT_OBS_C4) {
-                animYaw += dt * 110.0f * ent.animSpeed;
-            } else if (ent.type == ENT_OBS_C5) {
-                animRoll = ent.animTimer * 85.0f; // Vertical spinning wheel
-            } else if (ent.type == ENT_OBS_F3) {
-                animYaw = ent.rotationY + sinf(ent.animTimer * 1.5f) * 75.0f;
-            } else if (ent.type == ENT_OBS_F10) {
-                animYaw = ent.rotationY + sinf(ent.animTimer * 1.2f) * 75.0f;
-            } else if (ent.type == ENT_OBS_F11) {
-                // Lateral reciprocating travel across water canal + spinning drum
-                float rad = ent.rotationY * DEG2RAD;
-                float latOffset = sinf(ent.animTimer * 1.8f + (float)ent.id) * 2.2f;
-                animPos.x += cosf(rad) * latOffset;
-                animPos.z -= sinf(rad) * latOffset;
-                animRoll = ent.animTimer * 120.0f;
-            } else if (ent.type == ENT_OBS_F13) {
-                animYaw += dt * 75.0f * ent.animSpeed;
-            } else if (ent.type == ENT_OBS_F14) {
-                float rad = ent.rotationY * DEG2RAD;
-                float slideOffset = sinf(ent.animTimer * 2.2f) * 2.0f;
-                animPos.x += cosf(rad) * slideOffset;
-                animPos.z -= sinf(rad) * slideOffset;
-            } else if (ent.type == ENT_OBS_F23) {
-                animYaw = ent.rotationY + sinf(ent.animTimer * 1.4f) * 65.0f;
-            }
+            Vector3 animPos;
+            float animYaw, animRoll;
+            GetEntityAnimatedTransform(ent, animPos, animYaw, animRoll);
 
             if (ent.type == ENT_GUST) {
                 float d = Vector3Distance(raft.position, ent.position);
@@ -2622,36 +2635,9 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             // E. Draw All Level Entities (Obstacles, Rocks, Trees, Checkpoints)
         for (const auto& ent : levelEntities) {
             if (ent.model != nullptr) {
-                Vector3 animPos = ent.position;
-                float animYaw = ent.rotationY;
-                float animRoll = 0.0f;
-
-                if (ent.type == ENT_OBS_B2) {
-                    animRoll = sinf(ent.animTimer * 2.0f) * 28.0f;
-                } else if (ent.type == ENT_OBS_C1) {
-                    animRoll = sinf(ent.animTimer * 2.2f) * 50.0f;
-                } else if (ent.type == ENT_OBS_C2) {
-                    animRoll = cosf(ent.animTimer * 2.0f) * 55.0f;
-                } else if (ent.type == ENT_OBS_C5) {
-                    animRoll = ent.animTimer * 85.0f;
-                } else if (ent.type == ENT_OBS_F3) {
-                    animYaw = ent.rotationY + sinf(ent.animTimer * 1.5f) * 75.0f;
-                } else if (ent.type == ENT_OBS_F10) {
-                    animYaw = ent.rotationY + sinf(ent.animTimer * 1.2f) * 75.0f;
-                } else if (ent.type == ENT_OBS_F11) {
-                    float rad = ent.rotationY * DEG2RAD;
-                    float latOffset = sinf(ent.animTimer * 1.8f + (float)ent.id) * 2.2f;
-                    animPos.x += cosf(rad) * latOffset;
-                    animPos.z -= sinf(rad) * latOffset;
-                    animRoll = ent.animTimer * 120.0f;
-                } else if (ent.type == ENT_OBS_F14) {
-                    float rad = ent.rotationY * DEG2RAD;
-                    float slideOffset = sinf(ent.animTimer * 2.2f) * 2.0f;
-                    animPos.x += cosf(rad) * slideOffset;
-                    animPos.z -= sinf(rad) * slideOffset;
-                } else if (ent.type == ENT_OBS_F23) {
-                    animYaw = ent.rotationY + sinf(ent.animTimer * 1.4f) * 65.0f;
-                }
+                Vector3 animPos;
+                float animYaw, animRoll;
+                GetEntityAnimatedTransform(ent, animPos, animYaw, animRoll);
 
                 rlPushMatrix();
                 rlTranslatef(animPos.x, animPos.y, animPos.z);
@@ -3041,6 +3027,24 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             const char* toggleLbl = editorMode ? "Play Mode (F1)" : "Level Editor (F1)";
             Vector2 tSz = MeasureTextEx(fontUIBold, toggleLbl, 14, 0.4f);
             DrawTextEx(fontUIBold, toggleLbl, Vector2{ btnEditorRec.x + (btnEditorRec.width - tSz.x) * 0.5f, btnEditorRec.y + 8 }, 14, 0.4f, WHITE);
+
+            // Prominent Top Bar Natural Motion Toggle Button (Accessible anytime in Editor!)
+            if (editorMode) {
+                Rectangle btnTopMotionRec = Rectangle{ btnEditorRec.x - 225, btnEditorRec.y, 215, 34 };
+                bool hovMotion = CheckCollisionPointRec(mousePos, btnTopMotionRec);
+                Color mBg = editorAnimateObstacles ? Color{ 46, 128, 76, 245 } : Color{ 75, 40, 50, 240 };
+                Color mBorder = editorAnimateObstacles ? Color{ 85, 205, 125, 255 } : Color{ 170, 75, 80, 255 };
+                DrawRectangleRounded(btnTopMotionRec, 0.25f, 4, mBg);
+                DrawRectangleRoundedLinesEx(btnTopMotionRec, 0.25f, 4, 1.0f, mBorder);
+                const char* topMLbl = editorAnimateObstacles ? "â–¶ Motion: NATURAL (P)" : "â¸ Motion: FROZEN (P)";
+                Vector2 mSz = MeasureTextEx(fontUIBold, topMLbl, 13, 0.3f);
+                DrawTextEx(fontUIBold, topMLbl, Vector2{ btnTopMotionRec.x + (btnTopMotionRec.width - mSz.x) * 0.5f, btnTopMotionRec.y + 9 }, 13, 0.3f, WHITE);
+                if ((hovMotion && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_P)) {
+                    editorAnimateObstacles = !editorAnimateObstacles;
+                    editorMsg = editorAnimateObstacles ? "Obstacle Motion: PLAYING (Natural)" : "Obstacle Motion: FROZEN";
+                    editorMsgTimer = 2.5f;
+                }
+            }
         }
 
         // 6. Interactive 3D Level Editor Inspector Panel (Authentic Godot 4 Engine Style)
@@ -3089,6 +3093,17 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 DrawRectangleLines((int)panelRec.x + 12, (int)py, 280, 125, Color{ 60, 72, 95, 255 });
                 py += 132;
 
+                // Dedicated Natural Obstacle Motion Toggle Button in Panel
+                Rectangle btnPanelMotion = { panelRec.x + 12, py, panelW - 24, 28 };
+                const char* panelMotionLbl = editorAnimateObstacles ? "â–¶ Natural Motion: ACTIVE (P)" : "â¸ Natural Motion: PAUSED (P)";
+                Color panelMotionCol = editorAnimateObstacles ? Color{ 42, 128, 76, 255 } : Color{ 120, 48, 56, 255 };
+                if (DrawGodotBtn(btnPanelMotion, panelMotionLbl, panelMotionCol, WHITE, true)) {
+                    editorAnimateObstacles = !editorAnimateObstacles;
+                    editorMsg = editorAnimateObstacles ? "Obstacle Motion: PLAYING (Natural)" : "Obstacle Motion: PAUSED";
+                    editorMsgTimer = 2.5f;
+                }
+                py += 34;
+
                 if (selectedObs >= 0 && selectedObs < (int)levelEntities.size()) {
                     auto& o = levelEntities[selectedObs];
                     DrawTextEx(fontUIBold, TextFormat("Selected: #%d (%s)", selectedObs, ENTITY_TYPE_NAMES[o.type]), Vector2{ panelRec.x + 14, py }, 13, 0.5f, Color{ 142, 202, 230, 255 });
@@ -3130,6 +3145,25 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                     if (DrawGodotBtn(btnScR, "Reset 1.0x", Color{ 36, 43, 58, 255 }, WHITE, true)) {
                         o.scale = 1.0f;
                         AssignEntityModelAndProps(o);
+                    }
+                    py += 26;
+
+                    // Obstacle Animation Speed & Natural Motion Reset
+                    DrawTextEx(fontUI, TextFormat("Animation Speed: %.1fx (%s)", o.animSpeed, (o.animSpeed > 0.05f ? "Natural" : "Stopped")), Vector2{ panelRec.x + 14, py }, 11, 0.3f, Color{ 220, 225, 235, 255 });
+                    py += 15;
+                    Rectangle btnSpdM = { panelRec.x + 12, py, 75, 22 };
+                    Rectangle btnSpdP = { panelRec.x + 92, py, 75, 22 };
+                    Rectangle btnSpdR = { panelRec.x + 172, py, 88, 22 };
+                    if (DrawGodotBtn(btnSpdM, "Speed -0.2", Color{ 36, 43, 58, 255 }, WHITE, true)) {
+                        o.animSpeed = Clamp(o.animSpeed - 0.2f, 0.0f, 4.0f);
+                    }
+                    if (DrawGodotBtn(btnSpdP, "Speed +0.2", Color{ 36, 43, 58, 255 }, WHITE, true)) {
+                        o.animSpeed = Clamp(o.animSpeed + 0.2f, 0.0f, 4.0f);
+                    }
+                    if (DrawGodotBtn(btnSpdR, "Natural 1.0x", Color{ 46, 120, 75, 255 }, WHITE, true)) {
+                        o.animSpeed = 1.0f;
+                        editorMsg = "Restored Natural Obstacle Speed (1.0x)!";
+                        editorMsgTimer = 2.0f;
                     }
                     py += 26;
 
@@ -3204,6 +3238,17 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 editorMsgTimer = 2.5f;
             }
             py += 36;
+
+            Rectangle btnResetAllMotion = { panelRec.x + 12, py, panelW - 24, 30 };
+            if (DrawGodotBtn(btnResetAllMotion, "âš¡ Set All Obstacles to Natural Motion (1.0x)", Color{ 36, 110, 80, 255 }, WHITE, true)) {
+                for (auto& e : levelEntities) {
+                    e.animSpeed = 1.0f;
+                }
+                editorAnimateObstacles = true;
+                editorMsg = "All Obstacles Set to Natural Motion (1.0x)!";
+                editorMsgTimer = 3.0f;
+            }
+            py += 35;
 
             Rectangle btnSaveRec = { panelRec.x + 12, py, panelW - 24, 34 };
             if (DrawGodotBtn(btnSaveRec, "Save Level Layout (Ctrl+S)", Color{ 71, 140, 191, 255 }, WHITE, true) || (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_S)) || IsKeyPressed(KEY_F5)) {
