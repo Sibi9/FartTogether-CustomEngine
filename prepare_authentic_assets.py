@@ -52,8 +52,8 @@ def brighten_fart_textures():
         im.save(p)
     print("Brightened Fart1..8.png textures for neon green tinting.")
 
-# 3. بناء مجسمات الجلوس الطبيعية للقراصنة بدون تشوه الأذرع وبدون بقعة الظهر
-def build_seated_pirate(src_obj, dst_obj, skin_u, skin_v):
+# 3. بناء مجسمات الجلوس الطبيعية للقراصنة ليطابق الصورة 6 (image_161e99.png)
+def build_seated_pirate(src_obj, dst_obj, is_green=True):
     vs, vts, faces = [], [], []
     with open(src_obj, encoding="utf-8") as f:
         for line in f:
@@ -61,8 +61,12 @@ def build_seated_pirate(src_obj, dst_obj, skin_u, skin_v):
                 vs.append([float(x) for x in line.split()[1:4]])
             elif line.startswith("vt "):
                 u, v = [float(x) for x in line.split()[1:3]]
-                if 0.42 < u < 0.50:
-                    u, v = skin_u, skin_v
+                # الحفاظ على إحداثيات العينين والأسنان والفم (u > 0.65 أو u < 0.05) وتوحيد جلد الظهر والمؤخرة
+                if 0.25 < u < 0.60:
+                    if is_green:
+                        u, v = 0.322, 0.265
+                    else:
+                        u, v = 0.405, 0.905
                 vts.append((u, v))
             elif line.startswith("f "):
                 faces.append(line.strip())
@@ -70,30 +74,45 @@ def build_seated_pirate(src_obj, dst_obj, skin_u, skin_v):
     new_vs = []
     for x, y, z in vs:
         nx, ny, nz = x, y, z
-        # أ. دوران الذراعين حول مفصل الكتف (±0.20, 0.60, 0.0) بزاوية طبيعية
-        if abs(x) > 0.20 and 0.36 < y < 0.78:
+
+        # 1. نحت فلقتي المؤخرة البارزتين للخلف (z < -0.01, 0.20 <= y <= 0.50) كما في الصورة 6
+        if z < -0.01 and 0.20 <= y <= 0.50:
+            wy = math.sin(max(0.0, min(1.0, (y - 0.20) / 0.30)) * math.pi)
+            # بروز الفلقتين عند |x| ~ 0.09 مع تجويف وسطي عند x = 0
+            cheek = math.sin(min(1.0, abs(x) / 0.16) * math.pi)
+            cleft = 1.0 - 0.45 * math.exp(-(x * x) / 0.0012)
+            nz -= (0.09 * wy * cheek * cleft + 0.04 * wy)
+            nx *= (1.0 + 0.18 * wy)
+
+        # 2. الساقان تتدليان للأسفل والخارج خلف الإطار المطاطي (y < 0.26) كما في الصورة 6
+        if y < 0.26:
+            t = max(0.0, min(1.0, (0.26 - y) / 0.26))
+            ny = 0.26 - t * 0.28  # تتدلى للأسفل خارج القارب
+            nz = z - 0.08 - t * 0.05 # خلف حافة الإطار الأصفر
+            nx = x * (1.0 + 0.15 * t)
+
+        # 3. الذراعان تستندان للأمام والجانبين على الإطار الأصفر (|x| > 0.19, 0.36 < y < 0.78)
+        elif abs(x) > 0.19 and 0.36 < y < 0.78:
             sgn = 1.0 if x > 0 else -1.0
-            sx = sgn * 0.20
-            sy = 0.60
-            dx = x - sx
-            dy = y - sy
-            dist = min(1.0, abs(dx) / 0.25)
-            ang = -1.05 * dist * sgn # تدوير الذراع لأسفل
+            sx, sy = sgn * 0.19, 0.58
+            dx, dy = x - sx, y - sy
+            dist = min(1.0, abs(dx) / 0.45)
+            ang = -0.95 * dist * sgn
             ca, sa = math.cos(ang), math.sin(ang)
             rx = dx * ca - dy * sa
             ry = dx * sa + dy * ca
-            nx = sx + rx * 0.88
-            ny = sy + ry
-            nz = z + abs(dx) * 0.38 # تقديم اليدين للأمام على حافة القارب
-        # ب. ثني الساقين عند الورك (y < 0.36) للجلوس الطبيعي
-        elif y < 0.36:
-            hip_y = 0.36
-            t = max(0.0, min(1.0, (hip_y - y) / 0.36))
-            ny = 0.22 + (1.0 - t) * 0.14
-            nz = z + t * 0.24
+            nx = sx + rx * 0.82
+            ny = sy + ry - 0.04 * dist
+            nz = z + dist * 0.26 # الذراعان تمتدان للأمام فوق طوق القارب
+
+        # 4. ميلان الجذع العلوي للأمام نحو داخل القارب مع رفع الرأس قليلاً (y >= 0.36)
+        if y >= 0.36:
+            torso_t = min(1.0, (y - 0.36) / 0.45)
+            nz += torso_t * 0.16
+
         new_vs.append([nx, ny, nz])
 
-    # إعادة حساب المتجهات العمودية السلسة (Smooth Vertex Normals) لمنع السواد
+    # حساب المتجهات العمودية السلسة (Smooth Vertex Normals)
     vns = [[0.0, 0.0, 0.0] for _ in new_vs]
     parsed_faces = []
     for fline in faces:
@@ -109,15 +128,13 @@ def build_seated_pirate(src_obj, dst_obj, skin_u, skin_v):
             p0, p1, p2 = new_vs[f_idx[0][0]], new_vs[f_idx[1][0]], new_vs[f_idx[2][0]]
             ux, uy, uz = p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]
             vx, vy, vz = p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]
-            fnx = uy*vz - uz*vy
-            fny = uz*vx - ux*vz
-            fnz = ux*vy - uy*vx
+            fnx, fny, fnz = uy*vz - uz*vy, uz*vx - ux*vz, ux*vy - uy*vx
             for vi, _ in f_idx:
                 vns[vi][0] += fnx
                 vns[vi][1] += fny
                 vns[vi][2] += fnz
 
-    out_lines = ["# Authentic Seated Pirate Mesh with Smooth Normals"]
+    out_lines = ["# Image 6 Authentic Seated Pirate Mesh"]
     for vx, vy, vz in new_vs:
         out_lines.append(f"v {vx:.5f} {vy:.5f} {vz:.5f}")
     for u, v in vts:
@@ -126,8 +143,7 @@ def build_seated_pirate(src_obj, dst_obj, skin_u, skin_v):
         l = math.sqrt(nx*nx + ny*ny + nz*nz) or 1.0
         out_lines.append(f"vn {nx/l:.5f} {ny/l:.5f} {nz/l:.5f}")
     for f_idx in parsed_faces:
-        ftoks = [f"{vi+1}/{ti+1}/{vi+1}" for vi, ti in f_idx]
-        out_lines.append("f " + " ".join(ftoks))
+        out_lines.append("f " + " ".join(f"{vi+1}/{ti+1}/{vi+1}" for vi, ti in f_idx))
     pathlib.Path(dst_obj).write_text("\n".join(out_lines) + "\n", encoding="utf-8")
     print(f"Rebuilt clean seated character mesh: {dst_obj}")
 
@@ -198,7 +214,7 @@ if __name__ == "__main__":
     create_skull_gas_texture()
     brighten_fart_textures()
     # P1 = Green Hippo (MainB), P2 = Orange/Tan Hippo (MainD)
-    build_seated_pirate(ASSETS_DIR / "meshes/GM_3D_Character_MainB.obj", ASSETS_DIR / "meshes/GM_3D_Character_SeatedB.obj", 0.320, 0.265)
-    build_seated_pirate(ASSETS_DIR / "meshes/GM_3D_Character_MainD.obj", ASSETS_DIR / "meshes/GM_3D_Character_SeatedA.obj", 0.198, 0.902)
+    build_seated_pirate(ASSETS_DIR / "meshes/GM_3D_Character_MainB.obj", ASSETS_DIR / "meshes/GM_3D_Character_SeatedB.obj", True)
+    build_seated_pirate(ASSETS_DIR / "meshes/GM_3D_Character_MainD.obj", ASSETS_DIR / "meshes/GM_3D_Character_SeatedA.obj", False)
     extract_and_strip_scene_trees()
 

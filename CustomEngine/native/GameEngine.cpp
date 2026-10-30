@@ -552,6 +552,73 @@ static inline std::string ResolveAsset(const std::string& relPath) {
 
 }
 
+static std::string ResolveAudioFile(const std::string& fileName) {
+    std::string p1 = ResolveAsset("extracted_assets/audio/" + fileName);
+    if (FileExists(p1.c_str())) return p1;
+    std::string p2 = ResolveAsset("extracted_assets/audio/" + fileName + ".wav");
+    if (FileExists(p2.c_str())) return p2;
+    return p1;
+}
+
+static bool ParseJsonFloatField(const char* objStart, const char* objEnd, const char* key, float& outVal);
+
+struct GasPhysicsConfig {
+    float tapBurstForce     = 900.0f; // Force of quick tap burst
+    float sustainedMaxForce = 900.0f; // Max force of sustained gas hold
+    float sustainedMinForce = 180.0f; // Min force of sustained gas hold
+    float steerTorque       = 6.0f;   // Steering torque
+    float boatMaxSpeed      = 14.0f;  // Maximum boat speed
+    float waterLinearDrag   = 0.40f;  // Water linear drag/damping
+    float gasDrainRate      = 12.0f;  // Gas energy consumed per second
+    float gasRegenRate      = 18.0f;  // Gas energy regenerated per second
+} gPhysCfg;
+
+static void SavePhysicsConfigJSON(const std::string& path = "physics_config.json") {
+    std::string resolved = ResolveAsset(path);
+    FILE* f = fopen(resolved.c_str(), "w");
+    if (!f) f = fopen(path.c_str(), "w");
+    if (!f) return;
+    fprintf(f,
+        "{\n"
+        "  \"tapBurstForce\": %.2f,\n"
+        "  \"sustainedMaxForce\": %.2f,\n"
+        "  \"sustainedMinForce\": %.2f,\n"
+        "  \"steerTorque\": %.2f,\n"
+        "  \"boatMaxSpeed\": %.2f,\n"
+        "  \"waterLinearDrag\": %.3f,\n"
+        "  \"gasDrainRate\": %.2f,\n"
+        "  \"gasRegenRate\": %.2f\n"
+        "}\n",
+        gPhysCfg.tapBurstForce, gPhysCfg.sustainedMaxForce, gPhysCfg.sustainedMinForce,
+        gPhysCfg.steerTorque, gPhysCfg.boatMaxSpeed, gPhysCfg.waterLinearDrag,
+        gPhysCfg.gasDrainRate, gPhysCfg.gasRegenRate);
+    fclose(f);
+}
+
+static void LoadPhysicsConfigJSON(const std::string& path = "physics_config.json") {
+    std::string resolved = ResolveAsset(path);
+    char* txt = LoadFileText(resolved.c_str());
+    if (!txt) { SavePhysicsConfigJSON(path); return; }
+    const char* end = txt + strlen(txt);
+    ParseJsonFloatField(txt, end, "\"tapBurstForce\"", gPhysCfg.tapBurstForce);
+    ParseJsonFloatField(txt, end, "\"sustainedMaxForce\"", gPhysCfg.sustainedMaxForce);
+    ParseJsonFloatField(txt, end, "\"sustainedMinForce\"", gPhysCfg.sustainedMinForce);
+    ParseJsonFloatField(txt, end, "\"steerTorque\"", gPhysCfg.steerTorque);
+    ParseJsonFloatField(txt, end, "\"boatMaxSpeed\"", gPhysCfg.boatMaxSpeed);
+    ParseJsonFloatField(txt, end, "\"waterLinearDrag\"", gPhysCfg.waterLinearDrag);
+    ParseJsonFloatField(txt, end, "\"gasDrainRate\"", gPhysCfg.gasDrainRate);
+    ParseJsonFloatField(txt, end, "\"gasRegenRate\"", gPhysCfg.gasRegenRate);
+    UnloadFileText(txt);
+}
+
+enum AppScreenState {
+    SCREEN_MAIN_MENU = 0,
+    SCREEN_LAN_LOBBY = 1,
+    SCREEN_SETTINGS  = 2,
+    SCREEN_GAMEPLAY  = 3
+};
+
+
 // =============================================================================
 
 // 5. Particle System (Animated Comic Billboard Fart VFX)
@@ -969,50 +1036,59 @@ struct ObstacleModels {
     Model mCP;
 };
 
-static void GetEntityAnimatedTransform(const LevelEntity& ent, Vector3& outPos, float& outYaw, float& outRoll) {
-    outPos = ent.position;
-    outYaw = ent.rotationY;
-    outRoll = 0.0f;
+static void GetEntityAnimatedTransform(const LevelEntity& ent, Vector3& outPos, float& outYaw, float& outPitch, float& outRoll) {
+    outPos   = ent.position;
+    outYaw   = ent.rotationY;
+    outPitch = 0.0f;
+    outRoll  = 0.0f;
 
-    if (ent.type == ENT_OBS_B2) {
-        outRoll = sinf(ent.animTimer * 2.0f) * 28.0f; // Seesaw tipping
-    } else if (ent.type == ENT_OBS_B3) {
-        outYaw = ent.rotationY + ent.animTimer * 90.0f; // Continuous rotation
-    } else if (ent.type == ENT_OBS_B5) {
-        outYaw = ent.rotationY + ent.animTimer * 65.0f;
-    } else if (ent.type == ENT_OBS_C1) {
-        outRoll = sinf(ent.animTimer * 2.2f) * 50.0f; // Pendulum swing
-    } else if (ent.type == ENT_OBS_C2) {
-        outRoll = cosf(ent.animTimer * 2.0f) * 55.0f;
-    } else if (ent.type == ENT_OBS_C4) {
-        outYaw = ent.rotationY + ent.animTimer * 110.0f;
-    } else if (ent.type == ENT_OBS_C5) {
-        outRoll = ent.animTimer * 85.0f; // Vertical spinning wheel
-    } else if (ent.type == ENT_OBS_F3) {
-        outYaw = ent.rotationY + sinf(ent.animTimer * 1.5f) * 75.0f;
-    } else if (ent.type == ENT_OBS_F10) {
-        outYaw = ent.rotationY + sinf(ent.animTimer * 1.2f) * 75.0f;
-    } else if (ent.type == ENT_OBS_F11) {
-        // Lateral reciprocating travel across water canal + spinning drum
-        float rad = ent.rotationY * DEG2RAD;
-        float latOffset = sinf(ent.animTimer * 1.8f + (float)ent.id) * 2.2f;
-        outPos.x += cosf(rad) * latOffset;
-        outPos.z -= sinf(rad) * latOffset;
-        outRoll = ent.animTimer * 120.0f;
-    } else if (ent.type == ENT_OBS_F13) {
-        outYaw = ent.rotationY + ent.animTimer * 75.0f;
-    } else if (ent.type == ENT_OBS_F14) {
-        float rad = ent.rotationY * DEG2RAD;
-        float slideOffset = sinf(ent.animTimer * 2.2f) * 2.0f;
-        outPos.x += cosf(rad) * slideOffset;
-        outPos.z -= sinf(rad) * slideOffset;
-    } else if (ent.type == ENT_OBS_F23) {
-        outYaw = ent.rotationY + sinf(ent.animTimer * 1.4f) * 65.0f;
+    switch (ent.type) {
+        case ENT_OBS_B2:
+        case ENT_OBS_C1:
+            // Image 2: Two hinged arms rotating vertically around local X axis
+            outPitch = -26.0f + sinf(ent.animTimer * 2.2f + (float)ent.id) * 30.0f;
+            break;
+        case ENT_OBS_F10:
+        case ENT_OBS_F13:
+            // Image 4: Two hinged arms with pink crusher rotating vertically around local Z axis
+            outRoll = -24.0f + sinf(ent.animTimer * 2.2f + (float)ent.id) * 28.0f;
+            break;
+        case ENT_OBS_F11:
+            // Image 3: Blue spiked mine is 100% stationary!
+            break;
+        case ENT_OBS_B3:
+        case ENT_OBS_B5:
+        case ENT_OBS_C4:
+            // Horizontal rotators on water spin around Y
+            outYaw = ent.rotationY + ent.animTimer * 95.0f;
+            break;
+        case ENT_OBS_C5:
+            // Vertical water wheel rotates around local Z axis
+            outRoll = ent.animTimer * 80.0f;
+            break;
+        case ENT_OBS_C2:
+            // Suspended pendulum hammer
+            outRoll = sinf(ent.animTimer * 2.0f + (float)ent.id) * 48.0f;
+            break;
+        case ENT_OBS_F3:
+        case ENT_OBS_F23:
+            // Horizontal swinging gates
+            outYaw = ent.rotationY + sinf(ent.animTimer * 2.0f + (float)ent.id) * 55.0f;
+            break;
+        case ENT_OBS_F14: {
+            // Horizontal sliding barrier
+            float slide = sinf(ent.animTimer * 2.0f + (float)ent.id) * 1.8f;
+            float rad = ent.rotationY * DEG2RAD;
+            outPos.x += cosf(rad) * slide;
+            outPos.z -= sinf(rad) * slide;
+            break;
+        }
+        default:
+            break;
     }
 }
-
 static bool CheckObstacleOBBCollision(Vector3 raftPos, const LevelEntity& ent, Vector3 animPos, float animYawDeg, float animRollDeg) {
-    if (ent.type >= ENT_TREE_JUNGLE || ent.type == ENT_GUST) return false;
+    if (ent.type >= ENT_TREE_JUNGLE || ent.type == ENT_GUST || ent.type == ENT_ROCK_1 || ent.type == ENT_ROCK_2 || ent.type == ENT_OBS_F18) return false;
     // Check vertical clearance first
     float dy = fabsf((raftPos.y + 0.35f) - animPos.y);
     if (ent.type == ENT_OBS_C5) {
@@ -1189,15 +1265,16 @@ int main(int argc, char** argv) {
 
     int targetTestFrame = 60;
 
+    std::string testScreenArg = "";
     for (int i = 1; i < argc; i++) {
-
+        if (strcmp(argv[i], "--test-screen") == 0 && i + 1 < argc) testScreenArg = argv[++i];
         if (strcmp(argv[i], "--test-screenshot") == 0) testScreenshotMode = true;
         if (strcmp(argv[i], "--test-editor") == 0) testEditorMode = true;
         if (strcmp(argv[i], "--test-death") == 0) testDeathMode = true;
         if (strcmp(argv[i], "--test-lan") == 0) testLanMode = true;
         if (strcmp(argv[i], "--test-select") == 0 && i + 1 < argc) testSelectIdx = atoi(argv[++i]);
 
-        if (strcmp(argv[i], "--shot-name") == 0 && i + 1 < argc) testShotName = argv[++i];
+        if (strcmp(argv[i], "--shot-name") == 0 && i + 1 < argc) { testShotName = argv[++i]; testScreenshotMode = true; }
 
         if (strcmp(argv[i], "--shot-angle") == 0 && i + 1 < argc) {
 
@@ -1213,7 +1290,7 @@ int main(int argc, char** argv) {
 
         }
 
-        if (strcmp(argv[i], "--shot-frames") == 0 && i + 1 < argc) targetTestFrame = atoi(argv[++i]);
+        if (strcmp(argv[i], "--shot-frames") == 0 && i + 1 < argc) { targetTestFrame = atoi(argv[++i]); testScreenshotMode = true; }
 
         if (strcmp(argv[i], "--test-cam") == 0 && i + 6 < argc) {
             useCustomTestCam = true;
@@ -1230,6 +1307,7 @@ int main(int argc, char** argv) {
     SetConfigFlags(FLAG_WINDOW_UNDECORATED | FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
 
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "Fart Together - Authentic 1:1 Engine");
+    SetExitKey(KEY_NULL); // ESC key handled by in-game UI menu
 
     InitAudioDevice();
 
@@ -1505,14 +1583,38 @@ int main(int argc, char** argv) {
     // Audio
 
     Sound fartSounds[6];
-
     for (int s = 0; s < 6; s++) {
-
         std::string aPath = ResolveAsset("extracted_assets/audio/fart_" + std::to_string(s + 1) + ".wav");
-
         fartSounds[s] = LoadSound(aPath.c_str());
-
     }
+
+    Sound sndTap[3];
+    sndTap[0] = LoadSound(ResolveAudioFile("fart_1.wav").c_str());
+    sndTap[1] = LoadSound(ResolveAudioFile("fart_2.wav").c_str());
+    sndTap[2] = LoadSound(ResolveAudioFile("fart_5.wav").c_str());
+
+    Sound sndHold[2];
+    sndHold[0] = LoadSound(ResolveAudioFile("freesound_community-fart-3-89567.wav").c_str());
+    sndHold[1] = LoadSound(ResolveAudioFile("freesound_community-fart-sound-effect-reed-82976.wav").c_str());
+
+    Sound sndExplode = LoadSound(ResolveAudioFile("boat_explode.wav").c_str());
+    Sound sndBounce  = LoadSound(ResolveAudioFile("fart_4.wav").c_str());
+
+    // Load authentic UI textures for Main Menu and Lobby
+    Texture2D texLogoSplash = LoadTexture(ResolveAsset("extracted_assets/textures/Logo_Splash.png").c_str());
+    Texture2D texMenuBg     = LoadTexture(ResolveAsset("extracted_assets/textures/Background.png").c_str());
+    Texture2D texModeFartRun = LoadTexture(ResolveAsset("extracted_assets/textures/Mode_FartRun.png").c_str());
+    Texture2D texLobbyChars[4] = {
+        LoadTexture(ResolveAsset("extracted_assets/textures/Character_LobbyGreen.png").c_str()),
+        LoadTexture(ResolveAsset("extracted_assets/textures/Character_LobbyOrange.png").c_str()),
+        LoadTexture(ResolveAsset("extracted_assets/textures/Character_LobbyBlue.png").c_str()),
+        LoadTexture(ResolveAsset("extracted_assets/textures/Character_LobbyGrey.png").c_str())
+    };
+    int selectedLobbyChar = 0;
+    float masterVolume = 0.85f;
+    SetMasterVolume(masterVolume);
+
+    LoadPhysicsConfigJSON("physics_config.json");
 
     // World Transforms
 
@@ -1679,6 +1781,22 @@ int main(int argc, char** argv) {
     int totalDeaths = 0;
 
     // Interactive Level & Obstacle Editor (Unity / Godot style)
+    bool singlePirateMode = (LanGetRole() == LAN_OFFLINE);
+    AppScreenState currentScreen = SCREEN_MAIN_MENU;
+    if (testScreenshotMode || testEditorMode || testDeathMode || testLanMode || useCustomTestCam) {
+        currentScreen = SCREEN_GAMEPLAY;
+    }
+    if (testScreenArg == "menu") {
+        currentScreen = SCREEN_MAIN_MENU;
+        testScreenshotMode = true;
+    } else if (testScreenArg == "lobby") {
+        currentScreen = SCREEN_LAN_LOBBY;
+        testScreenshotMode = true;
+    } else if (testScreenArg == "settings") {
+        currentScreen = SCREEN_SETTINGS;
+        testScreenshotMode = true;
+    }
+
     bool editorMode = testEditorMode;
     bool editorAnimateObstacles = true; // Natural obstacle motion enabled by default!
     int selectedObs = (testSelectIdx >= 0) ? testSelectIdx : (testEditorMode ? 0 : -1);
@@ -1753,7 +1871,7 @@ int main(int argc, char** argv) {
                 break;
             }
         }
-        PlaySound(fartSounds[5]);
+        PlaySound(sndExplode);
 
     };
 
@@ -1810,7 +1928,8 @@ int main(int argc, char** argv) {
 
         if (CheckCollisionPointRec(mousePos, btnMinRec) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) MinimizeWindow();
 
-        // 2. Mouse Camera Orbit Controls
+                if (currentScreen == SCREEN_GAMEPLAY) {
+// 2. Mouse Camera Orbit Controls
 
         if (IsKeyPressed(KEY_TAB) || IsMouseButtonPressed(MOUSE_BUTTON_MIDDLE)) {
 
@@ -1930,9 +2049,9 @@ int main(int argc, char** argv) {
                 float tapPower = (GAS_TAP_BURST_FORCE / BOAT_MASS) * 0.35f;
                 raft.velocity = Vector3Add(raft.velocity, Vector3Scale(p1ThrustWorld, tapPower));
                 float steerTq = (p1OutwardLocal.x * p1ThrustLocal.z - p1OutwardLocal.z * p1ThrustLocal.x);
-                raft.angularVelocityY += steerTq * (BOAT_STEER_TORQUE / BOAT_MASS) * 8.0f;
+                raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 8.0f;
                 EmitFartBurst(p1PosWorld, p1OutwardWorld, 0.4f);
-                PlaySound(fartSounds[rand() % 6]);
+                PlaySound(sndTap[rand() % 3]);
             }
         }
 
@@ -1940,18 +2059,25 @@ int main(int argc, char** argv) {
 
         // Sustained Thrust Application for P1
         if (gasP1.isSustained && !raft.isDestroyed) {
-            float curForce = GAS_MIN_FORCE + (GAS_NORMAL_FORCE - GAS_MIN_FORCE) * gasP1.sustainedCharge;
+            float curForce = gPhysCfg.sustainedMinForce + (gPhysCfg.sustainedMaxForce - gPhysCfg.sustainedMinForce) * gasP1.sustainedCharge;
             float accel = (curForce / BOAT_MASS) * dt * 0.85f;
             raft.velocity = Vector3Add(raft.velocity, Vector3Scale(p1ThrustWorld, accel));
             float steerTq = (p1OutwardLocal.x * p1ThrustLocal.z - p1OutwardLocal.z * p1ThrustLocal.x);
-            raft.angularVelocityY += steerTq * (BOAT_STEER_TORQUE / BOAT_MASS) * (curForce / GAS_NORMAL_FORCE) * dt * 22.0f;
+            raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * (curForce / gPhysCfg.sustainedMaxForce) * dt * 22.0f;
             if (rand() % 4 == 0) {
                 EmitFartBurst(p1PosWorld, p1OutwardWorld, gasP1.sustainedCharge);
             }
+            if (!IsSoundPlaying(sndHold[0]) && !IsSoundPlaying(sndHold[1])) {
+                PlaySound(sndHold[rand() % 2]);
+            }
+        } else {
+            if (IsSoundPlaying(sndHold[0])) StopSound(sndHold[0]);
+            if (IsSoundPlaying(sndHold[1])) StopSound(sndHold[1]);
         }
 
-        // Player 2 Independent Controls (Right Pirate): Arrow Left/Right + Arrow Up / Right Ctrl / Mouse Left (or Gamepad 1)
+        // Player 2 Independent Controls (Active only in Multiplayer LAN!)
         bool p2InputDown = false;
+        if (!singlePirateMode) {
         bool p2InputReleased = false;
         if (!raft.isDestroyed) {
             float p2RimMove = 0.0f;
@@ -2025,7 +2151,9 @@ int main(int argc, char** argv) {
 
         }
 
-        // "FART TOGETHER" Co-op Sync Boost!
+                }
+
+// "FART TOGETHER" Co-op Sync Boost!
 
         bool isSuperSync = (gasP1.isSustained && gasP2.isSustained && gasP1.sustainedCharge > 0.5f && gasP2.sustainedCharge > 0.5f);
 
@@ -2069,7 +2197,7 @@ int main(int argc, char** argv) {
         bool overWater   = inStartPond || (distToWaterMesh < 5.8f);
 
         // Downstream slope acceleration on water ramps & waterfalls
-        float maxAllowedSpeed = BOAT_MAX_SPEED;
+        float maxAllowedSpeed = gPhysCfg.boatMaxSpeed;
         if (!inStartPond && overWater && !raft.isDestroyed) {
             float downSlope = Clamp(-riverTangent.y, -0.35f, 0.65f);
             float streamPush = 0.65f + fmaxf(0.0f, downSlope * 18.0f);
@@ -2120,8 +2248,8 @@ int main(int argc, char** argv) {
         }
 
         // Linear Damping & Position Integration
-        raft.velocity.x *= (1.0f - BOAT_LINEAR_DAMPING * dt);
-        raft.velocity.z *= (1.0f - BOAT_LINEAR_DAMPING * dt);
+        raft.velocity.x *= (1.0f - gPhysCfg.waterLinearDrag * dt);
+        raft.velocity.z *= (1.0f - gPhysCfg.waterLinearDrag * dt);
         raft.position = Vector3Add(raft.position, Vector3Scale(raft.velocity, dt));
 
         // Clamp Horizontal Speed
@@ -2132,22 +2260,55 @@ int main(int argc, char** argv) {
             raft.velocity.z *= ratio;
         }
 
-        // Boat Tilt / Pitch / Roll
-        float fwdAccel = Vector3DotProduct(raft.velocity, riverTangent);
-        nearestWaterPt = riverCenter;
-        Vector3 toNearest = Vector3Subtract(raft.position, nearestWaterPt);
-        float crossWaterDist = Vector3DotProduct(toNearest, riverNormal);
-        raft.pitch = Lerp(raft.pitch, -fwdAccel * 0.035f, 6.0f * dt);
-        raft.roll  = Lerp(raft.roll, (crossWaterDist * 0.045f) + (raft.angularVelocityY * 0.12f), 6.0f * dt);
+        // Boat is 100% Flat on Water (Fixes Image 1 Tilt!)
+        raft.pitch = Lerp(raft.pitch, 0.0f, 10.0f * dt);
+        raft.roll  = Lerp(raft.roll, Clamp(raft.angularVelocityY * 0.025f, -0.08f, 0.08f), 10.0f * dt);
         raft.speed = horizSpeed;
 
-        // 5. Check Obstacle & Hazard Collisions using Unified Animation Transform
+        // 5. Check Obstacle & Hazard Collisions (Rocks & F18 Rebound are Non-Fatal!)
         for (auto& ent : levelEntities) {
             Vector3 animPos;
-            float animYaw, animRoll;
-            GetEntityAnimatedTransform(ent, animPos, animYaw, animRoll);
+            float animYaw, animPitch, animRoll;
+            GetEntityAnimatedTransform(ent, animPos, animYaw, animPitch, animRoll);
 
-            if (ent.type == ENT_GUST) {
+            if (ent.type == ENT_ROCK_1 || ent.type == ENT_ROCK_2) {
+                // الصخور: تصادم صلب منزلق فقط بدون انفجار القارب!
+                float rockR = 0.65f * ent.scale + 1.05f;
+                float dx = raft.position.x - ent.position.x;
+                float dz = raft.position.z - ent.position.z;
+                float dXZ = sqrtf(dx * dx + dz * dz);
+                if (dXZ < rockR && dXZ > 0.001f && fabsf(raft.position.y - ent.position.y) < 2.5f) {
+                    float nx = dx / dXZ, nz = dz / dXZ;
+                    raft.position.x = ent.position.x + nx * rockR;
+                    raft.position.z = ent.position.z + nz * rockR;
+                    float vn = raft.velocity.x * nx + raft.velocity.z * nz;
+                    if (vn < 0.0f) {
+                        raft.velocity.x -= vn * nx;
+                        raft.velocity.z -= vn * nz;
+                    }
+                }
+            } else if (ent.type == ENT_OBS_F18) {
+                // الصورة 5 (OBS_F18_SPIKE): عمود ارتدادي يدفع القارب عكس اتجاه قدومه وبحسب سرعة ارتطامه!
+                float postR = 0.45f * ent.scale + 1.05f;
+                float dx = raft.position.x - ent.position.x;
+                float dz = raft.position.z - ent.position.z;
+                float dXZ = sqrtf(dx * dx + dz * dz);
+                if (dXZ < postR && dXZ > 0.001f && fabsf(raft.position.y - ent.position.y) < 3.0f && !raft.isDestroyed) {
+                    Vector3 radialOut = { dx / dXZ, 0.0f, dz / dXZ };
+                    Vector3 horizVel  = { raft.velocity.x, 0.0f, raft.velocity.z };
+                    float impactSpeed = Vector3Length(horizVel);
+                    Vector3 reverseDir = (impactSpeed > 0.5f)
+                        ? Vector3Normalize(Vector3Add(Vector3Scale(Vector3Normalize(horizVel), -0.7f), Vector3Scale(radialOut, 0.3f)))
+                        : radialOut;
+                    raft.position.x = ent.position.x + radialOut.x * (postR + 0.08f);
+                    raft.position.z = ent.position.z + radialOut.z * (postR + 0.08f);
+                    float pushSpeed = Clamp(impactSpeed * 1.65f, 7.5f, 22.0f);
+                    raft.velocity.x = reverseDir.x * pushSpeed;
+                    raft.velocity.z = reverseDir.z * pushSpeed;
+                    camCtrl.shakeTrauma = fmaxf(camCtrl.shakeTrauma, Clamp(impactSpeed / 14.0f, 0.25f, 0.65f));
+                    PlaySound(sndBounce);
+                }
+            } else if (ent.type == ENT_GUST) {
                 float d = Vector3Distance(raft.position, ent.position);
                 if (d < ent.radius && !raft.isDestroyed) {
                     float rad = ent.rotationY * DEG2RAD;
@@ -2574,8 +2735,22 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             EndTextureMode();
         }
 
+                }
+
+                auto DrawMenuBtn = [&](Rectangle rec, const char* label, Color bgCol, Color textCol, int fontSize = 16, bool bold = true) -> bool {
+            bool hov = CheckCollisionPointRec(mousePos, rec);
+            Color fill = hov ? ColorBrightness(bgCol, 0.22f) : bgCol;
+            DrawRectangleRounded(rec, 0.25f, 4, fill);
+            DrawRectangleRoundedLinesEx(rec, 0.25f, 4, 1.5f, hov ? WHITE : ColorBrightness(bgCol, 0.45f));
+            Font f = bold ? fontUIBold : fontUI;
+            Vector2 sz = MeasureTextEx(f, label, (float)fontSize, 0.4f);
+            DrawTextEx(f, label, Vector2{ rec.x + (rec.width - sz.x) * 0.5f, rec.y + (rec.height - sz.y) * 0.5f }, (float)fontSize, 0.4f, textCol);
+            return hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+        };
+
         BeginDrawing();
 
+        if (currentScreen == SCREEN_GAMEPLAY) {
         // 1. Authentic Cartoon Sky Backdrop
         ClearBackground(Color{ 194, 217, 242, 255 });
         if (texSkyFront.id != 0) {
@@ -2637,16 +2812,13 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             if (ent.model != nullptr) {
                 Vector3 animPos;
                 float animYaw, animRoll;
-                GetEntityAnimatedTransform(ent, animPos, animYaw, animRoll);
+                float animPitch = 0.0f; GetEntityAnimatedTransform(ent, animPos, animYaw, animPitch, animRoll);
 
                 rlPushMatrix();
                 rlTranslatef(animPos.x, animPos.y, animPos.z);
                 rlRotatef(animYaw, 0.0f, 1.0f, 0.0f);
-                if (animRoll != 0.0f) {
-                    if (ent.type == ENT_OBS_C5) rlRotatef(animRoll, 0.0f, 0.0f, 1.0f);
-                    else if (ent.type == ENT_OBS_F11) rlRotatef(animRoll, 1.0f, 0.0f, 0.0f);
-                    else rlRotatef(animRoll, 0.0f, 0.0f, 1.0f);
-                }
+                if (fabsf(animPitch) > 0.01f) rlRotatef(animPitch, 1.0f, 0.0f, 0.0f);
+                if (fabsf(animRoll)  > 0.01f) rlRotatef(animRoll,  0.0f, 0.0f, 1.0f);
                 float s = (ent.scale > 0.01f) ? ent.scale : 1.0f;
                 rlScalef(s, s, s);
                 int isTreeFlag = (ent.type == ENT_TREE_JUNGLE) ? 1 : 0;
@@ -2725,32 +2897,37 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             SetShaderValue(shaderLighting, uEyeBulgeLoc,  &p1EyeBulge,  SHADER_UNIFORM_FLOAT);
 
             rlPushMatrix();
-            float p1X = sinf(p1RimAngle) * 0.94f;
-            float p1Z = cosf(p1RimAngle) * 0.94f;
-            rlTranslatef(p1X, 0.28f + gasP1.trembleOffset, p1Z);
+            // Image 6 Authentic Outer Rim Seating (Legs and buttocks dangle outside over water!)
+            float rimSeatRadius = 1.10f;
+            float rimSeatHeight = 0.40f;
+            float p1X = sinf(p1RimAngle) * rimSeatRadius;
+            float p1Z = cosf(p1RimAngle) * rimSeatRadius;
+            rlTranslatef(p1X, rimSeatHeight + gasP1.trembleOffset, p1Z);
             float p1FaceYaw = (p1RimAngle * RAD2DEG) + 180.0f;
             rlRotatef(p1FaceYaw, 0, 1, 0);
             DrawModel(charB, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
             rlPopMatrix();
 
-            // Right Pirate (Player 2: Orange Hippo - SeatedA)
-            float p2Redness = gasP2.redness;
-            float p2ButtSwell = (gasP2.boneScale - 1.0f) * 2.5f;
-            float p2EyeBulge = fmaxf(gasP2.redness, (gasP2.releaseTimer > 0.0f) ? (gasP2.releaseTimer / GAS_RELEASE_SECONDS) : 0.0f);
-            if (gasP2.isPressing && p2EyeBulge < 0.25f) p2EyeBulge = 0.25f + (gasP2.pressTimer / 1.0f) * 0.75f;
-            p2EyeBulge = Clamp(p2EyeBulge, 0.0f, 1.0f);
-            SetShaderValue(shaderLighting, uRednessLoc,   &p2Redness,   SHADER_UNIFORM_FLOAT);
-            SetShaderValue(shaderLighting, uButtSwellLoc, &p2ButtSwell, SHADER_UNIFORM_FLOAT);
-            SetShaderValue(shaderLighting, uEyeBulgeLoc,  &p2EyeBulge,  SHADER_UNIFORM_FLOAT);
+            if (!singlePirateMode) {
+                // Right Pirate (Player 2: Orange Hippo - Active in LAN mode!)
+                float p2Redness = gasP2.redness;
+                float p2ButtSwell = (gasP2.boneScale - 1.0f) * 2.5f;
+                float p2EyeBulge = fmaxf(gasP2.redness, (gasP2.releaseTimer > 0.0f) ? (gasP2.releaseTimer / GAS_RELEASE_SECONDS) : 0.0f);
+                if (gasP2.isPressing && p2EyeBulge < 0.25f) p2EyeBulge = 0.25f + (gasP2.pressTimer / 1.0f) * 0.75f;
+                p2EyeBulge = Clamp(p2EyeBulge, 0.0f, 1.0f);
+                SetShaderValue(shaderLighting, uRednessLoc,   &p2Redness,   SHADER_UNIFORM_FLOAT);
+                SetShaderValue(shaderLighting, uButtSwellLoc, &p2ButtSwell, SHADER_UNIFORM_FLOAT);
+                SetShaderValue(shaderLighting, uEyeBulgeLoc,  &p2EyeBulge,  SHADER_UNIFORM_FLOAT);
 
-            rlPushMatrix();
-            float p2X = sinf(p2RimAngle) * 0.94f;
-            float p2Z = cosf(p2RimAngle) * 0.94f;
-            rlTranslatef(p2X, 0.28f + gasP2.trembleOffset, p2Z);
-            float p2FaceYaw = (p2RimAngle * RAD2DEG) + 180.0f;
-            rlRotatef(p2FaceYaw, 0, 1, 0);
-            DrawModel(charA, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
-            rlPopMatrix();
+                rlPushMatrix();
+                float p2X = sinf(p2RimAngle) * rimSeatRadius;
+                float p2Z = cosf(p2RimAngle) * rimSeatRadius;
+                rlTranslatef(p2X, rimSeatHeight + gasP2.trembleOffset, p2Z);
+                float p2FaceYaw = (p2RimAngle * RAD2DEG) + 180.0f;
+                rlRotatef(p2FaceYaw, 0, 1, 0);
+                DrawModel(charA, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
+                rlPopMatrix();
+            }
 
             // Reset uniforms for raft and all subsequent models
                     float zeroReset = 0.0f;
@@ -2906,13 +3083,15 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 DrawRectangleRounded(Rectangle{ 67, 12, 180.0f * gasFrac1, 14 }, 0.45f, 6, barFillCol1);
             }
 
-            float gasFrac2 = Clamp(gasP2.gasEnergy / GAS_MAX, 0.0f, 1.0f);
-            Color barFillCol2 = gasP2.gasDepleted ? Color{ 239, 68, 68, 255 } : Color{ 56, 189, 248, 255 };
+            if (!singlePirateMode) {
+                float gasFrac2 = Clamp(gasP2.gasEnergy / GAS_MAX, 0.0f, 1.0f);
+                Color barFillCol2 = gasP2.gasDepleted ? Color{ 239, 68, 68, 255 } : Color{ 56, 189, 248, 255 };
 
-            DrawRectangleRounded(Rectangle{ 65, 32, 184, 18 }, 0.5f, 6, Color{ 15, 23, 42, 210 });
-            DrawRectangleRoundedLinesEx(Rectangle{ 65, 32, 184, 18 }, 0.5f, 6, 1.5f, Color{ 255, 255, 255, 160 });
-            if (gasFrac2 > 0.02f) {
-                DrawRectangleRounded(Rectangle{ 67, 34, 180.0f * gasFrac2, 14 }, 0.45f, 6, barFillCol2);
+                DrawRectangleRounded(Rectangle{ 65, 32, 184, 18 }, 0.5f, 6, Color{ 15, 23, 42, 210 });
+                DrawRectangleRoundedLinesEx(Rectangle{ 65, 32, 184, 18 }, 0.5f, 6, 1.5f, Color{ 255, 255, 255, 160 });
+                if (gasFrac2 > 0.02f) {
+                    DrawRectangleRounded(Rectangle{ 67, 34, 180.0f * gasFrac2, 14 }, 0.45f, 6, barFillCol2);
+                }
             }
 
             DrawTexturePro(texHipo, Rectangle{ 0, 0, (float)texHipo.width, (float)texHipo.height },
@@ -2979,8 +3158,8 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             DrawTexturePro(texEsc, Rectangle{ 0, 0, (float)texEsc.width, (float)texEsc.height },
                            Rectangle{ 26, (float)GetScreenHeight() - 43, 24, 24 }, Vector2{ 0, 0 }, 0.0f, WHITE);
             DrawText("LEAVE", 58, GetScreenHeight() - 40, 16, RAYWHITE);
-            if (hoverLeave && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                break;
+            if ((hoverLeave && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_ESCAPE)) {
+                currentScreen = SCREEN_MAIN_MENU;
             }
         }
 
@@ -3050,7 +3229,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
         // 6. Interactive 3D Level Editor Inspector Panel (Authentic Godot 4 Engine Style)
         if (editorMode) {
             float panelW = 340.0f;
-            float panelH = 680.0f;
+            float panelH = 820.0f;
             Rectangle panelRec = { (float)GetScreenWidth() - panelW - 14, 52, panelW, panelH };
 
             auto DrawGodotBtn = [&](Rectangle rec, const char* label, Color bgCol, Color textCol, bool bold = false) -> bool {
@@ -3239,8 +3418,8 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             }
             py += 36;
 
-            Rectangle btnResetAllMotion = { panelRec.x + 12, py, panelW - 24, 30 };
-            if (DrawGodotBtn(btnResetAllMotion, "âš¡ Set All Obstacles to Natural Motion (1.0x)", Color{ 36, 110, 80, 255 }, WHITE, true)) {
+            Rectangle btnResetAllMotion = { panelRec.x + 12, py, panelW - 24, 28 };
+            if (DrawGodotBtn(btnResetAllMotion, "⚡ Set All Obstacles to Natural Motion (1.0x)", Color{ 36, 110, 80, 255 }, WHITE, true)) {
                 for (auto& e : levelEntities) {
                     e.animSpeed = 1.0f;
                 }
@@ -3248,12 +3427,40 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 editorMsg = "All Obstacles Set to Natural Motion (1.0x)!";
                 editorMsgTimer = 3.0f;
             }
-            py += 35;
+            py += 32;
 
-            Rectangle btnSaveRec = { panelRec.x + 12, py, panelW - 24, 34 };
-            if (DrawGodotBtn(btnSaveRec, "Save Level Layout (Ctrl+S)", Color{ 71, 140, 191, 255 }, WHITE, true) || (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_S)) || IsKeyPressed(KEY_F5)) {
+            // Gas Propulsion Physics Section (Saved Forever)
+            DrawTextEx(fontUIBold, "Gas Propulsion Physics (Saved Forever):", Vector2{ panelRec.x + 14, py }, 12, 0.4f, Color{ 255, 215, 0, 255 });
+            py += 18;
+            DrawTextEx(fontUI, TextFormat("Tap Burst: %.0f N  |  Hold Force: %.0f N", gPhysCfg.tapBurstForce, gPhysCfg.sustainedMaxForce), Vector2{ panelRec.x + 14, py }, 11, 0.3f, Color{ 220, 225, 235, 255 });
+            py += 14;
+            Rectangle btnTpM = { panelRec.x + 12, py, 68, 20 };
+            Rectangle btnTpP = { panelRec.x + 84, py, 68, 20 };
+            Rectangle btnHldM = { panelRec.x + 156, py, 68, 20 };
+            Rectangle btnHldP = { panelRec.x + 228, py, 68, 20 };
+            if (DrawGodotBtn(btnTpM, "Tap -50", Color{ 36, 43, 58, 255 }, WHITE, true)) gPhysCfg.tapBurstForce = Clamp(gPhysCfg.tapBurstForce - 50.0f, 100.0f, 3000.0f);
+            if (DrawGodotBtn(btnTpP, "Tap +50", Color{ 36, 43, 58, 255 }, WHITE, true)) gPhysCfg.tapBurstForce = Clamp(gPhysCfg.tapBurstForce + 50.0f, 100.0f, 3000.0f);
+            if (DrawGodotBtn(btnHldM, "Hold -50", Color{ 36, 43, 58, 255 }, WHITE, true)) gPhysCfg.sustainedMaxForce = Clamp(gPhysCfg.sustainedMaxForce - 50.0f, 100.0f, 3000.0f);
+            if (DrawGodotBtn(btnHldP, "Hold +50", Color{ 36, 43, 58, 255 }, WHITE, true)) gPhysCfg.sustainedMaxForce = Clamp(gPhysCfg.sustainedMaxForce + 50.0f, 100.0f, 3000.0f);
+            py += 24;
+
+            DrawTextEx(fontUI, TextFormat("Steer Torque: %.1f  |  Max Speed: %.1f", gPhysCfg.steerTorque, gPhysCfg.boatMaxSpeed), Vector2{ panelRec.x + 14, py }, 11, 0.3f, Color{ 220, 225, 235, 255 });
+            py += 14;
+            Rectangle btnTqM = { panelRec.x + 12, py, 68, 20 };
+            Rectangle btnTqP = { panelRec.x + 84, py, 68, 20 };
+            Rectangle btnSpM = { panelRec.x + 156, py, 68, 20 };
+            Rectangle btnSpP = { panelRec.x + 228, py, 68, 20 };
+            if (DrawGodotBtn(btnTqM, "Tq -0.5", Color{ 36, 43, 58, 255 }, WHITE, true)) gPhysCfg.steerTorque = Clamp(gPhysCfg.steerTorque - 0.5f, 1.0f, 25.0f);
+            if (DrawGodotBtn(btnTqP, "Tq +0.5", Color{ 36, 43, 58, 255 }, WHITE, true)) gPhysCfg.steerTorque = Clamp(gPhysCfg.steerTorque + 0.5f, 1.0f, 25.0f);
+            if (DrawGodotBtn(btnSpM, "Spd -1", Color{ 36, 43, 58, 255 }, WHITE, true)) gPhysCfg.boatMaxSpeed = Clamp(gPhysCfg.boatMaxSpeed - 1.0f, 5.0f, 40.0f);
+            if (DrawGodotBtn(btnSpP, "Spd +1", Color{ 36, 43, 58, 255 }, WHITE, true)) gPhysCfg.boatMaxSpeed = Clamp(gPhysCfg.boatMaxSpeed + 1.0f, 5.0f, 40.0f);
+            py += 28;
+
+            Rectangle btnSaveRec = { panelRec.x + 12, py, panelW - 24, 32 };
+            if (DrawGodotBtn(btnSaveRec, "Save Level & Physics (Ctrl+S)", Color{ 71, 140, 191, 255 }, WHITE, true) || (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_S)) || IsKeyPressed(KEY_F5)) {
                 SaveLevelLayoutJSON(LEVEL_LAYOUT_PATH, levelEntities);
-                editorMsg = "Saved Layout to level_layout.json!";
+                SavePhysicsConfigJSON("physics_config.json");
+                editorMsg = "Saved Layout & Physics to JSON!";
                 editorMsgTimer = 3.5f;
             }
             py += 44;
@@ -3280,6 +3487,213 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             }
         }
         }
+                } else if (currentScreen == SCREEN_MAIN_MENU) {
+            ClearBackground(Color{ 18, 22, 34, 255 });
+            if (texMenuBg.id != 0) {
+                DrawTexturePro(texMenuBg, Rectangle{ 0, 0, (float)texMenuBg.width, (float)texMenuBg.height },
+                               Rectangle{ 0, 0, (float)GetScreenWidth(), (float)GetScreenHeight() }, Vector2{0, 0}, 0.0f, WHITE);
+            }
+            DrawRectangleGradientV(0, 0, GetScreenWidth(), GetScreenHeight(), Color{ 10, 15, 28, 140 }, Color{ 5, 8, 18, 210 });
+
+            float logoBob = sinf(runTime * 2.4f) * 10.0f;
+            float logoW = 620.0f;
+            float logoH = 260.0f;
+            if (texLogoSplash.id != 0) {
+                float aspect = (float)texLogoSplash.width / (float)texLogoSplash.height;
+                logoH = 250.0f;
+                logoW = logoH * aspect;
+                float logoX = ((float)GetScreenWidth() - logoW) * 0.5f;
+                float logoY = 60.0f + logoBob;
+                DrawTexturePro(texLogoSplash, Rectangle{ 0, 0, (float)texLogoSplash.width, (float)texLogoSplash.height },
+                               Rectangle{ logoX, logoY, logoW, logoH }, Vector2{0, 0}, 0.0f, WHITE);
+            } else {
+                Vector2 lsz = MeasureTextEx(fontUIBold, "FART TOGETHER", 48, 1.0f);
+                DrawTextEx(fontUIBold, "FART TOGETHER", Vector2{ ((float)GetScreenWidth() - lsz.x) * 0.5f, 100.0f + logoBob }, 48, 1.0f, Color{ 255, 215, 0, 255 });
+            }
+
+            float cardW = 460.0f;
+            float cardH = 360.0f;
+            float cardX = ((float)GetScreenWidth() - cardW) * 0.5f;
+            float cardY = 380.0f;
+            Rectangle menuCard = { cardX, cardY, cardW, cardH };
+            DrawRectangleRounded(menuCard, 0.12f, 4, Color{ 15, 23, 42, 235 });
+            DrawRectangleRoundedLinesEx(menuCard, 0.12f, 4, 1.8f, Color{ 59, 130, 246, 180 });
+
+            float by = cardY + 28.0f;
+            Rectangle btnSolo = { cardX + 24.0f, by, cardW - 48.0f, 54.0f };
+            if (DrawMenuBtn(btnSolo, "PLAY SOLO FART RUN (1P)", Color{ 37, 99, 235, 255 }, WHITE, 18, true)) {
+                singlePirateMode = true;
+                currentScreen = SCREEN_GAMEPLAY;
+                p1RimAngle = -PI;
+            }
+            by += 68.0f;
+
+            Rectangle btnLan = { cardX + 24.0f, by, cardW - 48.0f, 54.0f };
+            if (DrawMenuBtn(btnLan, "LAN MULTIPLAYER (CO-OP)", Color{ 16, 149, 193, 255 }, WHITE, 18, true)) {
+                currentScreen = SCREEN_LAN_LOBBY;
+            }
+            by += 68.0f;
+
+            Rectangle btnSett = { cardX + 24.0f, by, cardW - 48.0f, 48.0f };
+            if (DrawMenuBtn(btnSett, "SETTINGS & AUDIO", Color{ 51, 65, 85, 255 }, WHITE, 16, true)) {
+                currentScreen = SCREEN_SETTINGS;
+            }
+            by += 60.0f;
+
+            Rectangle btnQuit = { cardX + 24.0f, by, cardW - 48.0f, 48.0f };
+            if (DrawMenuBtn(btnQuit, "EXIT GAME", Color{ 127, 29, 29, 255 }, WHITE, 16, true)) {
+                break;
+            }
+
+            const char* footerText = "Authentic 1:1 C++ Native Engine  |  Flat Water Buoyancy  |  360 deg Solo Steering";
+            Vector2 fsz = MeasureTextEx(fontUI, footerText, 12, 0.3f);
+            DrawTextEx(fontUI, footerText, Vector2{ ((float)GetScreenWidth() - fsz.x) * 0.5f, (float)GetScreenHeight() - 32.0f }, 12, 0.3f, Color{ 148, 163, 184, 200 });
+
+        } else if (currentScreen == SCREEN_LAN_LOBBY) {
+            ClearBackground(Color{ 18, 22, 34, 255 });
+            if (texMenuBg.id != 0) {
+                DrawTexturePro(texMenuBg, Rectangle{ 0, 0, (float)texMenuBg.width, (float)texMenuBg.height },
+                               Rectangle{ 0, 0, (float)GetScreenWidth(), (float)GetScreenHeight() }, Vector2{0, 0}, 0.0f, WHITE);
+            }
+            DrawRectangleGradientV(0, 0, GetScreenWidth(), GetScreenHeight(), Color{ 10, 15, 28, 160 }, Color{ 5, 8, 18, 230 });
+
+            float lobbyW = 860.0f;
+            float lobbyH = 680.0f;
+            float lobbyX = ((float)GetScreenWidth() - lobbyW) * 0.5f;
+            float lobbyY = 80.0f;
+            Rectangle lobbyCard = { lobbyX, lobbyY, lobbyW, lobbyH };
+            DrawRectangleRounded(lobbyCard, 0.08f, 4, Color{ 15, 23, 42, 240 });
+            DrawRectangleRoundedLinesEx(lobbyCard, 0.08f, 4, 1.8f, Color{ 16, 149, 193, 200 });
+
+            DrawTextEx(fontUIBold, "LAN MULTIPLAYER CO-OP LOBBY", Vector2{ lobbyX + 32.0f, lobbyY + 24.0f }, 24, 0.5f, Color{ 255, 215, 0, 255 });
+            DrawTextEx(fontUI, "Choose your Hippo Pirate and sync across Local Area Network", Vector2{ lobbyX + 34.0f, lobbyY + 56.0f }, 13, 0.3f, Color{ 148, 163, 184, 255 });
+
+            float charW = 180.0f;
+            float charH = 220.0f;
+            float charGap = 16.0f;
+            float charStartX = lobbyX + (lobbyW - (4 * charW + 3 * charGap)) * 0.5f;
+            float charY = lobbyY + 95.0f;
+
+            const char* charNames[4] = { "Chunky Green", "Fiery Orange", "Speedy Blue", "Smoky Grey" };
+            for (int k = 0; k < 4; k++) {
+                Rectangle cRec = { charStartX + k * (charW + charGap), charY, charW, charH };
+                bool hov = CheckCollisionPointRec(mousePos, cRec);
+                bool sel = (selectedLobbyChar == k);
+                Color cFill = sel ? Color{ 30, 58, 95, 255 } : (hov ? Color{ 25, 35, 55, 255 } : Color{ 18, 26, 42, 240 });
+                Color cBorder = sel ? Color{ 255, 215, 0, 255 } : (hov ? Color{ 59, 130, 246, 255 } : Color{ 51, 65, 85, 200 });
+
+                DrawRectangleRounded(cRec, 0.12f, 4, cFill);
+                DrawRectangleRoundedLinesEx(cRec, 0.12f, 4, sel ? 2.5f : 1.2f, cBorder);
+
+                if (texLobbyChars[k].id != 0) {
+                    float sprW = 140.0f;
+                    float sprH = 140.0f;
+                    DrawTexturePro(texLobbyChars[k], Rectangle{ 0, 0, (float)texLobbyChars[k].width, (float)texLobbyChars[k].height },
+                                   Rectangle{ cRec.x + (charW - sprW) * 0.5f, cRec.y + 12.0f, sprW, sprH }, Vector2{0, 0}, 0.0f, WHITE);
+                }
+                Vector2 nsz = MeasureTextEx(fontUIBold, charNames[k], 14, 0.3f);
+                DrawTextEx(fontUIBold, charNames[k], Vector2{ cRec.x + (charW - nsz.x) * 0.5f, cRec.y + 165.0f }, 14, 0.3f, sel ? Color{ 255, 215, 0, 255 } : WHITE);
+                const char* stLabel = sel ? "V SELECTED" : "SELECT";
+                Vector2 ssz = MeasureTextEx(fontUI, stLabel, 11, 0.2f);
+                DrawTextEx(fontUI, stLabel, Vector2{ cRec.x + (charW - ssz.x) * 0.5f, cRec.y + 190.0f }, 11, 0.2f, sel ? Color{ 74, 222, 128, 255 } : Color{ 148, 163, 184, 200 });
+
+                if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                    selectedLobbyChar = k;
+                }
+            }
+
+            float netY = charY + charH + 30.0f;
+            DrawTextEx(fontUIBold, "LAN Network Configuration:", Vector2{ lobbyX + 34.0f, netY }, 15, 0.4f, WHITE);
+            netY += 25.0f;
+
+            Rectangle btnHost = { lobbyX + 34.0f, netY, 260.0f, 44.0f };
+            Rectangle btnJoin = { lobbyX + 310.0f, netY, 260.0f, 44.0f };
+            bool isHost = (LanGetRole() == LAN_HOST);
+            bool isClient = (LanGetRole() == LAN_CLIENT);
+
+            if (DrawMenuBtn(btnHost, isHost ? "V HOSTING ROOM (Port 7777)" : "HOST LAN ROOM (Port 7777)",
+                            isHost ? Color{ 22, 101, 52, 255 } : Color{ 30, 41, 59, 255 }, WHITE, 13, true)) {
+                if (isHost) LanShutdown(); else LanInitHost(7777);
+            }
+
+            if (DrawMenuBtn(btnJoin, isClient ? "V CONNECTED AS CLIENT" : "JOIN LOCAL HOST (7777)",
+                            isClient ? Color{ 22, 101, 52, 255 } : Color{ 30, 41, 59, 255 }, WHITE, 13, true)) {
+                if (isClient) LanShutdown(); else LanInitClient(7777);
+            }
+
+            Rectangle statusRec = { lobbyX + 590.0f, netY, lobbyW - 624.0f, 44.0f };
+            DrawRectangleRounded(statusRec, 0.2f, 4, Color{ 18, 26, 42, 255 });
+            DrawRectangleRoundedLinesEx(statusRec, 0.2f, 4, 1.0f, Color{ 51, 65, 85, 200 });
+            const char* roleStr = isHost ? "ROLE: HOST" : (isClient ? "ROLE: CLIENT" : "ROLE: OFFLINE");
+            DrawTextEx(fontUIBold, roleStr, Vector2{ statusRec.x + 14.0f, statusRec.y + 8.0f }, 12, 0.3f, isHost ? Color{ 74, 222, 128, 255 } : (isClient ? Color{ 56, 189, 248, 255 } : Color{ 148, 163, 184, 255 }));
+            DrawTextEx(fontUI, "Status: Ready to Sync", Vector2{ statusRec.x + 14.0f, statusRec.y + 24.0f }, 11, 0.2f, Color{ 200, 210, 225, 255 });
+
+            float actY = lobbyY + lobbyH - 75.0f;
+            Rectangle btnBack = { lobbyX + 34.0f, actY, 220.0f, 48.0f };
+            if (DrawMenuBtn(btnBack, "<- BACK TO MENU", Color{ 51, 65, 85, 255 }, WHITE, 14, true)) {
+                currentScreen = SCREEN_MAIN_MENU;
+            }
+
+            Rectangle btnStartLan = { lobbyX + lobbyW - 320.0f, actY, 286.0f, 48.0f };
+            if (DrawMenuBtn(btnStartLan, "START MULTIPLAYER MATCH", Color{ 37, 99, 235, 255 }, WHITE, 14, true)) {
+                singlePirateMode = false;
+                currentScreen = SCREEN_GAMEPLAY;
+            }
+
+        } else if (currentScreen == SCREEN_SETTINGS) {
+            ClearBackground(Color{ 18, 22, 34, 255 });
+            if (texMenuBg.id != 0) {
+                DrawTexturePro(texMenuBg, Rectangle{ 0, 0, (float)texMenuBg.width, (float)texMenuBg.height },
+                               Rectangle{ 0, 0, (float)GetScreenWidth(), (float)GetScreenHeight() }, Vector2{0, 0}, 0.0f, WHITE);
+            }
+            DrawRectangleGradientV(0, 0, GetScreenWidth(), GetScreenHeight(), Color{ 10, 15, 28, 160 }, Color{ 5, 8, 18, 230 });
+
+            float settW = 640.0f;
+            float settH = 580.0f;
+            float settX = ((float)GetScreenWidth() - settW) * 0.5f;
+            float settY = 120.0f;
+            Rectangle settCard = { settX, settY, settW, settH };
+            DrawRectangleRounded(settCard, 0.08f, 4, Color{ 15, 23, 42, 240 });
+            DrawRectangleRoundedLinesEx(settCard, 0.08f, 4, 1.8f, Color{ 71, 140, 191, 200 });
+
+            DrawTextEx(fontUIBold, "SETTINGS & AUDIO", Vector2{ settX + 32.0f, settY + 28.0f }, 22, 0.5f, Color{ 255, 215, 0, 255 });
+            DrawTextEx(fontUI, "Configure audio levels, display and engine physics defaults", Vector2{ settX + 34.0f, settY + 58.0f }, 13, 0.3f, Color{ 148, 163, 184, 255 });
+
+            float sy = settY + 105.0f;
+            DrawTextEx(fontUIBold, "Audio Settings:", Vector2{ settX + 34.0f, sy }, 15, 0.4f, WHITE);
+            sy += 28.0f;
+
+            DrawTextEx(fontUI, TextFormat("Master Volume: %d%%", (int)(masterVolume * 100.0f)), Vector2{ settX + 34.0f, sy + 6.0f }, 14, 0.3f, Color{ 220, 225, 235, 255 });
+            Rectangle btnVolM = { settX + 380.0f, sy, 80.0f, 32.0f };
+            Rectangle btnVolP = { settX + 470.0f, sy, 80.0f, 32.0f };
+            if (DrawMenuBtn(btnVolM, "-10%", Color{ 36, 43, 58, 255 }, WHITE, 13, true)) {
+                masterVolume = Clamp(masterVolume - 0.10f, 0.0f, 1.0f);
+                SetMasterVolume(masterVolume);
+            }
+            if (DrawMenuBtn(btnVolP, "+10%", Color{ 36, 43, 58, 255 }, WHITE, 13, true)) {
+                masterVolume = Clamp(masterVolume + 0.10f, 0.0f, 1.0f);
+                SetMasterVolume(masterVolume);
+            }
+            sy += 50.0f;
+
+            DrawTextEx(fontUIBold, "Engine & Physics Features:", Vector2{ settX + 34.0f, sy }, 15, 0.4f, WHITE);
+            sy += 28.0f;
+
+            DrawTextEx(fontUI, "Water Buoyancy: 100% Flat (Roll=0, Pitch=0) [Active]", Vector2{ settX + 34.0f, sy }, 13, 0.3f, Color{ 74, 222, 128, 255 });
+            sy += 26.0f;
+            DrawTextEx(fontUI, "Obstacle Collision: Non-fatal Rocks & Rebound Pillar [Active]", Vector2{ settX + 34.0f, sy }, 13, 0.3f, Color{ 74, 222, 128, 255 });
+            sy += 26.0f;
+            DrawTextEx(fontUI, "Solo Mode Steering: 360 deg Free Rim Rotation [Active]", Vector2{ settX + 34.0f, sy }, 13, 0.3f, Color{ 74, 222, 128, 255 });
+            sy += 26.0f;
+            DrawTextEx(fontUI, "Fart Gas Propulsion: Persistent physics_config.json [Active]", Vector2{ settX + 34.0f, sy }, 13, 0.3f, Color{ 74, 222, 128, 255 });
+
+            float actY = settY + settH - 70.0f;
+            Rectangle btnBackMenu = { settX + 34.0f, actY, 200.0f, 44.0f };
+            if (DrawMenuBtn(btnBackMenu, "<- BACK TO MENU", Color{ 51, 65, 85, 255 }, WHITE, 14, true)) {
+                currentScreen = SCREEN_MAIN_MENU;
+            }
+        }
+
         EndDrawing();
 
         testFrameCount++;
@@ -3297,6 +3711,14 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
     // Cleanup
 
     for (int s = 0; s < 6; s++) UnloadSound(fartSounds[s]);
+    for (int s = 0; s < 3; s++) UnloadSound(sndTap[s]);
+    for (int s = 0; s < 2; s++) UnloadSound(sndHold[s]);
+    UnloadSound(sndExplode);
+    UnloadSound(sndBounce);
+    UnloadTexture(texLogoSplash);
+    UnloadTexture(texMenuBg);
+    UnloadTexture(texModeFartRun);
+    for (int k = 0; k < 4; k++) UnloadTexture(texLobbyChars[k]);
 
     for (int f = 0; f < 4; f++) UnloadTexture(texFart[f]);
 
