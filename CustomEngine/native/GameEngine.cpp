@@ -27,6 +27,7 @@
 // =============================================================================
 
 #include "raylib.h"
+#include "LanNetwork.h"
 
 #include "raymath.h"
 
@@ -188,8 +189,8 @@ in vec2 vertexTexCoord;
 in vec3 vertexNormal;
 in vec4 vertexColor;
 uniform mat4 mvp;
-uniform float uButtSwell; // 0.0 to 1.0 (Butt balloon inflation)
-uniform float uEyeBulge;  // 0.0 to 1.0 (Straining bulging cartoon eyes)
+uniform float uButtSwell; // 0.0 to 1.0 (Gradual butt inflation)
+uniform float uEyeBulge;  // 0.0 to 1.0 (Comedic bulging cartoon eyes)
 out vec2 fragTexCoord;
 out vec4 fragColor;
 out vec3 fragNormal;
@@ -203,19 +204,22 @@ void main() {
 
     vec3 pos = vertexPosition;
 
-    // A. Butt Swell & Balloon Inflation (Local rear butt: Z < -0.02, Y < 0.55)
-    if (pos.z < -0.02 && pos.y < 0.55 && uButtSwell > 0.01) {
-        float rearFactor = max(0.0, -pos.z);
-        pos.z -= uButtSwell * 0.28 * (rearFactor / 0.18);
-        pos.x *= (1.0 + uButtSwell * 0.22);
-        pos.y += uButtSwell * 0.08 * (pos.y / 0.45);
+    // A. Gradual Butt Swell & Balloon Inflation (Local rear butt region)
+    if (pos.z < 0.02 && pos.y > 0.20 && pos.y < 0.58 && uButtSwell > 0.005) {
+        vec3 buttPivot = vec3(0.0, 0.38, -0.05);
+        vec3 dButt = pos - buttPivot;
+        float swellMask = clamp((0.02 - pos.z) / 0.18, 0.0, 1.0) * (1.0 - abs(pos.y - 0.38) / 0.22);
+        swellMask = clamp(swellMask, 0.0, 1.0);
+        pos.z -= uButtSwell * 0.32 * swellMask;
+        pos.x += sign(pos.x) * abs(dButt.x) * uButtSwell * 0.45 * swellMask;
+        pos.y += dButt.y * uButtSwell * 0.35 * swellMask;
     }
 
-    // B. Straining Cartoon Bulging Eyes (Local head/eyes: Y in [0.82, 1.05], Z > 0.12, |X| in [0.08, 0.26])
-    if (pos.y > 0.82 && pos.z > 0.12 && abs(pos.x) > 0.08 && uEyeBulge > 0.01) {
-        pos.z += uEyeBulge * 0.24; // Bulge outwards forward!
-        pos.y += uEyeBulge * 0.09; // Bulge upward
-        pos.x += sign(pos.x) * uEyeBulge * 0.09; // Bulge outward
+    // B. Comedic Bulging Eyes (Eyeballs have UV.x > 0.65 and sit at |X| <= 0.075, Y in [0.89, 0.97], Z > 0.14)
+    if ((vertexTexCoord.x > 0.65 || (pos.y > 0.89 && pos.y < 0.97 && pos.z > 0.14 && abs(pos.x) < 0.08)) && uEyeBulge > 0.005) {
+        vec3 eyeSocket = vec3(sign(pos.x) * 0.038, 0.930, 0.175);
+        vec3 relEye = pos - eyeSocket;
+        pos = eyeSocket + relEye * (1.0 + uEyeBulge * 1.45) + vec3(0.0, uEyeBulge * 0.03, uEyeBulge * 0.18);
     }
 
     gl_Position = mvp * vec4(pos, 1.0);
@@ -233,33 +237,39 @@ uniform vec4 colDiffuse;
 uniform vec3 lightDir;
 uniform vec3 lightColor;
 uniform vec3 ambientColor;
-uniform float uRedness;   // 0.0 = normal, 1.0 = deep scarlet vascular redness
-uniform float uSkinU;     // 0.0 = non-character, >0.0 = character base skin U coordinate
-uniform float uSkinV;     // character base skin V coordinate
+uniform float uRedness;     // 0.0 = normal, 1.0 = deep scarlet vascular redness
+uniform int uIsJungleTree;  // 1 = procedural two-tone brown trunk + lush green canopy
 out vec4 finalColor;
 
 void main() {
-    vec2 uv = fragTexCoord;
-    // Fix blue/pink UV patch on hippo lower back/butt (UV.x in [0.42, 0.50])
-    if (uSkinU > 0.01 && uv.x > 0.42 && uv.x < 0.50) {
-        uv = vec2(uSkinU, uSkinV);
+    vec4 texColor = texture(texture0, fragTexCoord);
+    vec3 baseRgb = texColor.rgb;
+
+    if (uIsJungleTree == 1) {
+        if (fragPosition.y < 3.05) {
+            // Rich warm bark brown trunk
+            baseRgb = mix(vec3(0.46, 0.28, 0.14), vec3(0.60, 0.39, 0.21), clamp(fragPosition.y / 3.05, 0.0, 1.0));
+        } else {
+            // Vibrant layered tropical green foliage
+            float hFactor = clamp((fragPosition.y - 3.05) / 4.2, 0.0, 1.0);
+            baseRgb = mix(vec3(0.13, 0.50, 0.20), vec3(0.29, 0.76, 0.33), hFactor);
+        }
     }
-    vec4 texColor = texture(texture0, uv);
+
     vec3 N = normalize(fragNormal);
     vec3 L = normalize(lightDir);
     float diff = max(dot(N, L), 0.0);
-    // Stylized Cel-Shading two-tone soft ramp matching Unity Toon Shader
-    float celDiff = smoothstep(0.15, 0.55, diff) * 0.45 + diff * 0.55;
-    vec3 diffuse = celDiff * lightColor;
-    vec3 lighting = ambientColor + diffuse;
+    float celDiff = smoothstep(0.18, 0.58, diff) * 0.65 + diff * 0.35;
+    // Normalized lighting prevents over-exposure washout!
+    vec3 lighting = mix(ambientColor, lightColor, celDiff);
 
-    // Authentic Localized Butt Redness Mask (Center: 0.0, 0.40, -0.14)
-    vec3 buttCenter = vec3(0.0, 0.40, -0.14);
-    vec3 buttScale  = vec3(0.36, 0.28, 0.24);
+    // Localized Butt Redness Mask (Center: 0.0, 0.39, -0.12)
+    vec3 buttCenter = vec3(0.0, 0.39, -0.12);
+    vec3 buttScale  = vec3(0.35, 0.26, 0.24);
     float buttDist  = length((fragPosition - buttCenter) / buttScale);
-    float buttMask  = clamp(1.0 - smoothstep(0.45, 1.15, buttDist), 0.0, 1.0);
+    float buttMask  = clamp(1.0 - smoothstep(0.35, 1.15, buttDist), 0.0, 1.0);
 
-    vec3 redSkin = mix(texColor.rgb, vec3(0.96, 0.12, 0.15), uRedness * buttMask * 0.90);
+    vec3 redSkin = mix(baseRgb, vec3(0.98, 0.08, 0.12), uRedness * buttMask * 0.92);
     vec3 litColor = redSkin * lighting * colDiffuse.rgb;
     finalColor = vec4(litColor, texColor.a * colDiffuse.a);
 }
@@ -832,47 +842,26 @@ struct PirateGasState {
 
         }
 
-        // Compute effective visual charge
-
-        float visualCharge = sustainedCharge;
-
+        // Compute effective visual charge (starts immediately on press!)
+        float immediatePressCharge = isPressing ? Clamp(pressTimer / 1.2f, 0.18f, 1.0f) : 0.0f;
+        float visualCharge = fmaxf(sustainedCharge, immediatePressCharge);
         if (releaseTimer > 0.0f) {
-
-            visualCharge = releaseStartCharge * (releaseTimer / GAS_RELEASE_SECONDS);
-
+            visualCharge = fmaxf(visualCharge, releaseStartCharge * (releaseTimer / GAS_RELEASE_SECONDS));
         }
 
-        // Butt Bone Swell (1.0x to 1.4x)
+        // Gradual Butt Bone Swell (1.0x to 1.45x starting immediately)
+        boneScale = 1.0f + 0.45f * visualCharge;
 
-        boneScale = 1.0f + (BUTT_PEAK_SCALE - 1.0f) * visualCharge;
-
-        // Tremble vibration at 12Hz above 55% charge
-
-        if (visualCharge > BUTT_MIN_TREMBLE_THRESHOLD) {
-
-            float strength = (visualCharge - BUTT_MIN_TREMBLE_THRESHOLD) / (1.0f - BUTT_MIN_TREMBLE_THRESHOLD);
-
+        // Tremble vibration at 12Hz above 25% charge
+        if (visualCharge > 0.25f) {
+            float strength = (visualCharge - 0.25f) / 0.75f;
             trembleOffset = sinf(2.0f * PI * BUTT_TREMBLE_FREQ * runTime) * BUTT_TREMBLE_AMP * strength;
-
         } else {
-
             trembleOffset = 0.0f;
-
         }
 
-        // Vascular Redness Curve (starts at 60% charge)
-
-        if (visualCharge > 0.60f) {
-
-            float rFrac = (visualCharge - 0.60f) / 0.40f;
-
-            redness = powf(rFrac, 2.5f);
-
-        } else {
-
-            redness = 0.0f;
-
-        }
+        // Smooth Gradual Vascular Redness (starts at 5% charge and ramps smoothly to 100%!)
+        redness = Clamp((visualCharge - 0.05f) / 0.80f, 0.0f, 1.0f);
 
     }
 
@@ -898,7 +887,9 @@ enum EntityType {
     ENT_ROCK_1 = 15,  // GM_3D_Obstacle_Rock1.obj
     ENT_ROCK_2 = 16,  // GM_3D_Obstacle_Rock2.obj
     ENT_GUST = 17,    // Wind Gust zone
-    ENT_COUNT = 18
+    ENT_TREE_JUNGLE = 18, // GM_3D_JungleTree.obj (Authentic two-tone palm tree)
+    ENT_CHECKPOINT = 19,  // GM_3D_CheckPointV1.obj
+    ENT_COUNT = 20
 };
 
 static const char* ENTITY_TYPE_NAMES[] = {
@@ -906,7 +897,8 @@ static const char* ENTITY_TYPE_NAMES[] = {
     "OBS_C1_ARC", "OBS_C2_PENDULUM", "OBS_C4_QUAD", "OBS_C5_WHEEL",
     "OBS_F3_SWING", "OBS_F10_GATE", "OBS_F11_DRUM", "OBS_F13_ARM",
     "OBS_F14_SLIDER", "OBS_F18_SPIKE", "OBS_F23_DUAL",
-    "ROCK_DARK_1", "ROCK_DARK_2", "WIND_GUST"
+    "ROCK_DARK_1", "ROCK_DARK_2", "WIND_GUST",
+    "TREE_JUNGLE", "CHECKPOINT_GATE"
 };
 
 struct LevelEntity {
@@ -974,7 +966,51 @@ struct ObstacleModels {
     Model mR1;
     Model mR2;
     Model mTree;
+    Model mCP;
 };
+
+static bool CheckObstacleOBBCollision(Vector3 raftPos, const LevelEntity& ent, Vector3 animPos, float animYawDeg, float animRollDeg) {
+    if (ent.type >= ENT_TREE_JUNGLE || ent.type == ENT_GUST) return false;
+    // Check vertical clearance first
+    float dy = fabsf((raftPos.y + 0.35f) - animPos.y);
+    if (ent.type == ENT_OBS_C5) {
+        if (dy > 4.6f * ent.scale) return false;
+    } else if (dy > 2.2f * ent.scale) {
+        return false;
+    }
+
+    // Transform boat position into obstacle's local horizontal space
+    float rad = -animYawDeg * DEG2RAD;
+    float dx = raftPos.x - animPos.x;
+    float dz = raftPos.z - animPos.z;
+    float localX = dx * cosf(rad) - dz * sinf(rad);
+    float localZ = dx * sinf(rad) + dz * cosf(rad);
+
+    const float boatR = 0.88f;
+    float hx = 1.0f * ent.scale, hz = 1.0f * ent.scale;
+    switch (ent.type) {
+        case ENT_OBS_A1:  hx = 0.38f * ent.scale; hz = 2.35f * ent.scale; break; // Narrow wall pad!
+        case ENT_OBS_B2:  hx = 4.80f * ent.scale; hz = 0.45f * ent.scale; break;
+        case ENT_OBS_B3:  hx = 2.45f * ent.scale; hz = 0.48f * ent.scale; break;
+        case ENT_OBS_B5:  hx = 4.90f * ent.scale; hz = 0.50f * ent.scale; break;
+        case ENT_OBS_C1:  hx = 2.50f * ent.scale; hz = 0.50f * ent.scale; break;
+        case ENT_OBS_C2:  hx = 1.15f * ent.scale; hz = 1.15f * ent.scale; break;
+        case ENT_OBS_C4:  hx = 2.50f * ent.scale; hz = 1.25f * ent.scale; break;
+        case ENT_OBS_C5:  hx = 4.30f * ent.scale; hz = 0.55f * ent.scale; break;
+        case ENT_OBS_F3:  hx = 2.30f * ent.scale; hz = 0.38f * ent.scale; break;
+        case ENT_OBS_F10: hx = 4.50f * ent.scale; hz = 0.55f * ent.scale; break;
+        case ENT_OBS_F11: hx = 0.95f * ent.scale; hz = 0.95f * ent.scale; break;
+        case ENT_OBS_F13: hx = 2.80f * ent.scale; hz = 0.50f * ent.scale; break;
+        case ENT_OBS_F14: hx = 1.30f * ent.scale; hz = 2.20f * ent.scale; break;
+        case ENT_OBS_F18: hx = 0.38f * ent.scale; hz = 0.38f * ent.scale; break;
+        case ENT_OBS_F23: hx = 2.40f * ent.scale; hz = 0.40f * ent.scale; break;
+        case ENT_ROCK_1:  hx = 1.45f * ent.scale; hz = 1.45f * ent.scale; break;
+        case ENT_ROCK_2:  hx = 1.65f * ent.scale; hz = 1.65f * ent.scale; break;
+        default: break;
+    }
+    return (fabsf(localX) < (hx + boatR)) && (fabsf(localZ) < (hz + boatR));
+}
+
 static ObstacleModels gObsModels;
 
 static const char* LEVEL_LAYOUT_PATH = "level_layout.json";
@@ -1002,8 +1038,10 @@ void AssignEntityModelAndProps(LevelEntity& e) {
         case ENT_OBS_F23: e.model = &gObsModels.mF23; e.radius = 2.80f * e.scale; break;
         case ENT_ROCK_1:  e.model = &gObsModels.mR1;  e.radius = 2.10f * e.scale; break;
         case ENT_ROCK_2:  e.model = &gObsModels.mR2;  e.radius = 2.30f * e.scale; break;
-        case ENT_GUST:    e.model = nullptr;          e.radius = 4.50f * e.scale; break;
-        default:          e.type = ENT_OBS_A1; e.model = &gObsModels.mA1; e.radius = 1.85f * e.scale; break;
+        case ENT_GUST:        e.model = nullptr;          e.radius = 4.50f * e.scale; break;
+        case ENT_TREE_JUNGLE:  e.model = &gObsModels.mTree; e.radius = 1.35f * e.scale; break;
+        case ENT_CHECKPOINT:   e.model = &gObsModels.mCP;   e.radius = 3.50f * e.scale; break;
+        default:               e.type = ENT_OBS_A1; e.model = &gObsModels.mA1; e.radius = 1.85f * e.scale; break;
     }
 }
 
@@ -1096,6 +1134,9 @@ int main(int argc, char** argv) {
 
     bool testScreenshotMode = false;
     bool testEditorMode = false;
+    bool testDeathMode = false;
+    bool testLanMode = false;
+    int testSelectIdx = -1;
     bool useCustomTestCam = false;
     Vector3 customTestCamPos = { 0, 0, 0 };
     Vector3 customTestCamTarget = { 0, 0, 0 };
@@ -1110,6 +1151,9 @@ int main(int argc, char** argv) {
 
         if (strcmp(argv[i], "--test-screenshot") == 0) testScreenshotMode = true;
         if (strcmp(argv[i], "--test-editor") == 0) testEditorMode = true;
+        if (strcmp(argv[i], "--test-death") == 0) testDeathMode = true;
+        if (strcmp(argv[i], "--test-lan") == 0) testLanMode = true;
+        if (strcmp(argv[i], "--test-select") == 0 && i + 1 < argc) testSelectIdx = atoi(argv[++i]);
 
         if (strcmp(argv[i], "--shot-name") == 0 && i + 1 < argc) testShotName = argv[++i];
 
@@ -1148,6 +1192,9 @@ int main(int argc, char** argv) {
     InitAudioDevice();
 
     SetTargetFPS(60);
+    // 3D Model Live Preview and Editor Inspector state
+    RenderTexture2D previewRT = LoadRenderTexture(280, 125);
+    bool inspectorCollapsed = false;
 
     TraceLog(LOG_INFO, "Loading authentic shaders, textures, and 3D meshes...");
 
@@ -1166,6 +1213,9 @@ int main(int argc, char** argv) {
     int uEyeBulgeLoc  = GetShaderLocation(shaderLighting, "uEyeBulge");
     int uSkinULoc     = GetShaderLocation(shaderLighting, "uSkinU");
     int uSkinVLoc     = GetShaderLocation(shaderLighting, "uSkinV");
+    int uIsJungleTreeLoc = GetShaderLocation(shaderLighting, "uIsJungleTree");
+    int zeroTree = 0;
+    SetShaderValue(shaderLighting, uIsJungleTreeLoc, &zeroTree, SHADER_UNIFORM_INT);
     float zeroVal = 0.0f;
     SetShaderValue(shaderLighting, uButtSwellLoc, &zeroVal, SHADER_UNIFORM_FLOAT);
     SetShaderValue(shaderLighting, uEyeBulgeLoc,  &zeroVal, SHADER_UNIFORM_FLOAT);
@@ -1174,9 +1224,9 @@ int main(int argc, char** argv) {
 
     Vector3 lDir = Vector3Normalize(Vector3{ -0.35f, 0.95f, 0.40f });
 
-    Vector3 lCol = Vector3{ 1.15f, 1.10f, 1.02f };
+    Vector3 lCol = Vector3{ 1.02f, 0.99f, 0.94f };
 
-    Vector3 aCol = Vector3{ 0.58f, 0.62f, 0.72f };
+    Vector3 aCol = Vector3{ 0.62f, 0.65f, 0.72f };
 
     float initRed = 0.0f;
 
@@ -1274,6 +1324,8 @@ int main(int argc, char** argv) {
     // 3D Models
     Model wallModel    = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_Demo_Wall.obj").c_str());
     Model waterModel   = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_Demo_Water.obj").c_str());
+    Model wallColModel = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_Demo_WallCol.obj").c_str());
+    Texture2D texSkullGas = LoadTexture(ResolveAsset("extracted_assets/textures/SkullGasCloud.png").c_str());
     Model startModel   = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_Start.obj").c_str());
     Model finishModel  = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_Finish.obj").c_str());
     Model cp1Model     = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_CheckPointV1.obj").c_str());
@@ -1302,6 +1354,7 @@ int main(int argc, char** argv) {
     gObsModels.mR1  = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_Obstacle_Rock1.obj").c_str());
     gObsModels.mR2  = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_Obstacle_Rock2.obj").c_str());
     gObsModels.mTree= LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_JungleTree.obj").c_str());
+    gObsModels.mCP  = cp1Model;
 
     Model crocModel = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_Crocodile.obj").c_str());
     Model sharkModel= LoadModel(ResolveAsset("extracted_assets/meshes/Shark.obj").c_str());
@@ -1524,17 +1577,9 @@ int main(int argc, char** argv) {
         TraceLog(LOG_WARNING, "Failed to load level_layout.json");
     }
 
-    // Authentic River Predators: Relocated to downstream rapids & lakes
-    std::vector<CrocodileAI> crocodiles = {
-        { Vector3{ 42.5f, 0.55f, 22.0f }, 3.14f, Vector3{ 42.5f, 0.55f, 22.0f }, 0.0f, false, CROC_SPEED },
-        { Vector3{ -54.5f, 9.85f, -85.0f }, 1.57f, Vector3{ -54.5f, 9.85f, -85.0f }, 0.0f, false, CROC_SPEED },
-        { Vector3{ -174.0f, 8.95f, -65.0f }, 1.57f, Vector3{ -174.0f, 8.95f, -65.0f }, 0.0f, false, CROC_SPEED }
-    };
-
-    std::vector<SharkAI> sharks = {
-        { Vector3{ 18.0f, 0.55f, -10.6f }, 0.0f, Vector3{ 18.0f, 0.55f, -10.6f }, 0.0f, 0.0f, false, SHARK_PATROL_SPEED },
-        { Vector3{ -230.0f, 9.82f, -103.5f }, 0.0f, Vector3{ -230.0f, 9.82f, -103.5f }, 0.0f, 0.0f, false, SHARK_PATROL_SPEED }
-    };
+    // Authentic River Predators (Empty in authentic level)
+    std::vector<CrocodileAI> crocodiles;
+    std::vector<SharkAI> sharks;
 
     // Ragdoll Pirates
 
@@ -1593,7 +1638,7 @@ int main(int argc, char** argv) {
 
     // Interactive Level & Obstacle Editor (Unity / Godot style)
     bool editorMode = testEditorMode;
-    int selectedObs = testEditorMode ? 0 : -1;
+    int selectedObs = (testSelectIdx >= 0) ? testSelectIdx : (testEditorMode ? 0 : -1);
     Vector3 editorCamPos = testEditorMode ? Vector3{ 17.2f, 2.8f, 70.8f } : Vector3{ 15.55f, 6.0f, 75.0f };
     float editorCamYaw = 3.14159f;
     float editorCamPitch = 0.35f;
@@ -1650,7 +1695,21 @@ int main(int argc, char** argv) {
         // Huge fart & water explosion
 
         EmitFartBurst(raft.position, Vector3{ 0, 1, 0 }, 1.0f, true);
-
+        for (int p = 0; p < MAX_PARTICLES; p++) {
+            if (!particles[p].active) {
+                particles[p].active = true;
+                particles[p].position = raft.position + Vector3{ 0.0f, 1.5f, 0.0f };
+                particles[p].velocity = Vector3{ 0.0f, 0.95f, 0.0f };
+                particles[p].size = 3.8f;
+                particles[p].alpha = 1.0f;
+                particles[p].rotation = 0.0f;
+                particles[p].rotSpeed = 0.0f;
+                particles[p].life = 2.4f;
+                particles[p].maxLife = 2.4f;
+                particles[p].spriteIndex = 4; // SkullGasCloud.png
+                break;
+            }
+        }
         PlaySound(fartSounds[5]);
 
     };
@@ -1666,8 +1725,27 @@ int main(int argc, char** argv) {
         float dt = GetFrameTime();
 
         if (dt > 0.05f) dt = 0.05f;
+        if (testDeathMode && testFrameCount == 20) {
+            TriggerBoatDeath(DEATH_OBSTACLE);
+        }
+        if (testLanMode && testFrameCount == 2) {
+            LanInitHost(7777);
+        }
 
         runTime += dt;
+
+                // LAN Networking Hotkeys (F2: Host | F3: Join | F4: Offline)
+        if (IsKeyPressed(KEY_F2)) {
+            if (LanGetRole() == LAN_HOST) LanShutdown();
+            else LanInitHost(7777);
+        }
+        if (IsKeyPressed(KEY_F3)) {
+            if (LanGetRole() == LAN_CLIENT) LanShutdown();
+            else LanInitClient(7777);
+        }
+        if (IsKeyPressed(KEY_F4)) {
+            LanShutdown();
+        }
 
         if (!raceFinished && !editorMode) raceTimer += dt;
 
@@ -1931,6 +2009,7 @@ int main(int argc, char** argv) {
         Vector3 riverTangent = GetSplineTangent(currentSplineT);
         Vector3 riverNormal  = Vector3{ riverTangent.z, 0.0f, -riverTangent.x };
 
+        // Authentic Hydrodynamics & Spline Distance
         float actualWaterY = 0.55f;
         float distToWaterMesh = 0.0f;
         Vector3 nearestWaterPt = raft.position;
@@ -1949,7 +2028,7 @@ int main(int argc, char** argv) {
             if (downSlope > 0.08f) maxAllowedSpeed = 22.0f; // Fast waterfall slide!
         }
 
-        // Authentic Start Basin & Canal Wall Elastic Containment
+        // Authentic Start Basin & Canal Wall Elastic Containment (Prevents clipping & swimming on land!)
         if (inStartPond) {
             Vector3 pondCenter = { 15.43f, 0.55f, 87.67f };
             Vector3 dPond = { raft.position.x - pondCenter.x, 0.0f, raft.position.z - pondCenter.z };
@@ -2005,50 +2084,57 @@ int main(int argc, char** argv) {
 
         // Boat Tilt / Pitch / Roll
         float fwdAccel = Vector3DotProduct(raft.velocity, riverTangent);
+        nearestWaterPt = riverCenter;
         Vector3 toNearest = Vector3Subtract(raft.position, nearestWaterPt);
         float crossWaterDist = Vector3DotProduct(toNearest, riverNormal);
         raft.pitch = Lerp(raft.pitch, -fwdAccel * 0.035f, 6.0f * dt);
         raft.roll  = Lerp(raft.roll, (crossWaterDist * 0.045f) + (raft.angularVelocityY * 0.12f), 6.0f * dt);
         raft.speed = horizSpeed;
 
-        // 5. Update Kinetic Obstacles & Hazards
+        // 5. Update Kinetic Obstacles & Hazards with Authentic Animations & OBB
         for (auto& ent : levelEntities) {
             ent.animTimer += dt * ent.animSpeed;
-            if (ent.type == ENT_OBS_B2) ent.rotationY = sinf(ent.animTimer) * 45.0f;
-            else if (ent.type == ENT_OBS_B3) ent.rotationY += dt * 90.0f * ent.animSpeed;
-            else if (ent.type == ENT_OBS_B5) ent.rotationY += dt * 90.0f * ent.animSpeed;
-            else if (ent.type == ENT_OBS_C1) ent.rotationY = sinf(ent.animTimer * 1.3f) * 60.0f;
-            else if (ent.type == ENT_OBS_C2) ent.rotationY = cosf(ent.animTimer) * 55.0f;
-            else if (ent.type == ENT_OBS_C4) ent.rotationY += dt * 110.0f * ent.animSpeed;
-            else if (ent.type == ENT_OBS_C5) ent.rotationY += dt * 80.0f * ent.animSpeed;
-            else if (ent.type == ENT_OBS_F3) ent.rotationY = sinf(ent.animTimer * 1.5f) * 75.0f;
-            else if (ent.type == ENT_OBS_F10) ent.rotationY = sinf(ent.animTimer * 1.2f) * 75.0f;
-            else if (ent.type == ENT_OBS_F11) ent.rotationY += dt * 120.0f * ent.animSpeed;
-            else if (ent.type == ENT_OBS_F13) ent.rotationY += dt * 75.0f * ent.animSpeed;
-            else if (ent.type == ENT_OBS_F23) ent.rotationY = sinf(ent.animTimer * 1.4f) * 65.0f;
+            Vector3 animPos = ent.position;
+            float animYaw = ent.rotationY;
+            float animRoll = 0.0f;
 
-            if (ent.type == ENT_OBS_A1) {
-                if (ent.bumperCooldownTimer > 0.0f) ent.bumperCooldownTimer -= dt;
-                if (ent.isExpanded) {
-                    ent.bumperExpandTimer -= dt;
-                    if (ent.bumperExpandTimer <= 0.0f) {
-                        ent.isExpanded = false;
-                        ent.bumperCooldownTimer = BUMPER_COOLDOWN;
-                    }
-                }
-                float d = Vector3Distance(raft.position, ent.position);
-                if (d < ent.radius && ent.bumperCooldownTimer <= 0.0f && !raft.isDestroyed) {
-                    ent.isExpanded = true;
-                    ent.bumperExpandTimer = BUMPER_EXPAND_DURATION;
-                    float rad = ent.rotationY * DEG2RAD;
-                    Vector3 launchDir = { sinf(rad), 0.5f, cosf(rad) };
-                    launchDir = Vector3Normalize(launchDir);
-                    raft.velocity = Vector3Scale(launchDir, 18.0f);
-                    raft.angularVelocityY += 15.0f;
-                    PlaySound(fartSounds[1]);
-                    camCtrl.shakeTrauma = fmaxf(camCtrl.shakeTrauma, 0.65f);
-                }
-            } else if (ent.type == ENT_GUST) {
+            if (ent.type == ENT_OBS_B2) {
+                animRoll = sinf(ent.animTimer * 2.0f) * 28.0f; // Seesaw tipping
+            } else if (ent.type == ENT_OBS_B3) {
+                animYaw += dt * 90.0f * ent.animSpeed;
+            } else if (ent.type == ENT_OBS_B5) {
+                animYaw += dt * 65.0f * ent.animSpeed;
+            } else if (ent.type == ENT_OBS_C1) {
+                animRoll = sinf(ent.animTimer * 2.2f) * 50.0f; // Pendulum swing
+            } else if (ent.type == ENT_OBS_C2) {
+                animRoll = cosf(ent.animTimer * 2.0f) * 55.0f;
+            } else if (ent.type == ENT_OBS_C4) {
+                animYaw += dt * 110.0f * ent.animSpeed;
+            } else if (ent.type == ENT_OBS_C5) {
+                animRoll = ent.animTimer * 85.0f; // Vertical spinning wheel
+            } else if (ent.type == ENT_OBS_F3) {
+                animYaw = ent.rotationY + sinf(ent.animTimer * 1.5f) * 75.0f;
+            } else if (ent.type == ENT_OBS_F10) {
+                animYaw = ent.rotationY + sinf(ent.animTimer * 1.2f) * 75.0f;
+            } else if (ent.type == ENT_OBS_F11) {
+                // Lateral reciprocating travel across water canal + spinning drum
+                float rad = ent.rotationY * DEG2RAD;
+                float latOffset = sinf(ent.animTimer * 1.8f + (float)ent.id) * 2.2f;
+                animPos.x += cosf(rad) * latOffset;
+                animPos.z -= sinf(rad) * latOffset;
+                animRoll = ent.animTimer * 120.0f;
+            } else if (ent.type == ENT_OBS_F13) {
+                animYaw += dt * 75.0f * ent.animSpeed;
+            } else if (ent.type == ENT_OBS_F14) {
+                float rad = ent.rotationY * DEG2RAD;
+                float slideOffset = sinf(ent.animTimer * 2.2f) * 2.0f;
+                animPos.x += cosf(rad) * slideOffset;
+                animPos.z -= sinf(rad) * slideOffset;
+            } else if (ent.type == ENT_OBS_F23) {
+                animYaw = ent.rotationY + sinf(ent.animTimer * 1.4f) * 65.0f;
+            }
+
+            if (ent.type == ENT_GUST) {
                 float d = Vector3Distance(raft.position, ent.position);
                 if (d < ent.radius && !raft.isDestroyed) {
                     float rad = ent.rotationY * DEG2RAD;
@@ -2057,18 +2143,8 @@ int main(int argc, char** argv) {
                     raft.velocity.z += gustDir.z * 24.0f * dt;
                     camCtrl.shakeTrauma = fmaxf(camCtrl.shakeTrauma, 0.20f);
                 }
-            } else if (ent.type == ENT_ROCK_1 || ent.type == ENT_ROCK_2) {
-                float d = Vector3Distance(raft.position, ent.position);
-                if (d < ent.radius && !raft.isDestroyed) {
-                    Vector3 pushOut = Vector3Normalize(Vector3Subtract(raft.position, ent.position));
-                    raft.position = Vector3Add(ent.position, Vector3Scale(pushOut, ent.radius + 0.1f));
-                    raft.velocity = Vector3Scale(pushOut, 5.0f);
-                    TriggerBoatDeath(DEATH_OBSTACLE);
-                }
-            } else {
-                // Moving kinetic hazard collision
-                float d = Vector3Distance(raft.position, ent.position);
-                if (d < ent.radius && !raft.isDestroyed) {
+            } else if (CheckObstacleOBBCollision(raft.position, ent, animPos, animYaw, animRoll)) {
+                if (!raft.isDestroyed) {
                     TriggerBoatDeath(DEATH_OBSTACLE);
                 }
             }
@@ -2450,6 +2526,41 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
         // =====================================================================
 
+                // Update Live 3D Model Preview for Godot Level Editor
+        if (editorMode && !inspectorCollapsed) {
+            EntityType pType = (selectedObs >= 0 && selectedObs < (int)levelEntities.size())
+                ? levelEntities[selectedObs].type : ENT_OBS_A1;
+            Model* pModel = (selectedObs >= 0 && selectedObs < (int)levelEntities.size() && levelEntities[selectedObs].model)
+                ? levelEntities[selectedObs].model : &gObsModels.mA1;
+
+            BeginTextureMode(previewRT);
+                ClearBackground(Color{ 18, 22, 30, 255 });
+                Camera3D pCam = { 0 };
+                pCam.position = Vector3{ 3.6f, 2.6f, 3.6f };
+                pCam.target   = Vector3{ 0.0f, 0.4f, 0.0f };
+                pCam.up       = Vector3{ 0.0f, 1.0f, 0.0f };
+                pCam.fovy     = 42.0f;
+                pCam.projection = CAMERA_PERSPECTIVE;
+                BeginMode3D(pCam);
+                    DrawGrid(6, 1.0f);
+                    if (pModel) {
+                        int isTree = (pType == ENT_TREE_JUNGLE) ? 1 : 0;
+                        SetShaderValue(shaderLighting, uIsJungleTreeLoc, &isTree, SHADER_UNIFORM_INT);
+                        rlPushMatrix();
+                            rlRotatef(runTime * 45.0f, 0, 1, 0);
+                            float sc = (pType == ENT_OBS_F10 || pType == ENT_OBS_B5 || pType == ENT_OBS_C5) ? 0.32f : 0.65f;
+                            rlScalef(sc, sc, sc);
+                            DrawModel(*pModel, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
+                        rlPopMatrix();
+                        if (isTree) {
+                            int zero = 0;
+                            SetShaderValue(shaderLighting, uIsJungleTreeLoc, &zero, SHADER_UNIFORM_INT);
+                        }
+                    }
+                EndMode3D();
+            EndTextureMode();
+        }
+
         BeginDrawing();
 
         // 1. Authentic Cartoon Sky Backdrop
@@ -2508,20 +2619,62 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
             // A. Authentic Start Basin inside Canyon Walls & Water Mesh (Zero fake cylinders)
 
-            // E. Draw All Level Entities (Obstacles, Rocks, Trees)
-            for (const auto& ent : levelEntities) {
-                if (ent.model != nullptr) {
-                    rlPushMatrix();
-                        rlTranslatef(ent.position.x, ent.position.y, ent.position.z);
-                        rlRotatef(ent.rotationY, 0.0f, 1.0f, 0.0f);
-                        float s = (ent.scale > 0.01f) ? ent.scale : 1.0f;
-                        rlScalef(s, s, s);
-                        DrawModel(*ent.model, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
-                    rlPopMatrix();
-                }
-            }
+            // E. Draw All Level Entities (Obstacles, Rocks, Trees, Checkpoints)
+        for (const auto& ent : levelEntities) {
+            if (ent.model != nullptr) {
+                Vector3 animPos = ent.position;
+                float animYaw = ent.rotationY;
+                float animRoll = 0.0f;
 
-            // F. River Predators (Crocodiles & Sharks)
+                if (ent.type == ENT_OBS_B2) {
+                    animRoll = sinf(ent.animTimer * 2.0f) * 28.0f;
+                } else if (ent.type == ENT_OBS_C1) {
+                    animRoll = sinf(ent.animTimer * 2.2f) * 50.0f;
+                } else if (ent.type == ENT_OBS_C2) {
+                    animRoll = cosf(ent.animTimer * 2.0f) * 55.0f;
+                } else if (ent.type == ENT_OBS_C5) {
+                    animRoll = ent.animTimer * 85.0f;
+                } else if (ent.type == ENT_OBS_F3) {
+                    animYaw = ent.rotationY + sinf(ent.animTimer * 1.5f) * 75.0f;
+                } else if (ent.type == ENT_OBS_F10) {
+                    animYaw = ent.rotationY + sinf(ent.animTimer * 1.2f) * 75.0f;
+                } else if (ent.type == ENT_OBS_F11) {
+                    float rad = ent.rotationY * DEG2RAD;
+                    float latOffset = sinf(ent.animTimer * 1.8f + (float)ent.id) * 2.2f;
+                    animPos.x += cosf(rad) * latOffset;
+                    animPos.z -= sinf(rad) * latOffset;
+                    animRoll = ent.animTimer * 120.0f;
+                } else if (ent.type == ENT_OBS_F14) {
+                    float rad = ent.rotationY * DEG2RAD;
+                    float slideOffset = sinf(ent.animTimer * 2.2f) * 2.0f;
+                    animPos.x += cosf(rad) * slideOffset;
+                    animPos.z -= sinf(rad) * slideOffset;
+                } else if (ent.type == ENT_OBS_F23) {
+                    animYaw = ent.rotationY + sinf(ent.animTimer * 1.4f) * 65.0f;
+                }
+
+                rlPushMatrix();
+                rlTranslatef(animPos.x, animPos.y, animPos.z);
+                rlRotatef(animYaw, 0.0f, 1.0f, 0.0f);
+                if (animRoll != 0.0f) {
+                    if (ent.type == ENT_OBS_C5) rlRotatef(animRoll, 0.0f, 0.0f, 1.0f);
+                    else if (ent.type == ENT_OBS_F11) rlRotatef(animRoll, 1.0f, 0.0f, 0.0f);
+                    else rlRotatef(animRoll, 0.0f, 0.0f, 1.0f);
+                }
+                float s = (ent.scale > 0.01f) ? ent.scale : 1.0f;
+                rlScalef(s, s, s);
+                int isTreeFlag = (ent.type == ENT_TREE_JUNGLE) ? 1 : 0;
+                SetShaderValue(shaderLighting, uIsJungleTreeLoc, &isTreeFlag, SHADER_UNIFORM_INT);
+                DrawModel(*ent.model, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
+                if (isTreeFlag) {
+                    int zeroFlag = 0;
+                    SetShaderValue(shaderLighting, uIsJungleTreeLoc, &zeroFlag, SHADER_UNIFORM_INT);
+                }
+                rlPopMatrix();
+            }
+        }
+
+        // F. River Predators (Crocodiles & Sharks)
 
             for (const auto& croc : crocodiles) {
 
@@ -2575,47 +2728,45 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
                     DrawModel(boatModel, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
 
-                    // Left Pirate (Player 1: Green Hippo - charB is green in Gradient_Pallete!)
-                    float p1Redness = gasP1.redness;
-                    float p1ButtSwell = (gasP1.boneScale - 1.0f) * 2.5f;
-                    float p1EyeBulge  = gasP1.isSustained ? gasP1.sustainedCharge : 0.0f;
-                    float p1SkinU = 0.320f, p1SkinV = 0.735f;
-                    SetShaderValue(shaderLighting, uRednessLoc,   &p1Redness,   SHADER_UNIFORM_FLOAT);
-                    SetShaderValue(shaderLighting, uButtSwellLoc, &p1ButtSwell, SHADER_UNIFORM_FLOAT);
-                    SetShaderValue(shaderLighting, uEyeBulgeLoc,  &p1EyeBulge,  SHADER_UNIFORM_FLOAT);
-                    SetShaderValue(shaderLighting, uSkinULoc,     &p1SkinU,     SHADER_UNIFORM_FLOAT);
-                    SetShaderValue(shaderLighting, uSkinVLoc,     &p1SkinV,     SHADER_UNIFORM_FLOAT);
+                    // Left Pirate (Player 1: Green Hippo - SeatedB)
+            float p1Redness = gasP1.redness;
+            float p1ButtSwell = (gasP1.boneScale - 1.0f) * 2.5f;
+            float p1EyeBulge = fmaxf(gasP1.redness, (gasP1.releaseTimer > 0.0f) ? (gasP1.releaseTimer / GAS_RELEASE_SECONDS) : 0.0f);
+            if (gasP1.isPressing && p1EyeBulge < 0.25f) p1EyeBulge = 0.25f + (gasP1.pressTimer / 1.0f) * 0.75f;
+            p1EyeBulge = Clamp(p1EyeBulge, 0.0f, 1.0f);
+            SetShaderValue(shaderLighting, uRednessLoc,   &p1Redness,   SHADER_UNIFORM_FLOAT);
+            SetShaderValue(shaderLighting, uButtSwellLoc, &p1ButtSwell, SHADER_UNIFORM_FLOAT);
+            SetShaderValue(shaderLighting, uEyeBulgeLoc,  &p1EyeBulge,  SHADER_UNIFORM_FLOAT);
 
-                    rlPushMatrix();
-                        float p1X = sinf(p1RimAngle) * 0.94f;
-                        float p1Z = cosf(p1RimAngle) * 0.94f;
-                        rlTranslatef(p1X, 0.34f + gasP1.trembleOffset, p1Z);
-                        float p1FaceYaw = (p1RimAngle * RAD2DEG) + 180.0f;
-                        rlRotatef(p1FaceYaw, 0, 1, 0);
-                        DrawModel(charB, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
-                    rlPopMatrix();
+            rlPushMatrix();
+            float p1X = sinf(p1RimAngle) * 0.94f;
+            float p1Z = cosf(p1RimAngle) * 0.94f;
+            rlTranslatef(p1X, 0.28f + gasP1.trembleOffset, p1Z);
+            float p1FaceYaw = (p1RimAngle * RAD2DEG) + 180.0f;
+            rlRotatef(p1FaceYaw, 0, 1, 0);
+            DrawModel(charB, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
+            rlPopMatrix();
 
-                    // Right Pirate (Player 2: Brown/Grey Hippo - charA)
-                    float p2Redness = gasP2.redness;
-                    float p2ButtSwell = (gasP2.boneScale - 1.0f) * 2.5f;
-                    float p2EyeBulge  = gasP2.isSustained ? gasP2.sustainedCharge : 0.0f;
-                    float p2SkinU = 0.068f, p2SkinV = 0.585f;
-                    SetShaderValue(shaderLighting, uRednessLoc,   &p2Redness,   SHADER_UNIFORM_FLOAT);
-                    SetShaderValue(shaderLighting, uButtSwellLoc, &p2ButtSwell, SHADER_UNIFORM_FLOAT);
-                    SetShaderValue(shaderLighting, uEyeBulgeLoc,  &p2EyeBulge,  SHADER_UNIFORM_FLOAT);
-                    SetShaderValue(shaderLighting, uSkinULoc,     &p2SkinU,     SHADER_UNIFORM_FLOAT);
-                    SetShaderValue(shaderLighting, uSkinVLoc,     &p2SkinV,     SHADER_UNIFORM_FLOAT);
+            // Right Pirate (Player 2: Orange Hippo - SeatedA)
+            float p2Redness = gasP2.redness;
+            float p2ButtSwell = (gasP2.boneScale - 1.0f) * 2.5f;
+            float p2EyeBulge = fmaxf(gasP2.redness, (gasP2.releaseTimer > 0.0f) ? (gasP2.releaseTimer / GAS_RELEASE_SECONDS) : 0.0f);
+            if (gasP2.isPressing && p2EyeBulge < 0.25f) p2EyeBulge = 0.25f + (gasP2.pressTimer / 1.0f) * 0.75f;
+            p2EyeBulge = Clamp(p2EyeBulge, 0.0f, 1.0f);
+            SetShaderValue(shaderLighting, uRednessLoc,   &p2Redness,   SHADER_UNIFORM_FLOAT);
+            SetShaderValue(shaderLighting, uButtSwellLoc, &p2ButtSwell, SHADER_UNIFORM_FLOAT);
+            SetShaderValue(shaderLighting, uEyeBulgeLoc,  &p2EyeBulge,  SHADER_UNIFORM_FLOAT);
 
-                    rlPushMatrix();
-                        float p2X = sinf(p2RimAngle) * 0.94f;
-                        float p2Z = cosf(p2RimAngle) * 0.94f;
-                        rlTranslatef(p2X, 0.34f + gasP2.trembleOffset, p2Z);
-                        float p2FaceYaw = (p2RimAngle * RAD2DEG) + 180.0f;
-                        rlRotatef(p2FaceYaw, 0, 1, 0);
-                        DrawModel(charA, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
-                    rlPopMatrix();
+            rlPushMatrix();
+            float p2X = sinf(p2RimAngle) * 0.94f;
+            float p2Z = cosf(p2RimAngle) * 0.94f;
+            rlTranslatef(p2X, 0.28f + gasP2.trembleOffset, p2Z);
+            float p2FaceYaw = (p2RimAngle * RAD2DEG) + 180.0f;
+            rlRotatef(p2FaceYaw, 0, 1, 0);
+            DrawModel(charA, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
+            rlPopMatrix();
 
-                    // Reset uniforms for raft and all subsequent models
+            // Reset uniforms for raft and all subsequent models
                     float zeroReset = 0.0f;
                     SetShaderValue(shaderLighting, uRednessLoc,   &zeroReset, SHADER_UNIFORM_FLOAT);
                     SetShaderValue(shaderLighting, uButtSwellLoc, &zeroReset, SHADER_UNIFORM_FLOAT);
@@ -2710,27 +2861,13 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
                 if (particles[p].active) {
 
-                    Texture2D tex = texFart[particles[p].spriteIndex];
-
-                    Rectangle srcRec = Rectangle{ 0, 0, (float)tex.width, (float)tex.height };
-
-                    // Authentic Toxic Neon Lime Green Fart Gas (1:1 with reference gameplay video)
-
-                    unsigned char greenVal = (unsigned char)(235.0f + 20.0f * (1.0f - particles[p].alpha));
-
-                    unsigned char redVal   = (unsigned char)(75.0f + 40.0f * (1.0f - particles[p].alpha));
-
-                    unsigned char blueVal  = (unsigned char)(25.0f + 20.0f * (1.0f - particles[p].alpha));
-
-                    Color pTint = Color{ redVal, greenVal, blueVal, (unsigned char)(particles[p].alpha * 230) };
-
-                    DrawBillboardPro(camera, tex, srcRec, particles[p].position, Vector3{ 0, 1, 0 },
-
-                                     Vector2{ particles[p].size, particles[p].size * 0.65f },
-
-                                     Vector2{ particles[p].size * 0.5f, particles[p].size * 0.32f },
-
-                                     particles[p].rotation, pTint);
+                    Texture2D tex = (particles[p].spriteIndex == 4) ? texSkullGas : texFart[particles[p].spriteIndex % 4];
+            Rectangle srcRec = { 0, 0, (float)tex.width, (float)tex.height };
+            Color pTint = (particles[p].spriteIndex == 4) ? ColorAlpha(WHITE, particles[p].alpha)
+                                                         : ColorAlpha(Color{ 140, 255, 60, 255 }, particles[p].alpha);
+            DrawBillboardPro(camera, tex, srcRec, particles[p].position, Vector3{ 0, 1, 0 },
+                             Vector2{ particles[p].size, particles[p].size }, Vector2{ particles[p].size * 0.5f, particles[p].size * 0.5f },
+                             particles[p].rotation, pTint);
 
                 }
 
@@ -2909,26 +3046,8 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
         // 6. Interactive 3D Level Editor Inspector Panel (Authentic Godot 4 Engine Style)
         if (editorMode) {
             float panelW = 340.0f;
-            float panelH = 600.0f;
+            float panelH = 680.0f;
             Rectangle panelRec = { (float)GetScreenWidth() - panelW - 14, 52, panelW, panelH };
-
-            // Subtle Drop Shadow
-            DrawRectangleRounded(Rectangle{ panelRec.x + 3, panelRec.y + 4, panelW, panelH }, 0.02f, 4, Color{ 0, 0, 0, 90 });
-
-            // Godot Main Inspector Panel Surface
-            DrawRectangleRounded(panelRec, 0.02f, 4, Color{ 32, 37, 49, 252 }); // #202531
-            DrawRectangleRoundedLinesEx(panelRec, 0.02f, 4, 1.0f, Color{ 58, 66, 83, 255 }); // #3a4253
-
-            // Godot Dock Tab Bar
-            Rectangle tabRec = { panelRec.x, panelRec.y, 115, 30 };
-            DrawRectangleRec(Rectangle{ panelRec.x, panelRec.y, panelW, 30 }, Color{ 25, 29, 38, 255 }); // #191d26
-            DrawRectangleRec(tabRec, Color{ 32, 37, 49, 255 });
-            DrawRectangle((int)tabRec.x, (int)tabRec.y + 28, (int)tabRec.width, 2, Color{ 71, 140, 191, 255 }); // Godot Blue active line
-            DrawTextEx(fontUIBold, "Inspector", Vector2{ tabRec.x + 18, tabRec.y + 7 }, 14, 0.4f, Color{ 240, 243, 246, 255 });
-            DrawTextEx(fontUI, "3D Level View", Vector2{ panelRec.x + panelW - 105, tabRec.y + 8 }, 12, 0.3f, Color{ 140, 148, 163, 255 });
-            DrawLine((int)panelRec.x, (int)panelRec.y + 30, (int)panelRec.x + (int)panelW, (int)panelRec.y + 30, Color{ 58, 66, 83, 255 });
-
-            float py = panelRec.y + 38;
 
             auto DrawGodotBtn = [&](Rectangle rec, const char* label, Color bgCol, Color textCol, bool bold = false) -> bool {
                 bool hov = CheckCollisionPointRec(mousePos, rec);
@@ -2941,80 +3060,122 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 return hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
             };
 
-            auto DrawSectionHeader = [&](const char* title) {
-                DrawRectangleRec(Rectangle{ panelRec.x + 8, py, panelW - 16, 22 }, Color{ 25, 29, 38, 255 });
-                DrawLine((int)panelRec.x + 8, (int)py + 22, (int)panelRec.x + (int)panelW - 8, (int)py + 22, Color{ 45, 52, 66, 255 });
-                DrawTextEx(fontUIBold, title, Vector2{ panelRec.x + 14, py + 4 }, 12, 0.4f, Color{ 209, 213, 219, 255 });
-                py += 28;
-            };
+            // Inspector Collapse/Expand Arrow Button
+            Rectangle collapseBtn = { inspectorCollapsed ? ((float)GetScreenWidth() - 32.0f) : (panelRec.x - 28.0f), 60.0f, 28.0f, 48.0f };
+            if (DrawGodotBtn(collapseBtn, inspectorCollapsed ? "<" : ">", Color{ 32, 38, 52, 255 }, WHITE, true)) {
+                inspectorCollapsed = !inspectorCollapsed;
+            }
 
-            if (selectedObs >= 0 && selectedObs < (int)levelEntities.size()) {
-                auto& o = levelEntities[selectedObs];
-                DrawTextEx(fontUIBold, TextFormat("Selected: #%d (%s)", selectedObs, ENTITY_TYPE_NAMES[o.type]), Vector2{ panelRec.x + 14, py }, 13, 0.5f, Color{ 142, 202, 230, 255 });
-                py += 24;
+            if (!inspectorCollapsed) {
+                // Drop Shadow & Panel Background
+                DrawRectangleRounded(Rectangle{ panelRec.x + 3, panelRec.y + 4, panelW, panelH }, 0.02f, 4, Color{ 0, 0, 0, 90 });
+                DrawRectangleRounded(panelRec, 0.02f, 4, Color{ 32, 37, 49, 252 });
+                DrawRectangleRoundedLinesEx(panelRec, 0.02f, 4, 1.0f, Color{ 58, 66, 83, 255 });
 
-                // Entity Type Switcher
-                DrawTextEx(fontUI, "Entity Type:", Vector2{ panelRec.x + 14, py }, 11, 0.3f, Color{ 180, 190, 205, 255 });
-                py += 16;
-                Rectangle btnPrevType = { panelRec.x + 12, py, 120, 24 };
-                Rectangle btnNextType = { panelRec.x + 140, py, 120, 24 };
-                if (DrawGodotBtn(btnPrevType, "< Prev Type", Color{ 36, 43, 58, 255 }, WHITE, true)) {
-                    o.type = (EntityType)(((int)o.type - 1 + ENT_COUNT) % ENT_COUNT);
-                    AssignEntityModelAndProps(o);
-                    editorMsg = TextFormat("Type: %s", ENTITY_TYPE_NAMES[o.type]);
-                    editorMsgTimer = 2.0f;
-                }
-                if (DrawGodotBtn(btnNextType, "Next Type >", Color{ 36, 43, 58, 255 }, WHITE, true)) {
-                    o.type = (EntityType)(((int)o.type + 1) % ENT_COUNT);
-                    AssignEntityModelAndProps(o);
-                    editorMsg = TextFormat("Type: %s", ENTITY_TYPE_NAMES[o.type]);
-                    editorMsgTimer = 2.0f;
-                }
-                py += 30;
+                // Dock Tab Bar
+                Rectangle tabRec = { panelRec.x, panelRec.y, 115, 30 };
+                DrawRectangleRec(Rectangle{ panelRec.x, panelRec.y, panelW, 30 }, Color{ 25, 29, 38, 255 });
+                DrawRectangleRec(tabRec, Color{ 32, 37, 49, 255 });
+                DrawRectangle((int)tabRec.x, (int)tabRec.y + 28, (int)tabRec.width, 2, Color{ 71, 140, 191, 255 });
+                DrawTextEx(fontUIBold, "Inspector", Vector2{ tabRec.x + 18, tabRec.y + 7 }, 14, 0.4f, Color{ 240, 243, 246, 255 });
+                DrawTextEx(fontUI, "3D Level View", Vector2{ panelRec.x + panelW - 105, tabRec.y + 8 }, 12, 0.3f, Color{ 140, 148, 163, 255 });
+                DrawLine((int)panelRec.x, (int)panelRec.y + 30, (int)panelRec.x + (int)panelW, (int)panelRec.y + 30, Color{ 58, 66, 83, 255 });
 
-                // Position X/Y/Z Controls
-                DrawTextEx(fontUI, TextFormat("Position: (%.2f, %.2f, %.2f)", o.position.x, o.position.y, o.position.z), Vector2{ panelRec.x + 14, py }, 11, 0.3f, Color{ 220, 225, 235, 255 });
-                py += 18;
-                Rectangle btnXm = { panelRec.x + 12, py, 58, 22 };
-                Rectangle btnXp = { panelRec.x + 74, py, 58, 22 };
-                Rectangle btnZm = { panelRec.x + 140, py, 58, 22 };
-                Rectangle btnZp = { panelRec.x + 202, py, 58, 22 };
-                if (DrawGodotBtn(btnXm, "X -", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.x -= 0.5f;
-                if (DrawGodotBtn(btnXp, "X +", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.x += 0.5f;
-                if (DrawGodotBtn(btnZm, "Z -", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.z -= 0.5f;
-                if (DrawGodotBtn(btnZp, "Z +", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.z += 0.5f;
-                py += 26;
+                float py = panelRec.y + 36;
 
-                Rectangle btnYm = { panelRec.x + 12, py, 58, 22 };
-                Rectangle btnYp = { panelRec.x + 74, py, 58, 22 };
-                Rectangle btnRm = { panelRec.x + 140, py, 58, 22 };
-                Rectangle btnRp = { panelRec.x + 202, py, 58, 22 };
-                if (DrawGodotBtn(btnYm, "Y -", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.y -= 0.25f;
-                if (DrawGodotBtn(btnYp, "Y +", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.y += 0.25f;
-                if (DrawGodotBtn(btnRm, "Rot -15", Color{ 36, 43, 58, 255 }, WHITE, true)) o.rotationY -= 15.0f;
-                if (DrawGodotBtn(btnRp, "Rot +15", Color{ 36, 43, 58, 255 }, WHITE, true)) o.rotationY += 15.0f;
-                py += 32;
+                // 3D Live Model Preview Viewport
+                DrawRectangle((int)panelRec.x + 12, (int)py, 280, 125, Color{ 14, 18, 24, 255 });
+                DrawTextureRec(previewRT.texture, Rectangle{ 0, 0, (float)previewRT.texture.width, -(float)previewRT.texture.height }, Vector2{ panelRec.x + 12, py }, WHITE);
+                DrawRectangleLines((int)panelRec.x + 12, (int)py, 280, 125, Color{ 60, 72, 95, 255 });
+                py += 132;
 
-                // Duplicate & Delete Entity
-                Rectangle btnDup = { panelRec.x + 12, py, 120, 26 };
-                Rectangle btnDel = { panelRec.x + 140, py, 120, 26 };
-                if (DrawGodotBtn(btnDup, "Duplicate", Color{ 48, 85, 120, 255 }, WHITE, true) || (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_D))) {
-                    LevelEntity dup = o;
-                    dup.id = (int)levelEntities.size();
-                    dup.position.x += 1.5f;
-                    levelEntities.push_back(dup);
-                    selectedObs = (int)levelEntities.size() - 1;
-                    editorMsg = "Entity Duplicated!";
-                    editorMsgTimer = 2.0f;
-                }
-                if (DrawGodotBtn(btnDel, "Delete", Color{ 145, 45, 45, 255 }, WHITE, true) || IsKeyPressed(KEY_DELETE)) {
-                    levelEntities.erase(levelEntities.begin() + selectedObs);
-                    selectedObs = -1;
-                    editorMsg = "Entity Deleted!";
-                    editorMsgTimer = 2.0f;
-                }
-                py += 36;
-            } else {
+                if (selectedObs >= 0 && selectedObs < (int)levelEntities.size()) {
+                    auto& o = levelEntities[selectedObs];
+                    DrawTextEx(fontUIBold, TextFormat("Selected: #%d (%s)", selectedObs, ENTITY_TYPE_NAMES[o.type]), Vector2{ panelRec.x + 14, py }, 13, 0.5f, Color{ 142, 202, 230, 255 });
+                    py += 22;
+
+                    // Entity Type Switcher
+                    DrawTextEx(fontUI, "Entity Type:", Vector2{ panelRec.x + 14, py }, 11, 0.3f, Color{ 180, 190, 205, 255 });
+                    py += 15;
+                    Rectangle btnPrevType = { panelRec.x + 12, py, 120, 24 };
+                    Rectangle btnNextType = { panelRec.x + 140, py, 120, 24 };
+                    if (DrawGodotBtn(btnPrevType, "< Prev Type", Color{ 36, 43, 58, 255 }, WHITE, true)) {
+                        o.type = (EntityType)(((int)o.type - 1 + ENT_COUNT) % ENT_COUNT);
+                        AssignEntityModelAndProps(o);
+                        editorMsg = TextFormat("Type: %s", ENTITY_TYPE_NAMES[o.type]);
+                        editorMsgTimer = 2.0f;
+                    }
+                    if (DrawGodotBtn(btnNextType, "Next Type >", Color{ 36, 43, 58, 255 }, WHITE, true)) {
+                        o.type = (EntityType)(((int)o.type + 1) % ENT_COUNT);
+                        AssignEntityModelAndProps(o);
+                        editorMsg = TextFormat("Type: %s", ENTITY_TYPE_NAMES[o.type]);
+                        editorMsgTimer = 2.0f;
+                    }
+                    py += 28;
+
+                    // Scale Controls
+                    DrawTextEx(fontUI, TextFormat("Scale: %.2fx (Radius: %.2fm)", o.scale, o.radius), Vector2{ panelRec.x + 14, py }, 11, 0.3f, Color{ 220, 225, 235, 255 });
+                    py += 16;
+                    Rectangle btnScM = { panelRec.x + 12, py, 75, 22 };
+                    Rectangle btnScP = { panelRec.x + 92, py, 75, 22 };
+                    Rectangle btnScR = { panelRec.x + 172, py, 88, 22 };
+                    if (DrawGodotBtn(btnScM, "Scale -0.1", Color{ 36, 43, 58, 255 }, WHITE, true) || IsKeyPressed(KEY_LEFT_BRACKET)) {
+                        o.scale = Clamp(o.scale - 0.1f, 0.2f, 3.5f);
+                        AssignEntityModelAndProps(o);
+                    }
+                    if (DrawGodotBtn(btnScP, "Scale +0.1", Color{ 36, 43, 58, 255 }, WHITE, true) || IsKeyPressed(KEY_RIGHT_BRACKET)) {
+                        o.scale = Clamp(o.scale + 0.1f, 0.2f, 3.5f);
+                        AssignEntityModelAndProps(o);
+                    }
+                    if (DrawGodotBtn(btnScR, "Reset 1.0x", Color{ 36, 43, 58, 255 }, WHITE, true)) {
+                        o.scale = 1.0f;
+                        AssignEntityModelAndProps(o);
+                    }
+                    py += 26;
+
+                    // Position X/Y/Z Controls
+                    DrawTextEx(fontUI, TextFormat("Position: (%.2f, %.2f, %.2f)", o.position.x, o.position.y, o.position.z), Vector2{ panelRec.x + 14, py }, 11, 0.3f, Color{ 220, 225, 235, 255 });
+                    py += 16;
+                    Rectangle btnXm = { panelRec.x + 12, py, 58, 22 };
+                    Rectangle btnXp = { panelRec.x + 74, py, 58, 22 };
+                    Rectangle btnZm = { panelRec.x + 140, py, 58, 22 };
+                    Rectangle btnZp = { panelRec.x + 202, py, 58, 22 };
+                    if (DrawGodotBtn(btnXm, "X -", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.x -= 0.5f;
+                    if (DrawGodotBtn(btnXp, "X +", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.x += 0.5f;
+                    if (DrawGodotBtn(btnZm, "Z -", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.z -= 0.5f;
+                    if (DrawGodotBtn(btnZp, "Z +", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.z += 0.5f;
+                    py += 26;
+
+                    Rectangle btnYm = { panelRec.x + 12, py, 58, 22 };
+                    Rectangle btnYp = { panelRec.x + 74, py, 58, 22 };
+                    Rectangle btnRm = { panelRec.x + 140, py, 58, 22 };
+                    Rectangle btnRp = { panelRec.x + 202, py, 58, 22 };
+                    if (DrawGodotBtn(btnYm, "Y -", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.y -= 0.25f;
+                    if (DrawGodotBtn(btnYp, "Y +", Color{ 36, 43, 58, 255 }, WHITE, true)) o.position.y += 0.25f;
+                    if (DrawGodotBtn(btnRm, "Rot -15", Color{ 36, 43, 58, 255 }, WHITE, true)) o.rotationY -= 15.0f;
+                    if (DrawGodotBtn(btnRp, "Rot +15", Color{ 36, 43, 58, 255 }, WHITE, true)) o.rotationY += 15.0f;
+                    py += 30;
+
+                    // Duplicate & Delete Entity
+                    Rectangle btnDup = { panelRec.x + 12, py, 120, 24 };
+                    Rectangle btnDel = { panelRec.x + 140, py, 120, 24 };
+                    if (DrawGodotBtn(btnDup, "Duplicate", Color{ 48, 85, 120, 255 }, WHITE, true) || (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_D))) {
+                        LevelEntity dup = o;
+                        dup.id = (int)levelEntities.size();
+                        dup.position.x += 1.5f;
+                        levelEntities.push_back(dup);
+                        selectedObs = (int)levelEntities.size() - 1;
+                        editorMsg = "Entity Duplicated!";
+                        editorMsgTimer = 2.0f;
+                    }
+                    if (DrawGodotBtn(btnDel, "Delete", Color{ 145, 45, 45, 255 }, WHITE, true) || IsKeyPressed(KEY_DELETE)) {
+                        levelEntities.erase(levelEntities.begin() + selectedObs);
+                        selectedObs = -1;
+                        editorMsg = "Entity Deleted!";
+                        editorMsgTimer = 2.0f;
+                    }
+                    py += 32;
+                } else {
                 DrawRectangleRec(Rectangle{ panelRec.x + 12, py, panelW - 24, 70 }, Color{ 24, 28, 37, 255 });
                 DrawRectangleLinesEx(Rectangle{ panelRec.x + 12, py, panelW - 24, 70 }, 1.0f, Color{ 45, 52, 66, 255 });
                 DrawTextEx(fontUI, "No entity selected.", Vector2{ panelRec.x + 24, py + 14 }, 13, 0.3f, Color{ 209, 213, 219, 255 });
@@ -3073,6 +3234,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 DrawTextEx(fontUIBold, editorMsg.c_str(), Vector2{ (float)toastX + 20, (float)toastY + 9 }, 14, 0.4f, WHITE);
             }
         }
+        }
         EndDrawing();
 
         testFrameCount++;
@@ -3121,6 +3283,8 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
     }
     UnloadModel(wallModel);
     UnloadModel(waterModel);
+    UnloadModel(wallColModel);
+    UnloadTexture(texSkullGas);
     UnloadModel(startModel);
     UnloadModel(finishModel);
     UnloadModel(cp1Model);
@@ -3155,6 +3319,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
     if (fontUIBold.texture.id != GetFontDefault().texture.id) UnloadFont(fontUIBold);
 
     UnloadShader(shaderWater);
+    UnloadRenderTexture(previewRT);
     UnloadShader(shaderLighting);
 
     CloseAudioDevice();
