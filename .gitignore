@@ -1,0 +1,10 @@
+# MSVC Build Artifacts
+/GameEngine.obj
+/test_compile.obj
+/test_compile.exe
+*.pdb
+*.ilk
+*.log
+*.bak*
+.system_generated/
+CustomEngine/scratch/

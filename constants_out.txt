@@ -1,0 +1,261 @@
+
+=== PirateButtBlendJiggle (PuffPirates.Players) ===
+  const SideFreq2 = err: a bytes-like object is required, not 'method'
+  const SidePhase = err: a bytes-like object is required, not 'method'
+  const SideMix = err: a bytes-like object is required, not 'method'
+  const SideNorm = err: a bytes-like object is required, not 'method'
+  const VertFreq = err: a bytes-like object is required, not 'method'
+  const VertPhase = err: a bytes-like object is required, not 'method'
+  const BackFreq = err: a bytes-like object is required, not 'method'
+  const BackPhase = err: a bytes-like object is required, not 'method'
+  const BackBase = err: a bytes-like object is required, not 'method'
+  const BackSwing = err: a bytes-like object is required, not 'method'
+  const InflateFreq = err: a bytes-like object is required, not 'method'
+  const InflatePhase = err: a bytes-like object is required, not 'method'
+  const InflateBase = err: a bytes-like object is required, not 'method'
+  const InflateSwing = err: a bytes-like object is required, not 'method'
+  const PhaseWrap = err: a bytes-like object is required, not 'method'
+  const MaskWeightEps = err: a bytes-like object is required, not 'method'
+  const ActiveEps = err: a bytes-like object is required, not 'method'
+  const Tau = err: a bytes-like object is required, not 'method'
+  field _config
+  field _player
+  field _renderer
+  field _butBone
+  field _shapeX
+  field _shapeY
+  field _shapeZ
+  field _shapeInflate
+  field _ready
+  field _builtMesh
+  field _ownedMesh
+  field _redMpb
+  field _lastPaintedEnvelope
+  field BaseMapStId
+  field _gasEnvelope
+  field _phase
+  field _moveOffset
+  field _moveVelocity
+  field _lastBoatPos
+  field _lastBoatVel
+  field _lastBoatYaw
+  field _boatKinematicsInit
+
+=== PirateButtBlendJiggleConfig (PuffPirates.Players) ===
+  field _maskCenter
+  field _maskRadii
+  field _shapeUnit
+  field _gasJiggleEnabled
+  field _minFrequency
+  field _maxFrequency
+  field _sideAmplitude
+  field _verticalAmplitude
+  field _backAmplitude
+  field _inflateAmplitude
+  field _balloonAmplitude
+  field _attackSpeed
+  field _releaseSpeed
+  field _minGasStrength
+  field _boneSwellEnabled
+  field _boneSwellCurve
+  field _gasPeakScale
+  field _gasTrembleAmplitude
+  field _gasTrembleFrequency
+  field _rednessEnabled
+  field _redMaterialIndex
+  field _redTilingMin
+  field _redTilingMax
+  field _redCurve
+  field _movementSwayEnabled
+  field _moveInertia
+  field _turnSway
+  field _moveMaxOffset
+  field _moveStiffness
+  field _moveDamping
+
+=== PirateGas (PuffPirates.Players) ===
+  field _config
+  field _svGasEnergy
+  field _svGasDepleted
+  field _svRegenDelayTimer
+  field _svGasCharge
+  field _svGasFxForce
+  field _hostPowerFraction
+  field _player
+  field _visualPhysics
+  const MaxVisualStep = err: a bytes-like object is required, not 'method'
+  field _visualFrame
+  field _visualTime
+  field _visualWasGassing
+  field _visualCharge
+  field _visualFraction
+  field _visualReleaseFractionStart
+  field _visualReleaseChargeStart
+  field _visualReleaseTimer
+  field _svGasBurstSequence
+  field _svNormalTapWindowOpen
+  field _svNormalTapPressTimer
+  field _svNormalTapConfirmedHold
+  field _svGasTapSequence
+  field _svReleaseFractionStart
+  field _svReleaseChargeStart
+  field _svReleaseTimer
+  field _svMousePuffHeld
+  field _svIsGassing
+  field NetworkInitialize___EarlyPuffPirates.Players.PirateGasAssembly-CSharp.dll_Excuted
+  field NetworkInitialize___LatePuffPirates.Players.PirateGasAssembly-CSharp.dll_Excuted
+
+=== PirateGasConfig (PuffPirates.Players) ===
+  field _maxGas
+  field _gasRegenPerSec
+  field _gasRegenDelay
+  field _gasRecoverPercent
+
+=== Crocodile (PuffPirates.Obstacles) ===
+  field _speed
+  field _detectRange
+  field _biteRange
+  field _biteCooldown
+  field _respawnInvuln
+  field _anim
+  field _agent
+  field _biteReadyAt
+  field _nextRepath
+  field NetworkInitialize___EarlyPuffPirates.Obstacles.CrocodileAssembly-CSharp.dll_Excuted
+  field NetworkInitialize___LatePuffPirates.Obstacles.CrocodileAssembly-CSharp.dll_Excuted
+
+=== Shark (PuffPirates.Obstacles) ===
+  field _patrolSpeed
+  field _chaseSpeed
+  field _narrowSpeedMul
+  field _narrowHalfWidth
+  field _narrowSeconds
+  field _viewLength
+  field _viewHalfWidth
+  field _giveUpSeconds
+  field _biteRange
+  field _biteCooldown
+  field _respawnInvuln
+  field _wanderRadius
+  field _wanderPause
+  field _currentPush
+  field _minPlayerDistance
+  field _agent
+  field _target
+  field _lastGood
+  field _flow
+  field _flowUntil
+  field _lostTimer
+  field _narrowTime
+  field _nextCheck
+  field _nextRepath
+  field _nextWander
+  field _biteReadyAt
+  field NetworkInitialize___EarlyPuffPirates.Obstacles.SharkAssembly-CSharp.dll_Excuted
+  field NetworkInitialize___LatePuffPirates.Obstacles.SharkAssembly-CSharp.dll_Excuted
+
+=== BumperObstacle (PuffPirates.Obstacles.Physics) ===
+  field _detectionRadius
+  field _impactRadius
+  field _horizontalForce
+  field _upwardForce
+  field _upwardAngleDeg
+  field _mode
+  field _expandDuration
+  field _cooldown
+  field _rebuildTime
+  field _posts
+  field _closedRadiusRatio
+  field _closedScaleRatio
+  field _expandVfxPrefab
+  field _vfxPrewarm
+  field _vfxCap
+  field _expandShakeTrauma
+  field _phase
+  field _cycleAnchorTime
+  field _cycleIndex
+  field _currentPose
+  field _postOpenLocalPos
+  field _postClosedLocalPos
+  field _postOpenLocalScale
+  field _postClosedLocalScale
+  field _boatBuffer
+  field _vfxPool
+
+=== BoatPhysicsConfig (PuffPirates.Boats) ===
+  field _normalGasForce
+  field _gasForceDrop
+  field _gasRampCurve
+  field _gasRampSeconds
+  field _minGasForce
+  field _gasReleaseCurve
+  field _gasReleaseSeconds
+  field _normalGasTapThresholdSeconds
+  field _normalGasTapBurstForce
+  field _normalGasTapCost
+  field _noGasWhenAirborne
+  field _groundContactDistance
+  field _glideFriction
+  field _normalGasCost
+  field _slowMultiplier
+  field _itemBoxBoostForce
+  field _swirlBias
+  field _centerOfMassY
+  field _waterRideHeight
+  field _waterProbeAboveHull
+  field _waterSpring
+  field _waterDamping
+  field _waterSampleRadius
+  field _waterMinUpDot
+  field _waterSurfaceMask
+  field _waterSamplePointCount
+  field _waterBobAmplitude
+  field _waterBobFrequency
+  field _waterBobWaveLength
+  field _waterBobSpeedThreshold
+  field _waterBobFadeRange
+  field _rideRayStartHeight
+  field _antiTunnelSnap
+  field _conformToGround
+  field _groundAlignSpring
+  field _groundAlignDamping
+  field _groundAlignMinUpDot
+  field _groundAlignMaxTiltDeg
+  field _flipUprightDot
+  field _flipRecoverLift
+  field _tiltClampMargin
+  field _tiltClampLerp
+
+=== BoatPhysicsController (PuffPirates.Boats) ===
+  field _config
+  field _glideFriction
+  field _noGasWhenAirborne
+  field _waterRideHeight
+  field _gasRampSeconds
+  field _minGasForce
+  field _gasReleaseSeconds
+  field _waterBobAmplitude
+  field _waterBobFrequency
+  field _waterBobWaveLength
+  field _waterBobSpeedThreshold
+  field _waterBobFadeRange
+  field _boat
+  field _rb
+  field _buoyancy
+  field _waterRide
+  field _groundStabilizer
+  field _groundedHits
+  field _ownColliderIds
+  field NetworkInitialize___EarlyPuffPirates.Boats.BoatPhysicsControllerAssembly-CSharp.dll_Excuted
+  field NetworkInitialize___LatePuffPirates.Boats.BoatPhysicsControllerAssembly-CSharp.dll_Excuted
+
+=== BoatDefinition (PuffPirates.Boats) ===
+  field DisplayName
+  field Mass
+  field LinearDamping
+  field AngularDamping
+  field MaxSpeed
+  field GasEfficiency
+  field SteerTorque
+  field AttachmentRadius
+  field VisualPrefab

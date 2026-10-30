@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Custom Engine | منصة التدفق والتحميل المتزامن</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- الحاوية الأساسية للنافذة الخالية من الإطار (Frameless Window Container) -->
+    <div class="window-frame" id="windowFrame">
+        
+        <!-- شريط العنوان المخصص (Custom Frameless Titlebar) -->
+        <header class="custom-titlebar" id="titleBar">
+            <div class="titlebar-drag-region">
+                <div class="brand">
+                    <div class="brand-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                            <polyline points="2 17 12 22 22 17"></polyline>
+                            <polyline points="2 12 12 17 22 12"></polyline>
+                        </svg>
+                    </div>
+                    <div class="brand-text">
+                        <span class="brand-name">CustomEngine <span class="tag">Native v1.0</span></span>
+                        <span class="brand-sub">محرك التدفق المتزامن والتقسيم المجدول (Multi-part Chunking)</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- أزرار التحكم بالنافذة -->
+            <div class="window-controls">
+                <button class="win-btn win-minimize" id="btnMinimize" title="تصغير">
+                    <svg viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
+                </button>
+                <button class="win-btn win-maximize" id="btnMaximize" title="تكبير / استعادة">
+                    <svg viewBox="0 0 10 10" fill="none" stroke="currentColor"><rect x="0.5" y="0.5" width="9" height="9"/></svg>
+                </button>
+                <button class="win-btn win-close" id="btnClose" title="إغلاق">
+                    <svg viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.2"><path d="M1 1L9 9M9 1L1 9"/></svg>
+                </button>
+            </div>
+        </header>
+
+        <!-- المحتوى الرئيسي (Main Application Body) -->
+        <main class="app-body">
+            
+            <!-- لوحة القياس العلوية (Top Metrics Dashboard) -->
+            <section class="metrics-grid">
+                <div class="metric-card glass">
+                    <div class="metric-icon stream-icon">⚡</div>
+                    <div class="metric-info">
+                        <span class="metric-label">سرعة التدفق الإجمالية</span>
+                        <div class="metric-value-wrap">
+                            <span class="metric-value" id="globalSpeed">0.00</span>
+                            <span class="metric-unit">KB/s</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="metric-card glass">
+                    <div class="metric-icon tick-icon">⏱️</div>
+                    <div class="metric-info">
+                        <span class="metric-label">دورة الشبكة (Network Tick)</span>
+                        <div class="metric-value-wrap">
+                            <span class="metric-value" id="networkTick">0</span>
+                            <span class="metric-unit">Tick</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="metric-card glass">
+                    <div class="metric-icon chunk-icon">📦</div>
+                    <div class="metric-info">
+                        <span class="metric-label">الأجزاء المعالجة (Chunks)</span>
+                        <div class="metric-value-wrap">
+                            <span class="metric-value" id="totalChunksProcessed">0</span>
+                            <span class="metric-unit">Chunk</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="metric-card glass">
+                    <div class="metric-icon integrity-icon">🛡️</div>
+                    <div class="metric-info">
+                        <span class="metric-label">سلامة البيانات (CRC32)</span>
+                        <div class="metric-value-wrap">
+                            <span class="metric-value text-success" id="crcStatus">100% سليم</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- منطقة إدارة الملفات وجدولة التدفق (Files & Streaming Control) -->
+            <div class="content-split">
+                
+                <!-- قائمة الملفات والتحكم بالسرعة اليدوية -->
+                <div class="files-panel glass">
+                    <div class="panel-header">
+                        <div>
+                            <h2>ملفات الحزم وجدولة التدفق</h2>
+                            <p>تحكم بسرعة النقل والتقسيم لكل ملف على حدة (Token Bucket Rate Limiting)</p>
+                        </div>
+                        <div class="panel-actions">
+                            <button class="btn btn-primary" id="btnStartAll">
+                                <span>تشغيل كافة البثوث</span>
+                            </button>
+                            <button class="btn btn-secondary" id="btnPauseAll">
+                                <span>إيقاف مؤقت</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- حاوية كروت الملفات -->
+                    <div class="files-list" id="filesList">
+                        <!-- تُنشأ ديناميكياً عبر الجافاسكربت -->
+                    </div>
+                </div>
+
+                <!-- اللوحة الجانبية: محاكاة أجهزة الإدخال وسجل التحقق من الدمج -->
+                <aside class="sidebar-panel">
+                    
+                    <!-- محاكي مدخلات اللاعب (Input Manager Replicator) -->
+                    <div class="card glass input-card">
+                        <h3>مسؤول المدخلات (Input Manager)</h3>
+                        <p class="card-desc">توليد مدخلات اللاعب اللحظية ومزامنتها مع الـ TargetTick</p>
+                        
+                        <div class="input-controls">
+                            <div class="control-row">
+                                <label>توجيه القارب (CircularMovement):</label>
+                                <span class="badge" id="moveVal">[0.00, 0.00]</span>
+                            </div>
+                            <div class="joystick-zone" id="joystickZone">
+                                <div class="joystick-knob" id="joystickKnob"></div>
+                            </div>
+
+                            <div class="buttons-grid">
+                                <button class="action-btn" id="btnGas">
+                                    <span>غاز التسارع (NormalGas)</span>
+                                </button>
+                                <button class="action-btn" id="btnPuff">
+                                    <span>نفخ الغاز (MousePuff)</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- سجل دمج الأجزاء الذري (Atomic Reassembly Log) -->
+                    <div class="card glass log-card">
+                        <div class="log-header">
+                            <h3>سجل دمج الحزم (SplitReader Log)</h3>
+                            <span class="pulse-indicator"></span>
+                        </div>
+                        <div class="log-console" id="logConsole">
+                            <div class="log-entry system">[النواة] تم تشغيل محرك CustomEngine بنجاح.</div>
+                            <div class="log-entry system">[الشبكة] جاهزية خوارزمية Token Bucket ومسؤول التجزئة.</div>
+                        </div>
+                    </div>
+                </aside>
+
+            </div>
+        </main>
+
+        <!-- شريط الحالة السفلي (Status Bar) -->
+        <footer class="app-statusbar">
+            <div class="status-left">
+                <span class="status-dot"></span>
+                <span>الحالة: متصل وجاهز للنقل المحلي والشبكي</span>
+            </div>
+            <div class="status-right">
+                <span>المعمارية: C++ Core / Cross-Platform (PC & Mobile Snapdragon 450 Ready)</span>
+            </div>
+        </footer>
+
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
