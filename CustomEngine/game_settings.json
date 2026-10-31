@@ -1,0 +1,21 @@
+{
+  "masterVolume": 80.0,
+  "musicVolume": 80.0,
+  "sfxVolume": 80.0,
+  "fartVolume": 80.0,
+  "qualityLevel": 3,
+  "cameraShake": true,
+  "maxCamDist": 30.0,
+  "showFPS": true,
+  "deviceMode": 0,
+  "mouseSens": 1.00,
+  "invertMouseY": false,
+  "touchBtnScale": 1.00,
+  "touchBtnOpacity": 0.85,
+  "steerLeftPosX": 0.080,
+  "steerLeftPosY": 0.780,
+  "steerRightPosX": 0.220,
+  "steerRightPosY": 0.780,
+  "gasBtnPosX": 0.860,
+  "gasBtnPosY": 0.760
+}

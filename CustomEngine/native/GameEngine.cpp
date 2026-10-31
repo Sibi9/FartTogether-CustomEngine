@@ -559,6 +559,101 @@ static std::string ResolveAudioFile(const std::string& fileName) {
 }
 
 static bool ParseJsonFloatField(const char* objStart, const char* objEnd, const char* key, float& outVal);
+static bool ParseJsonIntField(const char* objStart, const char* objEnd, const char* key, int& outVal);
+
+struct GameSettingsConfig {
+    // Audio (0 .. 100)
+    float masterVolume = 80.0f;
+    float musicVolume  = 80.0f;
+    float sfxVolume    = 80.0f;
+    float fartVolume   = 80.0f;
+
+    // Graphics
+    int   qualityLevel = 2;     // 0=Low, 1=Medium, 2=High, 3=Ultra
+    bool  cameraShake  = true;
+    float maxCamDist   = 30.0f; // 10m .. 50m
+    bool  showFPS      = false; // F5 toggle or Settings toggle
+
+    // Device profile
+    int   deviceMode   = 0;     // 0=Auto-Detect, 1=PC (Keyboard/Mouse), 2=Mobile (Touchscreen)
+    float mouseSens    = 1.0f;
+    bool  invertMouseY = false;
+
+    // Mobile touch HUD configuration
+    float touchBtnScale   = 1.00f; // 0.50f .. 1.80f
+    float touchBtnOpacity = 0.85f; // 0.30f .. 1.00f
+    float steerLeftPosX   = 0.08f; // Screen width fraction
+    float steerLeftPosY   = 0.78f; // Screen height fraction
+    float steerRightPosX  = 0.22f;
+    float steerRightPosY  = 0.78f;
+    float gasBtnPosX      = 0.86f;
+    float gasBtnPosY      = 0.76f;
+};
+static GameSettingsConfig gSettings;
+
+static void SaveGameSettingsJSON(const std::string& path = "game_settings.json") {
+    std::string resolved = ResolveAsset(path);
+    FILE* f = fopen(resolved.c_str(), "w");
+    if (!f) f = fopen(path.c_str(), "w");
+    if (!f) return;
+    fprintf(f,
+        "{\n"
+        "  \"masterVolume\": %.1f,\n"
+        "  \"musicVolume\": %.1f,\n"
+        "  \"sfxVolume\": %.1f,\n"
+        "  \"fartVolume\": %.1f,\n"
+        "  \"qualityLevel\": %d,\n"
+        "  \"cameraShake\": %s,\n"
+        "  \"maxCamDist\": %.1f,\n"
+        "  \"showFPS\": %s,\n"
+        "  \"deviceMode\": %d,\n"
+        "  \"mouseSens\": %.2f,\n"
+        "  \"invertMouseY\": %s,\n"
+        "  \"touchBtnScale\": %.2f,\n"
+        "  \"touchBtnOpacity\": %.2f,\n"
+        "  \"steerLeftPosX\": %.3f,\n"
+        "  \"steerLeftPosY\": %.3f,\n"
+        "  \"steerRightPosX\": %.3f,\n"
+        "  \"steerRightPosY\": %.3f,\n"
+        "  \"gasBtnPosX\": %.3f,\n"
+        "  \"gasBtnPosY\": %.3f\n"
+        "}\n",
+        gSettings.masterVolume, gSettings.musicVolume, gSettings.sfxVolume, gSettings.fartVolume,
+        gSettings.qualityLevel, gSettings.cameraShake ? "true" : "false", gSettings.maxCamDist,
+        gSettings.showFPS ? "true" : "false", gSettings.deviceMode, gSettings.mouseSens,
+        gSettings.invertMouseY ? "true" : "false", gSettings.touchBtnScale, gSettings.touchBtnOpacity,
+        gSettings.steerLeftPosX, gSettings.steerLeftPosY, gSettings.steerRightPosX, gSettings.steerRightPosY,
+        gSettings.gasBtnPosX, gSettings.gasBtnPosY);
+    fclose(f);
+}
+
+static void LoadGameSettingsJSON(const std::string& path = "game_settings.json") {
+    std::string resolved = ResolveAsset(path);
+    char* txt = LoadFileText(resolved.c_str());
+    if (!txt) { SaveGameSettingsJSON(path); return; }
+    const char* end = txt + strlen(txt);
+    ParseJsonFloatField(txt, end, "\"masterVolume\"", gSettings.masterVolume);
+    ParseJsonFloatField(txt, end, "\"musicVolume\"", gSettings.musicVolume);
+    ParseJsonFloatField(txt, end, "\"sfxVolume\"", gSettings.sfxVolume);
+    ParseJsonFloatField(txt, end, "\"fartVolume\"", gSettings.fartVolume);
+    int q = gSettings.qualityLevel;
+    if (ParseJsonIntField(txt, end, "\"qualityLevel\"", q)) gSettings.qualityLevel = q;
+    ParseJsonFloatField(txt, end, "\"maxCamDist\"", gSettings.maxCamDist);
+    int dm = gSettings.deviceMode;
+    if (ParseJsonIntField(txt, end, "\"deviceMode\"", dm)) gSettings.deviceMode = dm;
+    ParseJsonFloatField(txt, end, "\"mouseSens\"", gSettings.mouseSens);
+    ParseJsonFloatField(txt, end, "\"touchBtnScale\"", gSettings.touchBtnScale);
+    ParseJsonFloatField(txt, end, "\"touchBtnOpacity\"", gSettings.touchBtnOpacity);
+    ParseJsonFloatField(txt, end, "\"steerLeftPosX\"", gSettings.steerLeftPosX);
+    ParseJsonFloatField(txt, end, "\"steerLeftPosY\"", gSettings.steerLeftPosY);
+    ParseJsonFloatField(txt, end, "\"steerRightPosX\"", gSettings.steerRightPosX);
+    ParseJsonFloatField(txt, end, "\"steerRightPosY\"", gSettings.steerRightPosY);
+    ParseJsonFloatField(txt, end, "\"gasBtnPosX\"", gSettings.gasBtnPosX);
+    ParseJsonFloatField(txt, end, "\"gasBtnPosY\"", gSettings.gasBtnPosY);
+    if (strstr(txt, "\"cameraShake\": false") || strstr(txt, "\"cameraShake\":false")) gSettings.cameraShake = false;
+    if (strstr(txt, "\"showFPS\": true") || strstr(txt, "\"showFPS\":true")) gSettings.showFPS = true;
+    UnloadFileText(txt);
+}
 
 struct GasPhysicsConfig {
     float tapBurstForce     = 480.0f; // Force of quick tap burst (equalized with sustained)
@@ -610,10 +705,11 @@ static void LoadPhysicsConfigJSON(const std::string& path = "physics_config.json
 }
 
 enum AppScreenState {
-    SCREEN_MAIN_MENU = 0,
-    SCREEN_LAN_LOBBY = 1,
-    SCREEN_SETTINGS  = 2,
-    SCREEN_GAMEPLAY  = 3
+    SCREEN_MAIN_MENU  = 0,
+    SCREEN_LAN_LOBBY  = 1,
+    SCREEN_SETTINGS   = 2,
+    SCREEN_GAMEPLAY   = 3,
+    SCREEN_FIND_LOBBY = 4
 };
 
 
@@ -1917,11 +2013,13 @@ int main(int argc, char** argv) {
     int testAngleMode = 0; // 0=behind, 1=side, 2=front, 3=top
 
     int targetTestFrame = 60;
+    static int gTestSettingsTab = 3;
 
     std::string testScreenArg = "";
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--test-screen") == 0 && i + 1 < argc) testScreenArg = argv[++i];
         if (strcmp(argv[i], "--test-screenshot") == 0) testScreenshotMode = true;
+        if (strcmp(argv[i], "--test-settings-tab") == 0 && i + 1 < argc) gTestSettingsTab = atoi(argv[++i]);
         if (strcmp(argv[i], "--test-editor") == 0) testEditorMode = true;
         if (strcmp(argv[i], "--test-catalog") == 0) { testCatalogMode = true; testEditorMode = true; }
         if (strcmp(argv[i], "--test-death") == 0) testDeathMode = true;
@@ -2292,6 +2390,23 @@ int main(int argc, char** argv) {
     Sound sndExplode = LoadSound(ResolveAudioFile("boat_explode.wav").c_str());
     Sound sndBounce  = LoadSound(ResolveAudioFile("fart_4.wav").c_str());
 
+    // 7 New Audio Effects & Music (Plan v8.0 Task 1)
+    Sound sndMenuBeachOst = LoadSound(ResolveAudioFile("menu_beach_ost.wav").c_str());
+    Sound sndSeagull      = LoadSound(ResolveAudioFile("seagull_call.wav").c_str());
+    Sound sndShipHorn     = LoadSound(ResolveAudioFile("ship_horn.wav").c_str());
+    Sound sndSnore        = LoadSound(ResolveAudioFile("snore_loop.wav").c_str());
+    Sound sndEatMunch     = LoadSound(ResolveAudioFile("eat_munch.wav").c_str());
+    Sound sndBurp         = LoadSound(ResolveAudioFile("burp.wav").c_str());
+    Sound sndCheckpoint   = LoadSound(ResolveAudioFile("checkpoint_chime.wav").c_str());
+
+    // 3 Oasis Animated Scene Textures (Plan v8.0 Task 1 & 2)
+    Texture2D texMenuOasisFull  = LoadTexture(ResolveAsset("extracted_assets/textures/Menu_Oasis_Full.png").c_str());
+    Texture2D texMenuOasisClean = LoadTexture(ResolveAsset("extracted_assets/textures/Menu_Oasis_CleanPond.png").c_str());
+    Texture2D texMenuRaftSleep  = LoadTexture(ResolveAsset("extracted_assets/textures/Menu_Pirate_SleepingRaft.png").c_str());
+    SetTextureFilter(texMenuOasisFull, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(texMenuOasisClean, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(texMenuRaftSleep, TEXTURE_FILTER_BILINEAR);
+
     // Load authentic UI textures for Main Menu, Lobby, and Settings (Plan v7.0 Task 4)
     Texture2D texMainLogo        = LoadTexture(ResolveAsset("extracted_assets/textures/Icon_Logo.png").c_str());
     Texture2D texLogoSplash      = LoadTexture(ResolveAsset("extracted_assets/textures/Logo_Splash.png").c_str());
@@ -2335,8 +2450,47 @@ int main(int argc, char** argv) {
         LoadTexture(ResolveAsset("extracted_assets/textures/Character_LobbyGrey.png").c_str())
     };
     int selectedLobbyChar = 0;
-    float masterVolume = 0.85f;
-    SetMasterVolume(masterVolume);
+    LoadGameSettingsJSON("game_settings.json");
+
+    auto ApplySettingsLive = [&]() {
+        float mVol = Clamp(gSettings.masterVolume / 100.0f, 0.0f, 1.0f);
+        SetMasterVolume(mVol);
+        SetSoundVolume(sndMenuBeachOst, Clamp(gSettings.musicVolume / 100.0f, 0.0f, 1.0f));
+        float sfxV = Clamp(gSettings.sfxVolume / 100.0f, 0.0f, 1.0f);
+        SetSoundVolume(sndSeagull, sfxV * 0.55f);
+        SetSoundVolume(sndShipHorn, sfxV * 0.50f);
+        SetSoundVolume(sndSnore, sfxV * 0.65f);
+        SetSoundVolume(sndEatMunch, sfxV * 0.70f);
+        SetSoundVolume(sndBurp, sfxV * 0.80f);
+        SetSoundVolume(sndExplode, sfxV);
+        SetSoundVolume(sndBounce, sfxV);
+        SetSoundVolume(sndCheckpoint, sfxV * 0.90f);
+        float fartV = Clamp(gSettings.fartVolume / 100.0f, 0.0f, 1.0f);
+        for (int i = 0; i < 3; i++) SetSoundVolume(sndTap[i], fartV);
+        for (int i = 0; i < 2; i++) SetSoundVolume(sndHold[i], fartV);
+        for (int i = 0; i < 6; i++) SetSoundVolume(fartSounds[i], fartV);
+
+        int qLevel = gSettings.qualityLevel;
+        int qWaterLoc = GetShaderLocation(shaderWater, "uQualityLevel");
+        if (qWaterLoc != -1) SetShaderValue(shaderWater, qWaterLoc, &qLevel, SHADER_UNIFORM_INT);
+        int qLightLoc = GetShaderLocation(shaderLighting, "uQualityLevel");
+        if (qLightLoc != -1) SetShaderValue(shaderLighting, qLightLoc, &qLevel, SHADER_UNIFORM_INT);
+
+        TextureFilter filter = (qLevel == 0) ? TEXTURE_FILTER_POINT :
+                               (qLevel == 1) ? TEXTURE_FILTER_BILINEAR :
+                               (qLevel == 2) ? TEXTURE_FILTER_TRILINEAR : TEXTURE_FILTER_ANISOTROPIC_4X;
+        SetTextureFilter(texPalette, filter);
+        SetTextureFilter(texRockDark, filter);
+        SetTextureFilter(texCaustic, filter);
+        SetTextureFilter(texFoam1, filter);
+        SetTextureFilter(texFoam2, filter);
+
+        if (qLevel == 0) SetTargetFPS(30);
+        else if (qLevel == 1) SetTargetFPS(60);
+        else if (qLevel == 2) SetTargetFPS(60);
+        else if (qLevel == 3) SetTargetFPS(120);
+    };
+    ApplySettingsLive();
 
     LoadPhysicsConfigJSON("physics_config.json");
 
@@ -2501,6 +2655,21 @@ int main(int argc, char** argv) {
     } else if (testScreenArg == "settings") {
         currentScreen = SCREEN_SETTINGS;
         testScreenshotMode = true;
+    } else if (testScreenArg == "find_lobby") {
+        currentScreen = SCREEN_FIND_LOBBY;
+        testScreenshotMode = true;
+    } else if (testScreenArg == "mobile") {
+        currentScreen = SCREEN_GAMEPLAY;
+        gSettings.deviceMode = 2;
+        gSettings.showFPS = true;
+        testScreenshotMode = true;
+    } else if (testScreenArg == "checkpoint") {
+        currentScreen = SCREEN_GAMEPLAY;
+        gSettings.showFPS = true;
+        raft.position = Vector3{ 16.5f, 0.45f, 64.0f };
+        raft.velocity = Vector3{ 0.0f, 0.0f, -4.5f };
+        raft.currentCP = 1;
+        testScreenshotMode = true;
     }
 
     bool editorMode = testEditorMode;
@@ -2605,6 +2774,40 @@ int main(int argc, char** argv) {
         }
 
         runTime += dt;
+
+        bool isMobileTouchHUD = (gSettings.deviceMode == 2) || (gSettings.deviceMode == 0 && (GetTouchPointCount() > 0));
+        bool touchSteerLeft = false;
+        bool touchSteerRight = false;
+        bool touchGas = false;
+        bool touchSettings = false;
+        float sW = (float)GetScreenWidth();
+        float sH = (float)GetScreenHeight();
+        Vector2 posLeftBtn  = Vector2{ gSettings.steerLeftPosX * sW, gSettings.steerLeftPosY * sH };
+        Vector2 posRightBtn = Vector2{ gSettings.steerRightPosX * sW, gSettings.steerRightPosY * sH };
+        Vector2 posGasBtn   = Vector2{ gSettings.gasBtnPosX * sW, gSettings.gasBtnPosY * sH };
+        Vector2 posGearBtn  = Vector2{ sW - 55.0f, 45.0f };
+        float rSteer = 48.0f * gSettings.touchBtnScale;
+        float rGas   = 62.0f * gSettings.touchBtnScale;
+        float rGear  = 24.0f;
+
+        // Ambient coastal soundscape & OST management (Plan v8.0 Task 2)
+        static float seagullTimer = 4.0f;
+        static float shipHornTimer = 10.0f;
+        if (currentScreen != SCREEN_GAMEPLAY) {
+            if (!IsSoundPlaying(sndMenuBeachOst)) PlaySound(sndMenuBeachOst);
+            seagullTimer -= dt;
+            if (seagullTimer <= 0.0f) {
+                PlaySound(sndSeagull);
+                seagullTimer = 11.0f + (float)(rand() % 6);
+            }
+            shipHornTimer -= dt;
+            if (shipHornTimer <= 0.0f) {
+                PlaySound(sndShipHorn);
+                shipHornTimer = 21.0f + (float)(rand() % 8);
+            }
+        } else {
+            if (IsSoundPlaying(sndMenuBeachOst)) StopSound(sndMenuBeachOst);
+        }
 
                 // LAN Networking Hotkeys (F2: Host | F3: Join | F4: Offline)
         if (IsKeyPressed(KEY_F2)) {
@@ -2715,11 +2918,52 @@ int main(int argc, char** argv) {
 
         bool p1InputReleased = false;
 
+        // Update Mobile Touch HUD Inputs
+        isMobileTouchHUD = (gSettings.deviceMode == 2) || (gSettings.deviceMode == 0 && (GetTouchPointCount() > 0));
+        sW = (float)GetScreenWidth();
+        sH = (float)GetScreenHeight();
+        posLeftBtn  = Vector2{ gSettings.steerLeftPosX * sW, gSettings.steerLeftPosY * sH };
+        posRightBtn = Vector2{ gSettings.steerRightPosX * sW, gSettings.steerRightPosY * sH };
+        posGasBtn   = Vector2{ gSettings.gasBtnPosX * sW, gSettings.gasBtnPosY * sH };
+        posGearBtn  = Vector2{ sW - 55.0f, 45.0f };
+        rSteer = 48.0f * gSettings.touchBtnScale;
+        rGas   = 62.0f * gSettings.touchBtnScale;
+        rGear  = 24.0f;
+
+        if (isMobileTouchHUD && !editorMode) {
+            int touchCount = GetTouchPointCount();
+            for (int t = 0; t < touchCount; t++) {
+                Vector2 tp = GetTouchPosition(t);
+                if (CheckCollisionPointCircle(tp, posLeftBtn, rSteer))   touchSteerLeft = true;
+                if (CheckCollisionPointCircle(tp, posRightBtn, rSteer))  touchSteerRight = true;
+                if (CheckCollisionPointCircle(tp, posGasBtn, rGas))      touchGas = true;
+                if (CheckCollisionPointCircle(tp, posGearBtn, rGear))    touchSettings = true;
+            }
+            if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                if (CheckCollisionPointCircle(mousePos, posLeftBtn, rSteer))  touchSteerLeft = true;
+                if (CheckCollisionPointCircle(mousePos, posRightBtn, rSteer)) touchSteerRight = true;
+                if (CheckCollisionPointCircle(mousePos, posGasBtn, rGas))     touchGas = true;
+            }
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                if (CheckCollisionPointCircle(mousePos, posGearBtn, rGear))   touchSettings = true;
+            }
+            if (touchSettings) {
+                currentScreen = SCREEN_SETTINGS;
+            }
+        }
+
+        if (IsKeyPressed(KEY_F5)) {
+            gSettings.showFPS = !gSettings.showFPS;
+            SaveGameSettingsJSON("game_settings.json");
+        }
+
         // P1 Controls: A/D (or Gamepad 0 Left Stick) slides left pirate along rim, W/SPACE (or Gamepad 0 South Face Button) unleashes gas
         if (!raft.isDestroyed) {
             float rimMove1 = 0.0f;
             if (IsKeyDown(KEY_A)) rimMove1 -= 1.0f;
             if (IsKeyDown(KEY_D)) rimMove1 += 1.0f;
+            if (touchSteerLeft)   rimMove1 -= 1.0f;
+            if (touchSteerRight)  rimMove1 += 1.0f;
             if (IsGamepadAvailable(0)) {
                 float gpAxis = GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_X);
                 if (fabsf(gpAxis) > 0.15f) rimMove1 += gpAxis;
@@ -2736,8 +2980,8 @@ int main(int argc, char** argv) {
 
             bool gp1Down = IsGamepadAvailable(0) && (IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) || GetGamepadAxisMovement(0, GAMEPAD_AXIS_RIGHT_TRIGGER) > 0.3f);
             bool gp1Rel  = IsGamepadAvailable(0) && IsGamepadButtonReleased(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
-            p1InputDown     = IsKeyDown(KEY_W) || IsKeyDown(KEY_SPACE) || gp1Down;
-            p1InputReleased = IsKeyReleased(KEY_W) || IsKeyReleased(KEY_SPACE) || gp1Rel;
+            p1InputDown     = IsKeyDown(KEY_W) || IsKeyDown(KEY_SPACE) || gp1Down || touchGas;
+            p1InputReleased = IsKeyReleased(KEY_W) || IsKeyReleased(KEY_SPACE) || gp1Rel || (touchGas == false && !IsKeyDown(KEY_W) && !IsKeyDown(KEY_SPACE) && !gp1Down);
         }
 
         // Automated sequence for test screenshot
@@ -3280,7 +3524,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                         raft.lastCheckpointRotY = atan2f(cpTan.x, cpTan.z);
                         raft.hasCheckpoint      = true;
                         raft.currentCP++;
-                        PlaySound(fartSounds[0]);
+                        PlaySound(sndCheckpoint); // Authentic checkpoint chime! (Plan v8.0 Task 5)
                     }
                 }
             }
@@ -4797,63 +5041,148 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 DrawTextEx(fontUIBold, editorMsg.c_str(), Vector2{ (float)toastX + 20, (float)toastY + 9 }, 14, 0.4f, WHITE);
             }
         }
+
+        // Smart Mobile Touch HUD Controls Rendering (Plan v8.0 Task 5)
+        if (isMobileTouchHUD && !editorMode) {
+            Color btnColor = Color{ 30, 41, 59, (unsigned char)(210 * gSettings.touchBtnOpacity) };
+            Color btnColorActive = Color{ 59, 130, 246, (unsigned char)(240 * gSettings.touchBtnOpacity) };
+            Color lineCol = Color{ 148, 163, 184, (unsigned char)(220 * gSettings.touchBtnOpacity) };
+
+            // 1. Steer Left [ ◀ ]
+            DrawCircleV(posLeftBtn, rSteer, touchSteerLeft ? btnColorActive : btnColor);
+            DrawCircleLines((int)posLeftBtn.x, (int)posLeftBtn.y, rSteer, lineCol);
+            DrawTextEx(fontUIBold, "<", Vector2{ posLeftBtn.x - 10.0f * gSettings.touchBtnScale, posLeftBtn.y - 14.0f * gSettings.touchBtnScale }, 28 * gSettings.touchBtnScale, 0.3f, WHITE);
+
+            // 2. Steer Right [ ▶ ]
+            DrawCircleV(posRightBtn, rSteer, touchSteerRight ? btnColorActive : btnColor);
+            DrawCircleLines((int)posRightBtn.x, (int)posRightBtn.y, rSteer, lineCol);
+            DrawTextEx(fontUIBold, ">", Vector2{ posRightBtn.x - 8.0f * gSettings.touchBtnScale, posRightBtn.y - 14.0f * gSettings.touchBtnScale }, 28 * gSettings.touchBtnScale, 0.3f, WHITE);
+
+            // 3. Big Gas Button [ 💨 GAS ]
+            Color gasCol = touchGas ? Color{ 234, 88, 12, (unsigned char)(245 * gSettings.touchBtnOpacity) } : Color{ 249, 115, 22, (unsigned char)(210 * gSettings.touchBtnOpacity) };
+            DrawCircleV(posGasBtn, rGas, gasCol);
+            DrawCircleLines((int)posGasBtn.x, (int)posGasBtn.y, rGas, Color{ 255, 237, 213, 240 });
+            DrawTextEx(fontUIBold, "GAS", Vector2{ posGasBtn.x - 18.0f * gSettings.touchBtnScale, posGasBtn.y - 10.0f * gSettings.touchBtnScale }, 22 * gSettings.touchBtnScale, 0.4f, WHITE);
+
+            // 4. Quick Gear / Settings Button [ ⚙ ]
+            DrawCircleV(posGearBtn, rGear, Color{ 51, 65, 85, 220 });
+            DrawCircleLines((int)posGearBtn.x, (int)posGearBtn.y, rGear, Color{ 203, 213, 225, 200 });
+            DrawTextEx(fontUIBold, "*", Vector2{ posGearBtn.x - 6.0f, posGearBtn.y - 10.0f }, 20, 0.3f, WHITE);
+        }
+
+        // Live FPS Counter Badge (F5 Shortcut or Settings Toggle)
+        if (gSettings.showFPS) {
+            float fpsX = (float)GetScreenWidth() * 0.5f - 60.0f;
+            DrawRectangleRounded(Rectangle{ fpsX, 10.0f, 120.0f, 30.0f }, 0.4f, 4, Color{ 15, 23, 42, 230 });
+            DrawRectangleRoundedLinesEx(Rectangle{ fpsX, 10.0f, 120.0f, 30.0f }, 0.4f, 4, 1.5f, Color{ 34, 197, 94, 255 });
+            DrawTextEx(fontUIBold, TextFormat("FPS: %d", GetFPS()), Vector2{ fpsX + 22.0f, 16.0f }, 17, 0.4f, Color{ 34, 197, 94, 255 });
+        }
         } else if (currentScreen == SCREEN_MAIN_MENU) {
             ClearBackground(Color{ 18, 22, 34, 255 });
 
-            // 1. Live 3D Scene of Start Basin / Pond (Plan v7.0 Task 4, matching 1.jpg)
-            Camera3D menuCam = { 0 };
-            menuCam.position = Vector3{ 9.8f, 4.3f, 99.8f };
-            menuCam.target   = Vector3{ 15.6f, 0.8f, 86.2f };
-            menuCam.up       = Vector3{ 0.0f, 1.0f, 0.0f };
-            menuCam.fovy     = 50.0f;
-            menuCam.projection = CAMERA_PERSPECTIVE;
+            float scrW = (float)GetScreenWidth();
+            float scrH = (float)GetScreenHeight();
+            float scaleX = scrW / 1280.0f;
+            float scaleY = scrH / 720.0f;
 
-            BeginMode3D(menuCam);
-                DrawModel(wallModel, trackOffset, 1.0f, WHITE);
-                DrawModel(waterModel, trackOffset, 1.0f, WHITE);
-                rlPushMatrix();
-                    rlTranslatef(startGatePos.x, startGatePos.y, startGatePos.z);
-                    DrawModel(startModel, Vector3{0,0,0}, 1.0f, WHITE);
-                rlPopMatrix();
-
-                // Raft gently floating with wave bob in pond
-                float raftBob = sinf(runTime * 2.0f) * 0.04f;
-                Vector3 menuRaftPos = Vector3{ 15.43f, 0.58f + raftBob, 88.5f };
-                rlPushMatrix();
-                    rlTranslatef(menuRaftPos.x, menuRaftPos.y, menuRaftPos.z);
-                    rlRotatef(180.0f + sinf(runTime * 0.8f) * 4.0f, 0, 1, 0);
-                    DrawModel(boatModel, Vector3{0,0,0}, 1.0f, WHITE);
-                rlPopMatrix();
-
-                // Hippos swimming in the pond (Grey in front, Green behind)
-                rlPushMatrix();
-                    float h1Bob = sinf(runTime * 1.8f) * 0.03f;
-                    rlTranslatef(14.8f, -0.25f + h1Bob, 92.5f);
-                    rlRotatef(20.0f + sinf(runTime * 0.5f) * 15.0f, 0, 1, 0);
-                    rlScalef(0.9f, 0.9f, 0.9f);
-                    DrawModel(charB, Vector3{0,0,0}, 1.0f, WHITE);
-                rlPopMatrix();
-
-                rlPushMatrix();
-                    float h2Bob = sinf(runTime * 2.2f + 1.0f) * 0.03f;
-                    rlTranslatef(13.2f, -0.25f + h2Bob, 84.8f);
-                    rlRotatef(190.0f + sinf(runTime * 0.6f) * 12.0f, 0, 1, 0);
-                    rlScalef(0.9f, 0.9f, 0.9f);
-                    DrawModel(charA, Vector3{0,0,0}, 1.0f, WHITE);
-                rlPopMatrix();
-            EndMode3D();
-
-            // 2. Authentic Top-Left Logo (Icon_Logo.png)
-            if (texMainLogo.id != 0) {
-                float logoW = 340.0f;
-                float logoH = 175.0f;
-                DrawTexturePro(texMainLogo, Rectangle{ 0, 0, (float)texMainLogo.width, (float)texMainLogo.height },
-                               Rectangle{ 42.0f, 26.0f, logoW, logoH }, Vector2{0, 0}, 0.0f, WHITE);
-            } else {
-                DrawTextEx(fontUIBold, "FART TOGETHER", Vector2{ 50, 40 }, 42, 1.0f, Color{ 255, 215, 0, 255 });
+            // 1. Draw 2.5D Animated Oasis Artwork (Image 2 Parity)
+            if (texMenuOasisClean.id != 0) {
+                DrawTexturePro(texMenuOasisClean, Rectangle{ 0, 0, (float)texMenuOasisClean.width, (float)texMenuOasisClean.height },
+                               Rectangle{ 0, 0, scrW, scrH }, Vector2{0, 0}, 0.0f, WHITE);
             }
 
-            // 3. Authentic Left Menu Items with Slanted Pink Highlight
+            // Subtle water shimmer on the pond area
+            float pondRipple = sinf(runTime * 2.0f) * 0.06f + 0.06f;
+            DrawRectangleRounded(Rectangle{ 320.0f * scaleX, 410.0f * scaleY, 490.0f * scaleX, 185.0f * scaleY }, 0.45f, 6,
+                                 Color{ 64, 224, 208, (unsigned char)(pondRipple * 255.0f) });
+
+            // 2. Animated Center Purple Pirate Sleeping on Floating Raft (Plan v8.0 Task 2)
+            float raftDriftX = sinf(runTime * 0.95f) * 20.0f + cosf(runTime * 0.55f) * 8.0f;
+            float raftDriftY = sinf(runTime * 1.65f) * 6.5f;
+            float raftTilt   = sinf(runTime * 1.25f) * 3.2f;
+
+            float snoreCycle = fmodf(runTime, 3.6f);
+            if (snoreCycle < 0.08f) {
+                if (!IsSoundPlaying(sndSnore)) PlaySound(sndSnore);
+            }
+            float bellyBreath = 1.0f + 0.045f * sinf(snoreCycle * 3.14159f / 1.8f);
+
+            if (texMenuRaftSleep.id != 0) {
+                float rw = 260.0f * scaleX * bellyBreath;
+                float rh = 195.0f * scaleY * bellyBreath;
+                Rectangle srcRaft = { 0, 0, (float)texMenuRaftSleep.width, (float)texMenuRaftSleep.height };
+                Rectangle dstRaft = { (670.0f + raftDriftX) * scaleX, (417.0f + raftDriftY) * scaleY, rw, rh };
+                Vector2 raftOrigin = { rw * 0.5f, rh * 0.5f };
+                DrawTexturePro(texMenuRaftSleep, srcRaft, dstRaft, raftOrigin, raftTilt, WHITE);
+            }
+
+            // Animated Translucent Glowing Snot Bubble at Pirate's Snout
+            Vector2 snoutPos = { (644.0f + raftDriftX) * scaleX, (372.0f + raftDriftY) * scaleY };
+            if (snoreCycle < 3.1f) {
+                float growT = snoreCycle / 3.1f;
+                float bubbleRadius = (4.0f + 24.0f * powf(growT, 0.85f)) * scaleY;
+                bubbleRadius += sinf(runTime * 15.0f) * 1.2f * scaleY; // subtle wobble
+                Vector2 bubbleCenter = { snoutPos.x - bubbleRadius * 0.45f, snoutPos.y - bubbleRadius * 0.55f };
+
+                DrawCircleV(bubbleCenter, bubbleRadius, Color{ 175, 240, 255, 170 });
+                DrawCircleLines((int)bubbleCenter.x, (int)bubbleCenter.y, bubbleRadius, Color{ 240, 252, 255, 230 });
+                DrawCircleV(Vector2{ bubbleCenter.x - bubbleRadius * 0.35f, bubbleCenter.y - bubbleRadius * 0.35f }, bubbleRadius * 0.28f, Color{ 255, 255, 255, 220 });
+            } else {
+                // Popping droplets animation (POP!)
+                float popT = (snoreCycle - 3.1f) / 0.5f;
+                for (int d = 0; d < 6; d++) {
+                    float ang = (float)d * (6.28318f / 6.0f);
+                    float dropDist = (15.0f + popT * 38.0f) * scaleY;
+                    Vector2 dropPos = { snoutPos.x + cosf(ang) * dropDist, snoutPos.y + sinf(ang) * dropDist };
+                    DrawCircleV(dropPos, (3.2f * (1.0f - popT)) * scaleY, Color{ 180, 242, 255, (unsigned char)(210 * (1.0f - popT)) });
+                }
+                DrawTextEx(fontUIBold, "POP!", Vector2{ snoutPos.x + 8.0f * scaleX, snoutPos.y - 28.0f * scaleY }, 16.0f * scaleY, 0.4f, Color{ 255, 255, 130, (unsigned char)(255 * (1.0f - popT)) });
+            }
+
+            // 3. Animated Orange Pirate Eating at Table + Munching & Periodic Burping
+            float eatCycle = fmodf(runTime, 9.6f);
+            if (eatCycle < 7.8f) {
+                float subCycle = fmodf(eatCycle, 2.6f);
+                if (subCycle >= 0.8f && subCycle < 2.4f) {
+                    if (!IsSoundPlaying(sndEatMunch)) PlaySound(sndEatMunch);
+                    // Flying crumbs
+                    for (int c = 0; c < 3; c++) {
+                        float cx = (855.0f + sinf(runTime * 12.0f + c * 2.1f) * 12.0f) * scaleX;
+                        float cy = (485.0f + fmodf(runTime * 28.0f + c * 8.0f, 22.0f)) * scaleY;
+                        DrawCircle((int)cx, (int)cy, 2.8f * scaleY, Color{ 245, 190, 85, 220 });
+                    }
+                }
+            } else {
+                // Burp Phase!
+                float burpT = (eatCycle - 7.8f) / 1.8f;
+                if (burpT < 0.12f) {
+                    if (!IsSoundPlaying(sndBurp)) PlaySound(sndBurp);
+                }
+                // Expanding green gas rings from mouth (855, 475)
+                for (int r = 0; r < 3; r++) {
+                    float ringPhase = fmodf(burpT * 2.2f + (float)r * 0.33f, 1.0f);
+                    float ringR = (8.0f + ringPhase * 42.0f) * scaleY;
+                    float ringX = (855.0f - ringPhase * 28.0f) * scaleX;
+                    float ringY = (475.0f - ringPhase * 24.0f) * scaleY;
+                    DrawCircleLines((int)ringX, (int)ringY, ringR, Color{ 85, 235, 55, (unsigned char)(210 * (1.0f - ringPhase)) });
+                }
+                DrawTextEx(fontUIBold, "*BURP!*", Vector2{ 805.0f * scaleX, (430.0f - burpT * 22.0f) * scaleY }, 18.0f * scaleY, 0.4f, Color{ 130, 255, 70, (unsigned char)(255 * (1.0f - burpT)) });
+
+                // Pulsing green gas cloud behind seat (1015, 615)
+                float fartPulse = 1.0f + sinf(runTime * 22.0f) * 0.22f;
+                DrawCircle((int)(1015.0f * scaleX), (int)(615.0f * scaleY), 34.0f * scaleY * fartPulse, Color{ 105, 230, 42, 160 });
+                DrawCircle((int)(1038.0f * scaleX), (int)(605.0f * scaleY), 24.0f * scaleY * fartPulse, Color{ 140, 255, 65, 180 });
+            }
+
+            // 4. Authentic Top-Left Logo
+            if (texMainLogo.id != 0) {
+                float logoW = 340.0f * scaleX;
+                float logoH = 175.0f * scaleY;
+                DrawTexturePro(texMainLogo, Rectangle{ 0, 0, (float)texMainLogo.width, (float)texMainLogo.height },
+                               Rectangle{ 42.0f * scaleX, 26.0f * scaleY, logoW, logoH }, Vector2{0, 0}, 0.0f, WHITE);
+            }
+
+            // 5. Authentic Left Menu Items with Slanted Pink Highlight
             const char* menuLabels[6] = {
                 "CREATE LOBBY", "FIND LOBBY", "PLAY LOCAL CO-OP",
                 "SETTINGS", "CREDITS", "EXIT GAME"
@@ -4865,35 +5194,35 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             if (IsKeyPressed(KEY_DOWN)) { menuSelectedIdx = (menuSelectedIdx >= 5) ? 0 : menuSelectedIdx + 1; }
 
             for (int m = 0; m < 6; m++) {
-                float my = menuYStarts[m];
-                float mw = (m < 2) ? 320.0f : 290.0f;
-                float mh = (m < 2) ? 50.0f : 42.0f;
-                Rectangle itemHit = { 35.0f, my, mw, mh };
+                float my = menuYStarts[m] * scaleY;
+                float mw = ((m < 2) ? 320.0f : 290.0f) * scaleX;
+                float mh = ((m < 2) ? 50.0f : 42.0f) * scaleY;
+                Rectangle itemHit = { 35.0f * scaleX, my, mw, mh };
                 bool isHov = CheckCollisionPointRec(mousePos, itemHit);
                 if (isHov) menuSelectedIdx = m;
                 bool isSel = (menuSelectedIdx == m);
 
                 if (isSel) {
-                    DrawSlantedRect(32.0f, my, mw + 30.0f, mh, 14.0f, Color{ 255, 38, 118, 255 });
+                    DrawSlantedRect(32.0f * scaleX, my, mw + 30.0f * scaleX, mh, 14.0f, Color{ 255, 38, 118, 255 });
                     if (texIconArrow.id != 0) {
                         DrawTexturePro(texIconArrow, Rectangle{ 0, 0, (float)texIconArrow.width, (float)texIconArrow.height },
-                                       Rectangle{ 42.0f, my + mh * 0.5f - 11.0f, 22.0f, 22.0f }, Vector2{0,0}, 0.0f, WHITE);
+                                       Rectangle{ 42.0f * scaleX, my + mh * 0.5f - 11.0f * scaleY, 22.0f * scaleX, 22.0f * scaleY }, Vector2{0,0}, 0.0f, WHITE);
                     } else {
-                        DrawTextEx(fontUIBold, ">", Vector2{ 42.0f, my + 10.0f }, 24, 0.4f, WHITE);
+                        DrawTextEx(fontUIBold, ">", Vector2{ 42.0f * scaleX, my + 10.0f * scaleY }, 24 * scaleY, 0.4f, WHITE);
                     }
                 }
 
-                float textX = isSel ? 74.0f : 52.0f;
-                float textY = my + (mh - ((m < 2) ? 24.0f : 18.0f)) * 0.5f;
-                DrawTextEx(fontUIBold, menuLabels[m], Vector2{ textX, textY }, (m < 2) ? 24 : 18, 0.4f, WHITE);
+                float textX = (isSel ? 74.0f : 52.0f) * scaleX;
+                float textY = my + (mh - ((m < 2) ? 24.0f : 18.0f) * scaleY) * 0.5f;
+                DrawTextEx(fontUIBold, menuLabels[m], Vector2{ textX, textY }, (m < 2) ? (int)(24 * scaleY) : (int)(18 * scaleY), 0.4f, WHITE);
 
-                if ((isHov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || (isSel && IsKeyPressed(KEY_ENTER))) {
+                if ((isHov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || (isSel && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)))) {
                     if (m == 0) { // CREATE LOBBY
-                        LanInitHost(7777);
+                        LanInitHost(7777, "8HF78N");
                         currentScreen = SCREEN_LAN_LOBBY;
                     } else if (m == 1) { // FIND LOBBY
-                        LanInitClient(7777);
-                        currentScreen = SCREEN_LAN_LOBBY;
+                        LanStartDiscoveryListener(7778);
+                        currentScreen = SCREEN_FIND_LOBBY;
                     } else if (m == 2) { // PLAY LOCAL CO-OP
                         singlePirateMode = false;
                         currentScreen = SCREEN_GAMEPLAY;
@@ -4908,38 +5237,37 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 }
             }
 
-            // Slanted dark box with lime-green code GGFD54Y next to FIND LOBBY
-            Rectangle boxFindRec = { 385.0f, 310.0f, 175.0f, 50.0f };
+            // Slanted dark box with room code next to FIND LOBBY
+            Rectangle boxFindRec = { 385.0f * scaleX, 310.0f * scaleY, 175.0f * scaleX, 50.0f * scaleY };
             bool hovCode = CheckCollisionPointRec(mousePos, boxFindRec);
             DrawSlantedRect(boxFindRec.x, boxFindRec.y, boxFindRec.width, boxFindRec.height, 14.0f, hovCode ? Color{ 32, 62, 75, 235 } : Color{ 22, 45, 55, 210 });
             DrawSlantedRectLines(boxFindRec.x, boxFindRec.y, boxFindRec.width, boxFindRec.height, 14.0f, 1.8f, hovCode ? Color{ 175, 255, 45, 255 } : Color{ 60, 105, 120, 220 });
-            DrawTextEx(fontUIBold, "GGFD54Y", Vector2{ boxFindRec.x + 32.0f, boxFindRec.y + 12.0f }, 24, 0.5f, Color{ 175, 255, 45, 255 });
+            DrawTextEx(fontUIBold, "8HF78N", Vector2{ boxFindRec.x + 36.0f * scaleX, boxFindRec.y + 12.0f * scaleY }, (int)(24 * scaleY), 0.5f, Color{ 175, 255, 45, 255 });
             if (hovCode && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                LanInitClient(7777);
-                currentScreen = SCREEN_LAN_LOBBY;
+                LanStartDiscoveryListener(7778);
+                currentScreen = SCREEN_FIND_LOBBY;
             }
 
             // Bottom Bar
-            float botY = (float)GetScreenHeight() - 44.0f;
-            DrawSlantedRect(30.0f, botY, 110.0f, 32.0f, 10.0f, Color{ 20, 26, 38, 220 });
-            DrawTextEx(fontUIBold, "[ESC] BACK", Vector2{ 42.0f, botY + 8.0f }, 13, 0.3f, Color{ 200, 210, 225, 255 });
+            float botY = scrH - 44.0f * scaleY;
+            DrawSlantedRect(30.0f * scaleX, botY, 110.0f * scaleX, 32.0f * scaleY, 10.0f, Color{ 20, 26, 38, 220 });
+            DrawTextEx(fontUIBold, "[ESC] BACK", Vector2{ 42.0f * scaleX, botY + 8.0f * scaleY }, 13 * scaleY, 0.3f, Color{ 200, 210, 225, 255 });
 
-            DrawSlantedRect(150.0f, botY, 125.0f, 32.0f, 10.0f, Color{ 20, 26, 38, 220 });
-            DrawTextEx(fontUIBold, "[ENTER] SELECT", Vector2{ 162.0f, botY + 8.0f }, 13, 0.3f, Color{ 200, 210, 225, 255 });
+            DrawSlantedRect(150.0f * scaleX, botY, 125.0f * scaleX, 32.0f * scaleY, 10.0f, Color{ 20, 26, 38, 220 });
+            DrawTextEx(fontUIBold, "[ENTER] SELECT", Vector2{ 162.0f * scaleX, botY + 8.0f * scaleY }, 13 * scaleY, 0.3f, Color{ 200, 210, 225, 255 });
 
-            const char* verStr = "v0.0.1 / Authentic Demo";
-            Vector2 vSz = MeasureTextEx(fontUI, verStr, 13, 0.3f);
-            DrawTextEx(fontUI, verStr, Vector2{ ((float)GetScreenWidth() - vSz.x) * 0.5f, botY + 8.0f }, 13, 0.3f, Color{ 148, 163, 184, 200 });
+            const char* verStr = "v8.0 Release Candidate / DeepMind AI";
+            Vector2 vSz = MeasureTextEx(fontUI, verStr, 13 * scaleY, 0.3f);
+            DrawTextEx(fontUI, verStr, Vector2{ (scrW - vSz.x) * 0.5f, botY + 8.0f * scaleY }, 13 * scaleY, 0.3f, Color{ 148, 163, 184, 200 });
 
-            Rectangle discRec = { (float)GetScreenWidth() - 155.0f, botY, 125.0f, 32.0f };
+            Rectangle discRec = { scrW - 155.0f * scaleX, botY, 125.0f * scaleX, 32.0f * scaleY };
             bool hovDisc = CheckCollisionPointRec(mousePos, discRec);
             DrawSlantedRect(discRec.x, discRec.y, discRec.width, discRec.height, 10.0f, hovDisc ? Color{ 88, 101, 242, 255 } : Color{ 20, 26, 38, 220 });
             if (texIconDiscord.id != 0) {
                 DrawTexturePro(texIconDiscord, Rectangle{ 0, 0, (float)texIconDiscord.width, (float)texIconDiscord.height },
-                               Rectangle{ discRec.x + 14.0f, botY + 5.0f, 22.0f, 22.0f }, Vector2{0,0}, 0.0f, WHITE);
+                               Rectangle{ discRec.x + 14.0f * scaleX, botY + 5.0f * scaleY, 22.0f * scaleX, 22.0f * scaleY }, Vector2{0,0}, 0.0f, WHITE);
             }
-            DrawTextEx(fontUIBold, "DISCORD", Vector2{ discRec.x + 42.0f, botY + 8.0f }, 13, 0.3f, WHITE);
-
+            DrawTextEx(fontUIBold, "DISCORD", Vector2{ discRec.x + 42.0f * scaleX, botY + 8.0f * scaleY }, 13 * scaleY, 0.3f, WHITE);
         } else if (currentScreen == SCREEN_LAN_LOBBY) {
             ClearBackground(Color{ 18, 22, 34, 255 });
 
@@ -5097,25 +5425,16 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 currentScreen = SCREEN_GAMEPLAY;
             }
 
-        } else if (currentScreen == SCREEN_SETTINGS) {
+        } else if (currentScreen == SCREEN_FIND_LOBBY) {
             ClearBackground(Color{ 18, 22, 34, 255 });
+            if (texMenuOasisClean.id != 0) {
+                DrawTexturePro(texMenuOasisClean, Rectangle{ 0, 0, (float)texMenuOasisClean.width, (float)texMenuOasisClean.height },
+                               Rectangle{ 0, 0, (float)GetScreenWidth(), (float)GetScreenHeight() }, Vector2{0,0}, 0.0f, WHITE);
+            }
+            DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{ 12, 18, 28, 225 });
 
-            // Live 3D Background with warm dimming (Plan v7.0 Task 4, matching image_98a083.jpg & image_98a080.jpg)
-            Camera3D settCam = { 0 };
-            settCam.position = Vector3{ 9.8f, 4.3f, 99.8f };
-            settCam.target   = Vector3{ 15.6f, 0.8f, 86.2f };
-            settCam.up       = Vector3{ 0.0f, 1.0f, 0.0f };
-            settCam.fovy     = 50.0f;
-            settCam.projection = CAMERA_PERSPECTIVE;
-
-            BeginMode3D(settCam);
-                DrawModel(wallModel, trackOffset, 1.0f, WHITE);
-                DrawModel(waterModel, trackOffset, 1.0f, WHITE);
-            EndMode3D();
-            DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{ 12, 16, 26, 175 });
-
-            // Top-Left Pink Slanted Back Button
-            Rectangle backRec = { 0.0f, 32.0f, 120.0f, 54.0f };
+            // Top Header: Back Button & Title
+            Rectangle backRec = { 30.0f, 32.0f, 120.0f, 54.0f };
             bool hovBack = CheckCollisionPointRec(mousePos, backRec);
             DrawSlantedRect(backRec.x, backRec.y, backRec.width, backRec.height, 14.0f, hovBack ? Color{ 255, 60, 135, 255 } : Color{ 255, 38, 118, 255 });
             if (texIconArrow.id != 0) {
@@ -5126,11 +5445,120 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 currentScreen = SCREEN_MAIN_MENU;
             }
 
+            DrawTextEx(fontUIBold, "FIND LOBBY", Vector2{ 180.0f, 36.0f }, 36, 0.5f, WHITE);
+            DrawTextEx(fontUI, "LAN UDP Broadcast Auto-Discovery & Zero-Config Room Matchmaking", Vector2{ 182.0f, 76.0f }, 15, 0.3f, Color{ 148, 163, 184, 255 });
+
+            LanStartDiscoveryListener(7778);
+            LanUpdateDiscoveryAndLobby(GetFrameTime());
+
+            // Left: Animated Radar Pulse (Plan v8.0 Task 3)
+            float radarCenterX = 240.0f;
+            float radarCenterY = 320.0f;
+            float radarRadius  = 130.0f;
+            DrawCircle((int)radarCenterX, (int)radarCenterY, radarRadius, Color{ 16, 28, 44, 220 });
+            for (int ring = 1; ring <= 4; ring++) {
+                DrawCircleLines((int)radarCenterX, (int)radarCenterY, radarRadius * ((float)ring / 4.0f), Color{ 34, 197, 94, 80 });
+            }
+            DrawLine((int)(radarCenterX - radarRadius), (int)radarCenterY, (int)(radarCenterX + radarRadius), (int)radarCenterY, Color{ 34, 197, 94, 70 });
+            DrawLine((int)radarCenterX, (int)(radarCenterY - radarRadius), (int)radarCenterX, (int)(radarCenterY + radarRadius), Color{ 34, 197, 94, 70 });
+
+            float sweepAngle = runTime * 3.2f;
+            Vector2 sweepEnd = { radarCenterX + cosf(sweepAngle) * radarRadius, radarCenterY + sinf(sweepAngle) * radarRadius };
+            DrawLineEx(Vector2{ radarCenterX, radarCenterY }, sweepEnd, 2.5f, Color{ 74, 222, 128, 240 });
+            DrawCircleV(Vector2{ radarCenterX, radarCenterY }, 5.0f, Color{ 74, 222, 128, 255 });
+
+            DrawTextEx(fontUIBold, "SCANNING LAN...", Vector2{ radarCenterX - 65.0f, radarCenterY + radarRadius + 18.0f }, 15, 0.3f, Color{ 74, 222, 128, 255 });
+            DrawTextEx(fontUI, "Port: 7778 UDP Broadcast", Vector2{ radarCenterX - 75.0f, radarCenterY + radarRadius + 38.0f }, 13, 0.3f, Color{ 148, 163, 184, 200 });
+
+            // Right: Discovered Rooms List
+            float listX = 420.0f;
+            float listY = 125.0f;
+            float listW = 810.0f;
+            float cardH = 80.0f;
+            float cardGap = 14.0f;
+
+            auto& rooms = LanGetDiscoveredRooms();
+
+            if (rooms.empty()) {
+                Rectangle emptyCard = { listX, listY, listW, 160.0f };
+                DrawSlantedRect(emptyCard.x, emptyCard.y, emptyCard.width, emptyCard.height, 12.0f, Color{ 22, 30, 46, 210 });
+                DrawSlantedRectLines(emptyCard.x, emptyCard.y, emptyCard.width, emptyCard.height, 12.0f, 1.5f, Color{ 56, 189, 248, 140 });
+
+                DrawTextEx(fontUIBold, "SEARCHING FOR LOCAL CO-OP HOSTS...", Vector2{ listX + 35.0f, listY + 28.0f }, 18, 0.4f, Color{ 56, 189, 248, 255 });
+                DrawTextEx(fontUI, "Any lobby created via [CREATE LOBBY] on this Wi-Fi/PC will appear here instantly.", Vector2{ listX + 35.0f, listY + 58.0f }, 14, 0.3f, Color{ 203, 213, 225, 255 });
+                DrawTextEx(fontUI, "You can also connect immediately to a Local Loopback Host (127.0.0.1:7777):", Vector2{ listX + 35.0f, listY + 84.0f }, 13, 0.3f, Color{ 148, 163, 184, 255 });
+
+                Rectangle joinLocalBtn = { listX + listW - 260.0f, listY + 95.0f, 230.0f, 48.0f };
+                bool hovJLocal = CheckCollisionPointRec(mousePos, joinLocalBtn);
+                DrawSlantedRect(joinLocalBtn.x, joinLocalBtn.y, joinLocalBtn.width, joinLocalBtn.height, 10.0f, hovJLocal ? Color{ 34, 197, 94, 255 } : Color{ 22, 163, 74, 255 });
+                DrawTextEx(fontUIBold, "[ JOIN LOCAL HOST ]", Vector2{ joinLocalBtn.x + 22.0f, joinLocalBtn.y + 15.0f }, 15, 0.4f, WHITE);
+                if (hovJLocal && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                    LanJoinRoom("127.0.0.1", 7777, "8HF78N");
+                    currentScreen = SCREEN_LAN_LOBBY;
+                }
+            } else {
+                for (size_t r = 0; r < rooms.size() && r < 5; r++) {
+                    float ry = listY + r * (cardH + cardGap);
+                    Rectangle rCard = { listX, ry, listW, cardH };
+                    bool hovCard = CheckCollisionPointRec(mousePos, rCard);
+
+                    DrawSlantedRect(rCard.x, rCard.y, rCard.width, rCard.height, 12.0f, hovCard ? Color{ 32, 44, 68, 245 } : Color{ 22, 30, 46, 230 });
+                    DrawSlantedRectLines(rCard.x, rCard.y, rCard.width, rCard.height, 12.0f, 1.5f, hovCard ? Color{ 74, 222, 128, 255 } : Color{ 51, 65, 85, 200 });
+
+                    DrawTextEx(fontUIBold, rooms[r].roomName.c_str(), Vector2{ listX + 30.0f, ry + 16.0f }, 19, 0.4f, WHITE);
+                    std::string subInfo = "Host IP: " + rooms[r].hostIp + ":" + std::to_string(rooms[r].hostPort) + "  |  Code: " + rooms[r].roomCode + "  |  Players: " + std::to_string(rooms[r].playerCount) + "/" + std::to_string(rooms[r].maxPlayers);
+                    DrawTextEx(fontUI, subInfo.c_str(), Vector2{ listX + 30.0f, ry + 44.0f }, 14, 0.3f, Color{ 148, 163, 184, 255 });
+
+                    Rectangle btnJoin = { listX + listW - 190.0f, ry + 16.0f, 160.0f, 48.0f };
+                    bool hovJoin = CheckCollisionPointRec(mousePos, btnJoin);
+                    DrawSlantedRect(btnJoin.x, btnJoin.y, btnJoin.width, btnJoin.height, 10.0f, hovJoin ? Color{ 34, 197, 94, 255 } : Color{ 22, 163, 74, 255 });
+                    DrawTextEx(fontUIBold, "JOIN ROOM", Vector2{ btnJoin.x + 32.0f, btnJoin.y + 15.0f }, 16, 0.4f, WHITE);
+
+                    if ((hovJoin || hovCard) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                        LanJoinRoom(rooms[r].hostIp.c_str(), rooms[r].hostPort, rooms[r].roomCode.c_str());
+                        currentScreen = SCREEN_LAN_LOBBY;
+                    }
+                }
+            }
+
+            // Bottom Buttons
+            float fBotY = (float)GetScreenHeight() - 52.0f;
+            Rectangle btnCreateRec = { listX, fBotY, 220.0f, 38.0f };
+            bool hovCreate = CheckCollisionPointRec(mousePos, btnCreateRec);
+            DrawSlantedRect(btnCreateRec.x, btnCreateRec.y, btnCreateRec.width, btnCreateRec.height, 10.0f, hovCreate ? Color{ 245, 158, 11, 255 } : Color{ 217, 119, 6, 255 });
+            DrawTextEx(fontUIBold, "+ CREATE NEW LOBBY", Vector2{ btnCreateRec.x + 18.0f, btnCreateRec.y + 10.0f }, 14, 0.4f, WHITE);
+            if (hovCreate && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                LanInitHost(7777, "8HF78N");
+                currentScreen = SCREEN_LAN_LOBBY;
+            }
+
+        } else if (currentScreen == SCREEN_SETTINGS) {
+            ClearBackground(Color{ 18, 22, 34, 255 });
+
+            if (texMenuOasisClean.id != 0) {
+                DrawTexturePro(texMenuOasisClean, Rectangle{ 0, 0, (float)texMenuOasisClean.width, (float)texMenuOasisClean.height },
+                               Rectangle{ 0, 0, (float)GetScreenWidth(), (float)GetScreenHeight() }, Vector2{0,0}, 0.0f, WHITE);
+            }
+            DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{ 12, 16, 26, 215 });
+
+            // Top-Left Pink Slanted Back Button
+            Rectangle backRec = { 0.0f, 32.0f, 120.0f, 54.0f };
+            bool hovBack = CheckCollisionPointRec(mousePos, backRec);
+            DrawSlantedRect(backRec.x, backRec.y, backRec.width, backRec.height, 14.0f, hovBack ? Color{ 255, 60, 135, 255 } : Color{ 255, 38, 118, 255 });
+            if (texIconArrow.id != 0) {
+                DrawTexturePro(texIconArrow, Rectangle{ 0, 0, -(float)texIconArrow.width, (float)texIconArrow.height },
+                               Rectangle{ 45.0f, backRec.y + 14.0f, 26.0f, 26.0f }, Vector2{0,0}, 0.0f, WHITE);
+            }
+            if ((hovBack && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_ESCAPE)) {
+                SaveGameSettingsJSON("game_settings.json");
+                currentScreen = SCREEN_MAIN_MENU;
+            }
+
             // Title: SETTINGS
             DrawTextEx(fontUIBold, "SETTINGS", Vector2{ 220.0f, 38.0f }, 38, 0.6f, WHITE);
 
             // 4 Slanted Tabs
-            static int activeSettTab = 1; // 0=GENERAL, 1=GRAPHICS, 2=AUDIO, 3=CONTROLS
+            static int activeSettTab = gTestSettingsTab; // 0=GENERAL, 1=GRAPHICS, 2=AUDIO, 3=CONTROLS
             const char* tabNames[4] = { "GENERAL", "GRAPHICS", "AUDIO", "CONTROLS" };
             Texture2D tabIcons[4] = { texIconGeneral, texIconGraphic, texIconSound, texIconControl };
 
@@ -5154,13 +5582,6 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
             // Settings Rows
             float rowX = 200.0f, rowW = 875.0f, rowH = 64.0f, rowY = 195.0f, rowGap = 12.0f;
-            static int qualityIdx = 2; // 0=Low, 1=Med, 2=High, 3=Ultra
-            static bool cameraShake = true;
-            static float maxCamDist = 30.0f;
-            static float audioVolMaster = 80.0f;
-            static float audioVolMusic = 80.0f;
-            static float audioVolSFX = 80.0f;
-            static float audioVolFart = 80.0f;
 
             auto DrawSettingRow = [&](int idx, const char* label, auto drawControls) {
                 float ry = rowY + idx * (rowH + rowGap);
@@ -5178,14 +5599,18 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
             if (activeSettTab == 1) { // GRAPHICS
                 // Row 0: Quality
-                DrawSettingRow(0, "Quality", [&](Rectangle rRec, float ry, bool isHov) {
-                    const char* qNames[4] = { "<  Low  >", "<  Medium  >", "<  High  >", "<  Ultra  >" };
-                    Rectangle bQ = { rRec.x + rRec.width - 240.0f, ry + 16.0f, 200.0f, 34.0f };
+                DrawSettingRow(0, "Quality Level", [&](Rectangle rRec, float ry, bool isHov) {
+                    const char* qNames[4] = { "<  Low (30 FPS)  >", "<  Medium (60 FPS)  >", "<  High (60 FPS)  >", "<  Ultra (120 FPS)  >" };
+                    Rectangle bQ = { rRec.x + rRec.width - 270.0f, ry + 16.0f, 240.0f, 34.0f };
                     bool hovQ = CheckCollisionPointRec(mousePos, bQ);
                     DrawSlantedRect(bQ.x, bQ.y, bQ.width, bQ.height, 8.0f, hovQ ? Color{ 126, 114, 228, 255 } : Color{ 230, 235, 248, 255 });
-                    Vector2 qSz = MeasureTextEx(fontUIBold, qNames[qualityIdx], 15, 0.3f);
-                    DrawTextEx(fontUIBold, qNames[qualityIdx], Vector2{ bQ.x + (bQ.width - qSz.x) * 0.5f, bQ.y + 8.0f }, 15, 0.3f, hovQ ? WHITE : Color{ 30, 35, 55, 255 });
-                    if (hovQ && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) qualityIdx = (qualityIdx + 1) % 4;
+                    Vector2 qSz = MeasureTextEx(fontUIBold, qNames[gSettings.qualityLevel], 14, 0.3f);
+                    DrawTextEx(fontUIBold, qNames[gSettings.qualityLevel], Vector2{ bQ.x + (bQ.width - qSz.x) * 0.5f, bQ.y + 8.0f }, 14, 0.3f, hovQ ? WHITE : Color{ 30, 35, 55, 255 });
+                    if (hovQ && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                        gSettings.qualityLevel = (gSettings.qualityLevel + 1) % 4;
+                        ApplySettingsLive();
+                        SaveGameSettingsJSON("game_settings.json");
+                    }
                 });
 
                 // Row 1: Camera Shake
@@ -5193,34 +5618,52 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                     Rectangle bSw = { rRec.x + rRec.width - 180.0f, ry + 16.0f, 140.0f, 34.0f };
                     bool hovSw = CheckCollisionPointRec(mousePos, bSw);
                     DrawSlantedRect(bSw.x, bSw.y, bSw.width, bSw.height, 8.0f, Color{ 220, 225, 235, 255 });
-                    if (cameraShake) {
+                    if (gSettings.cameraShake) {
                         DrawSlantedRect(bSw.x + 65.0f, bSw.y + 2.0f, 70.0f, 30.0f, 8.0f, Color{ 52, 185, 58, 255 });
                     } else {
                         DrawSlantedRect(bSw.x + 4.0f, bSw.y + 2.0f, 65.0f, 30.0f, 8.0f, Color{ 120, 125, 140, 255 });
                     }
-                    DrawTextEx(fontUIBold, "OFF", Vector2{ bSw.x + 22.0f, bSw.y + 8.0f }, 13, 0.3f, cameraShake ? Color{ 120, 125, 140, 255 } : WHITE);
-                    DrawTextEx(fontUIBold, "ON", Vector2{ bSw.x + 88.0f, bSw.y + 8.0f }, 13, 0.3f, cameraShake ? WHITE : Color{ 120, 125, 140, 255 });
-                    if (hovSw && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) cameraShake = !cameraShake;
+                    DrawTextEx(fontUIBold, "OFF", Vector2{ bSw.x + 22.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.cameraShake ? Color{ 120, 125, 140, 255 } : WHITE);
+                    DrawTextEx(fontUIBold, "ON", Vector2{ bSw.x + 88.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.cameraShake ? WHITE : Color{ 120, 125, 140, 255 });
+                    if (hovSw && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                        gSettings.cameraShake = !gSettings.cameraShake;
+                        SaveGameSettingsJSON("game_settings.json");
+                    }
                 });
 
                 // Row 2: Max Camera Distance
                 DrawSettingRow(2, "Max Camera Distance", [&](Rectangle rRec, float ry, bool isHov) {
                     float sldX = rRec.x + rRec.width - 340.0f;
-                    DrawTextEx(fontUIBold, TextFormat("%.0fm", maxCamDist), Vector2{ sldX - 55.0f, ry + 22.0f }, 15, 0.3f, Color{ 30, 35, 55, 255 });
+                    DrawTextEx(fontUIBold, TextFormat("%.0fm", gSettings.maxCamDist), Vector2{ sldX - 55.0f, ry + 22.0f }, 15, 0.3f, Color{ 30, 35, 55, 255 });
                     Rectangle sldBar = { sldX, ry + 27.0f, 280.0f, 10.0f };
                     DrawRectangleRounded(sldBar, 0.5f, 4, Color{ 215, 220, 235, 255 });
-                    float frac = (maxCamDist - 10.0f) / 40.0f;
+                    float frac = (gSettings.maxCamDist - 10.0f) / 40.0f;
                     DrawRectangleRounded(Rectangle{ sldBar.x, sldBar.y, sldBar.width * frac, 10.0f }, 0.5f, 4, Color{ 126, 114, 228, 255 });
-                    DrawCircle(sldBar.x + sldBar.width * frac, sldBar.y + 5.0f, 10.0f, Color{ 238, 52, 132, 255 });
+                    DrawCircle((int)(sldBar.x + sldBar.width * frac), (int)(sldBar.y + 5.0f), 10.0f, Color{ 238, 52, 132, 255 });
                     if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mousePos, Rectangle{ sldBar.x - 10, sldBar.y - 12, sldBar.width + 20, 34 })) {
-                        maxCamDist = Clamp(10.0f + ((mousePos.x - sldBar.x) / sldBar.width) * 40.0f, 10.0f, 50.0f);
+                        gSettings.maxCamDist = Clamp(10.0f + ((mousePos.x - sldBar.x) / sldBar.width) * 40.0f, 10.0f, 50.0f);
+                        SaveGameSettingsJSON("game_settings.json");
                     }
                 });
 
-                // Row 3: Target Frame Rate
-                DrawSettingRow(3, "Target Frame Rate", [&](Rectangle rRec, float ry, bool isHov) {
-                    DrawTextEx(fontUIBold, "<  60 FPS  >", Vector2{ rRec.x + rRec.width - 180.0f, ry + 22.0f }, 16, 0.4f, Color{ 30, 35, 55, 255 });
+                // Row 3: Show FPS Counter (F5)
+                DrawSettingRow(3, "Show FPS Counter (F5)", [&](Rectangle rRec, float ry, bool isHov) {
+                    Rectangle bSw = { rRec.x + rRec.width - 180.0f, ry + 16.0f, 140.0f, 34.0f };
+                    bool hovSw = CheckCollisionPointRec(mousePos, bSw);
+                    DrawSlantedRect(bSw.x, bSw.y, bSw.width, bSw.height, 8.0f, Color{ 220, 225, 235, 255 });
+                    if (gSettings.showFPS) {
+                        DrawSlantedRect(bSw.x + 65.0f, bSw.y + 2.0f, 70.0f, 30.0f, 8.0f, Color{ 52, 185, 58, 255 });
+                    } else {
+                        DrawSlantedRect(bSw.x + 4.0f, bSw.y + 2.0f, 65.0f, 30.0f, 8.0f, Color{ 120, 125, 140, 255 });
+                    }
+                    DrawTextEx(fontUIBold, "OFF", Vector2{ bSw.x + 22.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.showFPS ? Color{ 120, 125, 140, 255 } : WHITE);
+                    DrawTextEx(fontUIBold, "ON", Vector2{ bSw.x + 88.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.showFPS ? WHITE : Color{ 120, 125, 140, 255 });
+                    if (hovSw && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                        gSettings.showFPS = !gSettings.showFPS;
+                        SaveGameSettingsJSON("game_settings.json");
+                    }
                 });
+
             } else if (activeSettTab == 2) { // AUDIO
                 auto DrawAudioSlider = [&](int idx, const char* lbl, float& val) {
                     DrawSettingRow(idx, lbl, [&](Rectangle rRec, float ry, bool isHov) {
@@ -5230,43 +5673,142 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                         DrawRectangleRounded(sldBar, 0.5f, 4, Color{ 215, 220, 235, 255 });
                         float frac = val / 100.0f;
                         DrawRectangleRounded(Rectangle{ sldBar.x, sldBar.y, sldBar.width * frac, 10.0f }, 0.5f, 4, Color{ 126, 114, 228, 255 });
-                        DrawCircle(sldBar.x + sldBar.width * frac, sldBar.y + 5.0f, 10.0f, Color{ 238, 52, 132, 255 });
+                        DrawCircle((int)(sldBar.x + sldBar.width * frac), (int)(sldBar.y + 5.0f), 10.0f, Color{ 238, 52, 132, 255 });
                         if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mousePos, Rectangle{ sldBar.x - 10, sldBar.y - 12, sldBar.width + 20, 34 })) {
                             val = Clamp(((mousePos.x - sldBar.x) / sldBar.width) * 100.0f, 0.0f, 100.0f);
-                            if (idx == 0) SetMasterVolume(val / 100.0f);
+                            ApplySettingsLive();
+                            SaveGameSettingsJSON("game_settings.json");
                         }
                     });
                 };
-                DrawAudioSlider(0, "Master Volume", audioVolMaster);
-                DrawAudioSlider(1, "Music", audioVolMusic);
-                DrawAudioSlider(2, "Sound Effects (SFX)", audioVolSFX);
-                DrawAudioSlider(3, "Fart Volume", audioVolFart);
+                DrawAudioSlider(0, "Master Volume", gSettings.masterVolume);
+                DrawAudioSlider(1, "Music (OST & Waves)", gSettings.musicVolume);
+                DrawAudioSlider(2, "Sound Effects (SFX)", gSettings.sfxVolume);
+                DrawAudioSlider(3, "Fart & Gas Volume", gSettings.fartVolume);
+
             } else if (activeSettTab == 0) { // GENERAL
-                DrawSettingRow(0, "Language", [&](Rectangle rRec, float ry, bool isHov) {
-                    DrawTextEx(fontUIBold, "<  English  >", Vector2{ rRec.x + rRec.width - 180.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+                DrawSettingRow(0, "Device Profile", [&](Rectangle rRec, float ry, bool isHov) {
+                    const char* dNames[3] = { "<  Auto-Detect  >", "<  PC (Keyboard/Mouse)  >", "<  Mobile (Touchscreen)  >" };
+                    Rectangle bD = { rRec.x + rRec.width - 260.0f, ry + 16.0f, 230.0f, 34.0f };
+                    bool hovD = CheckCollisionPointRec(mousePos, bD);
+                    DrawSlantedRect(bD.x, bD.y, bD.width, bD.height, 8.0f, hovD ? Color{ 126, 114, 228, 255 } : Color{ 230, 235, 248, 255 });
+                    Vector2 dSz = MeasureTextEx(fontUIBold, dNames[gSettings.deviceMode], 13, 0.3f);
+                    DrawTextEx(fontUIBold, dNames[gSettings.deviceMode], Vector2{ bD.x + (bD.width - dSz.x) * 0.5f, bD.y + 9.0f }, 13, 0.3f, hovD ? WHITE : Color{ 30, 35, 55, 255 });
+                    if (hovD && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                        gSettings.deviceMode = (gSettings.deviceMode + 1) % 3;
+                        SaveGameSettingsJSON("game_settings.json");
+                    }
                 });
+
                 DrawSettingRow(1, "Invert Y Axis", [&](Rectangle rRec, float ry, bool isHov) {
-                    DrawTextEx(fontUIBold, "[ OFF | ON ]", Vector2{ rRec.x + rRec.width - 170.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+                    Rectangle bSw = { rRec.x + rRec.width - 180.0f, ry + 16.0f, 140.0f, 34.0f };
+                    bool hovSw = CheckCollisionPointRec(mousePos, bSw);
+                    DrawSlantedRect(bSw.x, bSw.y, bSw.width, bSw.height, 8.0f, Color{ 220, 225, 235, 255 });
+                    if (gSettings.invertMouseY) {
+                        DrawSlantedRect(bSw.x + 65.0f, bSw.y + 2.0f, 70.0f, 30.0f, 8.0f, Color{ 52, 185, 58, 255 });
+                    } else {
+                        DrawSlantedRect(bSw.x + 4.0f, bSw.y + 2.0f, 65.0f, 30.0f, 8.0f, Color{ 120, 125, 140, 255 });
+                    }
+                    DrawTextEx(fontUIBold, "OFF", Vector2{ bSw.x + 22.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.invertMouseY ? Color{ 120, 125, 140, 255 } : WHITE);
+                    DrawTextEx(fontUIBold, "ON", Vector2{ bSw.x + 88.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.invertMouseY ? WHITE : Color{ 120, 125, 140, 255 });
+                    if (hovSw && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                        gSettings.invertMouseY = !gSettings.invertMouseY;
+                        SaveGameSettingsJSON("game_settings.json");
+                    }
                 });
-                DrawSettingRow(2, "Controller Vibration", [&](Rectangle rRec, float ry, bool isHov) {
-                    DrawTextEx(fontUIBold, "[ OFF | ON ]", Vector2{ rRec.x + rRec.width - 170.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+
+                DrawSettingRow(2, "Level & Obstacle Editor", [&](Rectangle rRec, float ry, bool isHov) {
+                    Rectangle bEd = { rRec.x + rRec.width - 250.0f, ry + 14.0f, 220.0f, 38.0f };
+                    bool hovEd = CheckCollisionPointRec(mousePos, bEd);
+                    DrawSlantedRect(bEd.x, bEd.y, bEd.width, bEd.height, 8.0f, hovEd ? Color{ 34, 197, 94, 255 } : Color{ 22, 163, 74, 255 });
+                    DrawTextEx(fontUIBold, "[ OPEN LEVEL EDITOR ]", Vector2{ bEd.x + 18.0f, bEd.y + 11.0f }, 14, 0.4f, WHITE);
+                    if (hovEd && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                        editorMode = true;
+                        currentScreen = SCREEN_GAMEPLAY;
+                    }
                 });
-                DrawSettingRow(3, "Subtitles", [&](Rectangle rRec, float ry, bool isHov) {
-                    DrawTextEx(fontUIBold, "[ OFF | ON ]", Vector2{ rRec.x + rRec.width - 170.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+
+                DrawSettingRow(3, "Subtitles & Dialogues", [&](Rectangle rRec, float ry, bool isHov) {
+                    DrawTextEx(fontUIBold, "[ ON ]", Vector2{ rRec.x + rRec.width - 120.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
                 });
+
             } else { // CONTROLS
-                DrawSettingRow(0, "P1 Fart Gas Controls", [&](Rectangle rRec, float ry, bool isHov) {
-                    DrawTextEx(fontUIBold, "A (Left)  /  D (Right)", Vector2{ rRec.x + rRec.width - 240.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
-                });
-                DrawSettingRow(1, "Dual Fart Boost", [&](Rectangle rRec, float ry, bool isHov) {
-                    DrawTextEx(fontUIBold, "A + D Simultaneously", Vector2{ rRec.x + rRec.width - 240.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
-                });
-                DrawSettingRow(2, "Steering Mechanism", [&](Rectangle rRec, float ry, bool isHov) {
-                    DrawTextEx(fontUIBold, "360 deg Rim Free Rotation", Vector2{ rRec.x + rRec.width - 270.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
-                });
-                DrawSettingRow(3, "Reset Key Bindings", [&](Rectangle rRec, float ry, bool isHov) {
-                    DrawTextEx(fontUIBold, "[ Reset to Defaults ]", Vector2{ rRec.x + rRec.width - 210.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
-                });
+                static int controlSubTab = (gSettings.deviceMode == 2) ? 1 : 0; // 0=PC, 1=Mobile Touch
+
+                // Sub tab switcher: PC vs Mobile
+                Rectangle bSubPC  = { rowX, rowY - 42.0f, 150.0f, 34.0f };
+                Rectangle bSubMob = { rowX + 160.0f, rowY - 42.0f, 180.0f, 34.0f };
+                bool hovSubPC  = CheckCollisionPointRec(mousePos, bSubPC);
+                bool hovSubMob = CheckCollisionPointRec(mousePos, bSubMob);
+                DrawSlantedRect(bSubPC.x, bSubPC.y, bSubPC.width, bSubPC.height, 8.0f, (controlSubTab == 0) ? Color{ 126, 114, 228, 255 } : Color{ 45, 55, 75, 220 });
+                DrawTextEx(fontUIBold, "PC Keyboard/Mouse", Vector2{ bSubPC.x + 12.0f, bSubPC.y + 9.0f }, 13, 0.3f, WHITE);
+                DrawSlantedRect(bSubMob.x, bSubMob.y, bSubMob.width, bSubMob.height, 8.0f, (controlSubTab == 1) ? Color{ 126, 114, 228, 255 } : Color{ 45, 55, 75, 220 });
+                DrawTextEx(fontUIBold, "Mobile Touch Controls", Vector2{ bSubMob.x + 14.0f, bSubMob.y + 9.0f }, 13, 0.3f, WHITE);
+                if (hovSubPC && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) controlSubTab = 0;
+                if (hovSubMob && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) controlSubTab = 1;
+
+                if (controlSubTab == 0) { // PC MODE
+                    DrawSettingRow(0, "P1 Fart Gas Controls", [&](Rectangle rRec, float ry, bool isHov) {
+                        DrawTextEx(fontUIBold, "A (Left) / D (Right) & Space/W (Gas)", Vector2{ rRec.x + rRec.width - 320.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+                    });
+                    DrawSettingRow(1, "Level Editor Mode", [&](Rectangle rRec, float ry, bool isHov) {
+                        Rectangle bEd = { rRec.x + rRec.width - 250.0f, ry + 14.0f, 220.0f, 38.0f };
+                        bool hovEd = CheckCollisionPointRec(mousePos, bEd);
+                        DrawSlantedRect(bEd.x, bEd.y, bEd.width, bEd.height, 8.0f, hovEd ? Color{ 34, 197, 94, 255 } : Color{ 22, 163, 74, 255 });
+                        DrawTextEx(fontUIBold, "[ OPEN EDITOR (F1) ]", Vector2{ bEd.x + 16.0f, bEd.y + 11.0f }, 14, 0.4f, WHITE);
+                        if (hovEd && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                            editorMode = true;
+                            currentScreen = SCREEN_GAMEPLAY;
+                        }
+                    });
+                    DrawSettingRow(2, "Show FPS Toggle Key", [&](Rectangle rRec, float ry, bool isHov) {
+                        DrawTextEx(fontUIBold, "[ F5 Key ]", Vector2{ rRec.x + rRec.width - 150.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+                    });
+                    DrawSettingRow(3, "Suicide Respawn Key", [&](Rectangle rRec, float ry, bool isHov) {
+                        DrawTextEx(fontUIBold, "[ R Key ]", Vector2{ rRec.x + rRec.width - 150.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+                    });
+                } else { // MOBILE TOUCH MODE
+                    DrawSettingRow(0, "Touch Button Scale", [&](Rectangle rRec, float ry, bool isHov) {
+                        float sldX = rRec.x + rRec.width - 340.0f;
+                        DrawTextEx(fontUIBold, TextFormat("%.0f%%", gSettings.touchBtnScale * 100.0f), Vector2{ sldX - 60.0f, ry + 22.0f }, 15, 0.3f, Color{ 30, 35, 55, 255 });
+                        Rectangle sldBar = { sldX, ry + 27.0f, 280.0f, 10.0f };
+                        DrawRectangleRounded(sldBar, 0.5f, 4, Color{ 215, 220, 235, 255 });
+                        float frac = (gSettings.touchBtnScale - 0.50f) / 1.30f;
+                        DrawRectangleRounded(Rectangle{ sldBar.x, sldBar.y, sldBar.width * frac, 10.0f }, 0.5f, 4, Color{ 126, 114, 228, 255 });
+                        DrawCircle((int)(sldBar.x + sldBar.width * frac), (int)(sldBar.y + 5.0f), 10.0f, Color{ 238, 52, 132, 255 });
+                        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mousePos, Rectangle{ sldBar.x - 10, sldBar.y - 12, sldBar.width + 20, 34 })) {
+                            gSettings.touchBtnScale = Clamp(0.50f + ((mousePos.x - sldBar.x) / sldBar.width) * 1.30f, 0.50f, 1.80f);
+                            SaveGameSettingsJSON("game_settings.json");
+                        }
+                    });
+
+                    DrawSettingRow(1, "Steer Buttons Pos X / Y", [&](Rectangle rRec, float ry, bool isHov) {
+                        Rectangle bReset = { rRec.x + rRec.width - 240.0f, ry + 16.0f, 200.0f, 34.0f };
+                        bool hovR = CheckCollisionPointRec(mousePos, bReset);
+                        DrawSlantedRect(bReset.x, bReset.y, bReset.width, bReset.height, 8.0f, hovR ? Color{ 126, 114, 228, 255 } : Color{ 230, 235, 248, 255 });
+                        DrawTextEx(fontUIBold, "Reset Left/Right Pos", Vector2{ bReset.x + 20.0f, bReset.y + 8.0f }, 13, 0.3f, hovR ? WHITE : Color{ 30, 35, 55, 255 });
+                        if (hovR && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                            gSettings.steerLeftPosX = 0.08f; gSettings.steerLeftPosY = 0.78f;
+                            gSettings.steerRightPosX = 0.22f; gSettings.steerRightPosY = 0.78f;
+                            SaveGameSettingsJSON("game_settings.json");
+                        }
+                    });
+
+                    DrawSettingRow(2, "Gas Button Pos X / Y", [&](Rectangle rRec, float ry, bool isHov) {
+                        Rectangle bReset = { rRec.x + rRec.width - 240.0f, ry + 16.0f, 200.0f, 34.0f };
+                        bool hovR = CheckCollisionPointRec(mousePos, bReset);
+                        DrawSlantedRect(bReset.x, bReset.y, bReset.width, bReset.height, 8.0f, hovR ? Color{ 126, 114, 228, 255 } : Color{ 230, 235, 248, 255 });
+                        DrawTextEx(fontUIBold, "Reset Gas Button Pos", Vector2{ bReset.x + 22.0f, bReset.y + 8.0f }, 13, 0.3f, hovR ? WHITE : Color{ 30, 35, 55, 255 });
+                        if (hovR && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                            gSettings.gasBtnPosX = 0.86f; gSettings.gasBtnPosY = 0.76f;
+                            SaveGameSettingsJSON("game_settings.json");
+                        }
+                    });
+
+                    DrawSettingRow(3, "USB Keyboard/Mouse OTG", [&](Rectangle rRec, float ry, bool isHov) {
+                        DrawTextEx(fontUIBold, "[ Auto-Supported via USB Host ]", Vector2{ rRec.x + rRec.width - 280.0f, ry + 22.0f }, 14, 0.3f, Color{ 34, 197, 94, 255 });
+                    });
+                }
             }
 
             // Scrollbar on right
@@ -5303,6 +5845,16 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
     for (int s = 0; s < 2; s++) UnloadSound(sndHold[s]);
     UnloadSound(sndExplode);
     UnloadSound(sndBounce);
+    UnloadSound(sndMenuBeachOst);
+    UnloadSound(sndSeagull);
+    UnloadSound(sndShipHorn);
+    UnloadSound(sndSnore);
+    UnloadSound(sndEatMunch);
+    UnloadSound(sndBurp);
+    UnloadSound(sndCheckpoint);
+    UnloadTexture(texMenuOasisFull);
+    UnloadTexture(texMenuOasisClean);
+    UnloadTexture(texMenuRaftSleep);
     UnloadTexture(texMainLogo);
     UnloadTexture(texLogoSplash);
     UnloadTexture(texMenuBg);
