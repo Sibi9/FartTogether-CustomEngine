@@ -11,6 +11,10 @@ CustomEngine/scratch/
 .env
 *.obj
 android_apk_build/
+android_abi_build/
+android_universal_apk_build/
+CustomEngine/vendor/raylib_src/
+*.apk
 CustomEngine/*.obj
 audio_tool.exe
 test_ar_font.exe

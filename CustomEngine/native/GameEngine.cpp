@@ -32,7 +32,7 @@
 #include "Codepoints.h"
 
 // Rule: Game version must be incremented on every update!
-static const char* GAME_VERSION_TAG = "v8.1.0";
+static const char* GAME_VERSION_TAG = "v8.2.0";
 GameLanguage gCurrentLanguage = LANG_AR; // Default Arabic as requested
 static bool gShowInviteModal = false;
 
@@ -2208,8 +2208,10 @@ int main(int argc, char** argv) {
     SetTextureFilter(texFinish, TEXTURE_FILTER_BILINEAR);
     SetTextureFilter(texEsc, TEXTURE_FILTER_BILINEAR);
 
-    Font fontUI     = LoadFontEx(ResolveAsset("extracted_assets/fonts/ui_font.ttf").c_str(), 26, (int*)gArFontCodepoints, gArFontCodepointCount);
-    Font fontUIBold = LoadFontEx(ResolveAsset("extracted_assets/fonts/ui_font_bold.ttf").c_str(), 26, (int*)gArFontCodepoints, gArFontCodepointCount);
+    Font fontUI     = LoadFontEx(ResolveAsset("extracted_assets/fonts/ui_font.ttf").c_str(), 36, (int*)gArFontCodepoints, gArFontCodepointCount);
+    Font fontUIBold = LoadFontEx(ResolveAsset("extracted_assets/fonts/ui_font_bold.ttf").c_str(), 42, (int*)gArFontCodepoints, gArFontCodepointCount);
+    SetTextureFilter(fontUI.texture, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(fontUIBold.texture, TEXTURE_FILTER_BILINEAR);
     if (fontUI.texture.id == 0) fontUI = GetFontDefault();
     else SetTextureFilter(fontUI.texture, TEXTURE_FILTER_BILINEAR);
     if (fontUIBold.texture.id == 0) fontUIBold = GetFontDefault();
@@ -2421,6 +2423,14 @@ int main(int argc, char** argv) {
     Texture2D texLogoSplash      = LoadTexture(ResolveAsset("extracted_assets/textures/Logo_Splash.png").c_str());
     Texture2D texMenuBg          = LoadTexture(ResolveAsset("extracted_assets/textures/Background.png").c_str());
     Texture2D texMarkerYou       = LoadTexture(ResolveAsset("extracted_assets/textures/Marker_BlueYou.png").c_str());
+    Texture2D texIconTikGreen   = LoadTexture(ResolveAsset("extracted_assets/textures/Icon_TikGreen.png").c_str());
+    Texture2D texMarkerPlayer   = LoadTexture(ResolveAsset("extracted_assets/textures/Marker_BluePlayer.png").c_str());
+    Texture2D texKeySpace       = LoadTexture(ResolveAsset("extracted_assets/textures/keyboard_space.png").c_str());
+    Texture2D texIconKEnter     = LoadTexture(ResolveAsset("extracted_assets/textures/Icon_KEnter.png").c_str());
+    SetTextureFilter(texIconTikGreen, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(texMarkerPlayer, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(texKeySpace, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(texIconKEnter, TEXTURE_FILTER_BILINEAR);
     Texture2D texModeFartRun     = LoadTexture(ResolveAsset("extracted_assets/textures/Mode_FartRun.png").c_str());
     Texture2D texModeTeamRace    = LoadTexture(ResolveAsset("extracted_assets/textures/Mode_TeamRace.png").c_str());
     Texture2D texModeRaftRumble  = LoadTexture(ResolveAsset("extracted_assets/textures/Mode_RaftRumble.png").c_str());
@@ -4431,7 +4441,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             DrawRectangleRoundedLinesEx(btnSuicideRec, 0.35f, 4, 1.2f, hoverSuicide ? Color{ 239, 68, 68, 255 } : Color{ 153, 27, 27, 180 });
 
             DrawText("[R]", 155, GetScreenHeight() - 40, 16, Color{ 248, 113, 113, 255 });
-            DrawText("SUICIDE", 185, GetScreenHeight() - 40, 16, RAYWHITE);
+            DrawTextEx(fontUIBold, LocText(STR_SUICIDE_HUD), Vector2{ 155.0f, (float)GetScreenHeight() - 41.0f }, 16, 0.3f, Color{ 248, 113, 113, 255 });
 
             if ((hoverSuicide && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_R)) {
                 if (!editorMode && !raft.isDestroyed) {
@@ -5071,7 +5081,9 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
                 if (texIconArrow.id != 0) {
                     float aw = rad * 0.95f, ah = rad * 1.15f;
-                    Rectangle src = { 0, 0, isRightArrow ? -(float)texIconArrow.width : (float)texIconArrow.width, (float)texIconArrow.height };
+                    // Icon_ArrowM.png points RIGHT natively -> Right is +width, Left is -width!
+                    float srcW = isRightArrow ? (float)texIconArrow.width : -(float)texIconArrow.width;
+                    Rectangle src = { 0.0f, 0.0f, srcW, (float)texIconArrow.height };
                     Rectangle dst = { center.x, center.y, aw, ah };
                     DrawTexturePro(texIconArrow, src, dst, Vector2{ aw * 0.5f, ah * 0.5f }, 0.0f, WHITE);
                 } else {
@@ -5134,116 +5146,30 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
             float scrW = (float)GetScreenWidth();
             float scrH = (float)GetScreenHeight();
-            float scaleX = scrW / 1280.0f;
-            float scaleY = scrH / 720.0f;
 
-            // 1. 2.5D Animated Oasis Artwork
-            if (texMenuOasisClean.id != 0) {
+            // Mute / Stop background beach and snore sounds in main menu as commanded
+            if (IsSoundPlaying(sndMenuBeachOst)) StopSound(sndMenuBeachOst);
+            if (IsSoundPlaying(sndSnore)) StopSound(sndSnore);
+            if (IsSoundPlaying(sndEatMunch)) StopSound(sndEatMunch);
+
+            // Clean 100% static background (Menu_Oasis_Full.png) - No cutouts, no snot bubbles, no duplicate pirates!
+            if (texMenuOasisFull.id != 0) {
+                DrawTexturePro(texMenuOasisFull, Rectangle{ 0, 0, (float)texMenuOasisFull.width, (float)texMenuOasisFull.height },
+                               Rectangle{ 0, 0, scrW, scrH }, Vector2{0, 0}, 0.0f, WHITE);
+            } else if (texMenuOasisClean.id != 0) {
                 DrawTexturePro(texMenuOasisClean, Rectangle{ 0, 0, (float)texMenuOasisClean.width, (float)texMenuOasisClean.height },
                                Rectangle{ 0, 0, scrW, scrH }, Vector2{0, 0}, 0.0f, WHITE);
             }
 
-            // Subtle water shimmer
-            float pondRipple = sinf(runTime * 2.0f) * 0.06f + 0.06f;
-            // Pond shimmer handled natively by artwork
-
-            // 2. Animated Center Purple Pirate Sleeping on Raft
-            float raftDriftX = sinf(runTime * 0.95f) * 20.0f + cosf(runTime * 0.55f) * 8.0f;
-            float raftDriftY = sinf(runTime * 1.65f) * 6.5f;
-            float raftTilt   = sinf(runTime * 1.25f) * 3.2f;
-
-            float snoreCycle = fmodf(runTime, 3.6f);
-            if (snoreCycle < 0.08f) {
-                if (!IsSoundPlaying(sndSnore)) PlaySound(sndSnore);
-            }
-            float bellyBreath = 1.0f + 0.045f * sinf(snoreCycle * 3.14159f / 1.8f);
-
-            if (texMenuRaftSleep.id != 0) {
-                float rw = 260.0f * scaleX * bellyBreath;
-                float rh = 195.0f * scaleY * bellyBreath;
-                Rectangle srcRaft = { 0, 0, (float)texMenuRaftSleep.width, (float)texMenuRaftSleep.height };
-                Rectangle dstRaft = { (670.0f + raftDriftX) * scaleX, (417.0f + raftDriftY) * scaleY, rw, rh };
-                Vector2 raftOrigin = { rw * 0.5f, rh * 0.5f };
-                DrawTexturePro(texMenuRaftSleep, srcRaft, dstRaft, raftOrigin, raftTilt, WHITE);
-            }
-
-            // Animated Snot Bubble (Fixed in v8.1.0: Small realistic 4px..14px at pirate's nose, no giant circle!)
-            Vector2 snoutPos = { (644.0f + raftDriftX) * scaleX, (372.0f + raftDriftY) * scaleY };
-            if (snoreCycle < 3.0f) {
-                float growT = snoreCycle / 3.0f;
-                float snotRadius = (4.0f + 10.0f * sinf(growT * 3.14159f * 0.5f)) * scaleY;
-                snotRadius += sinf(runTime * 15.0f) * 0.8f * scaleY; // subtle wobble
-                Vector2 bubbleCenter = { snoutPos.x - snotRadius * 0.35f, snoutPos.y - snotRadius * 0.45f };
-
-                DrawCircleV(bubbleCenter, snotRadius, Color{ 175, 240, 255, 170 });
-                DrawCircleLines((int)bubbleCenter.x, (int)bubbleCenter.y, snotRadius, Color{ 240, 252, 255, 230 });
-                DrawCircleV(Vector2{ bubbleCenter.x - snotRadius * 0.3f, bubbleCenter.y - snotRadius * 0.3f }, snotRadius * 0.28f, Color{ 255, 255, 255, 220 });
-            } else {
-                // Popping animation (POP!)
-                float popT = (snoreCycle - 3.0f) / 0.6f;
-                for (int d = 0; d < 6; d++) {
-                    float ang = (float)d * (6.28318f / 6.0f);
-                    float dropDist = (8.0f + popT * 20.0f) * scaleY;
-                    Vector2 dropPos = { snoutPos.x + cosf(ang) * dropDist, snoutPos.y + sinf(ang) * dropDist };
-                    DrawCircleV(dropPos, (2.5f * (1.0f - popT)) * scaleY, Color{ 180, 242, 255, (unsigned char)(210 * (1.0f - popT)) });
-                }
-                DrawTextEx(fontUIBold, "POP!", Vector2{ snoutPos.x + 6.0f * scaleX, snoutPos.y - 18.0f * scaleY }, 15.0f * scaleY, 0.4f, Color{ 255, 255, 130, (unsigned char)(255 * (1.0f - popT)) });
-            }
-
-            // 3. Orange Pirate Eating at Table + Munching & Periodic Burping
-            float eatCycle = fmodf(runTime, 9.6f);
-            if (eatCycle < 7.8f) {
-                float subCycle = fmodf(eatCycle, 2.6f);
-                if (subCycle >= 0.8f && subCycle < 2.4f) {
-                    if (!IsSoundPlaying(sndEatMunch)) PlaySound(sndEatMunch);
-                    for (int c = 0; c < 3; c++) {
-                        float cx = (855.0f + sinf(runTime * 12.0f + c * 2.1f) * 12.0f) * scaleX;
-                        float cy = (485.0f + fmodf(runTime * 28.0f + c * 8.0f, 22.0f)) * scaleY;
-                        DrawCircle((int)cx, (int)cy, 2.8f * scaleY, Color{ 245, 190, 85, 220 });
-                    }
-                }
-            } else {
-                float burpT = (eatCycle - 7.8f) / 1.8f;
-                if (burpT < 0.12f) {
-                    if (!IsSoundPlaying(sndBurp)) PlaySound(sndBurp);
-                }
-                for (int r = 0; r < 3; r++) {
-                    float ringPhase = fmodf(burpT * 2.2f + (float)r * 0.33f, 1.0f);
-                    float ringR = (8.0f + ringPhase * 42.0f) * scaleY;
-                    float ringX = (855.0f - ringPhase * 28.0f) * scaleX;
-                    float ringY = (475.0f - ringPhase * 24.0f) * scaleY;
-                    DrawCircleLines((int)ringX, (int)ringY, ringR, Color{ 85, 235, 55, (unsigned char)(210 * (1.0f - ringPhase)) });
-                }
-                DrawTextEx(fontUIBold, "*BURP!*", Vector2{ 805.0f * scaleX, (430.0f - burpT * 22.0f) * scaleY }, 18.0f * scaleY, 0.4f, Color{ 130, 255, 70, (unsigned char)(255 * (1.0f - burpT)) });
-
-                float fartPulse = 1.0f + sinf(runTime * 22.0f) * 0.22f;
-                DrawCircle((int)(1015.0f * scaleX), (int)(615.0f * scaleY), 34.0f * scaleY * fartPulse, Color{ 105, 230, 42, 160 });
-                DrawCircle((int)(1038.0f * scaleX), (int)(605.0f * scaleY), 24.0f * scaleY * fartPulse, Color{ 140, 255, 65, 180 });
-            }
-
-            // 4. Logo Top-Left
+            // Top-Left Cartoon Logo
             if (texMainLogo.id != 0) {
-                float logoW = 340.0f * scaleX;
-                float logoH = 175.0f * scaleY;
+                float logoW = 345.0f, logoH = 158.0f;
                 DrawTexturePro(texMainLogo, Rectangle{ 0, 0, (float)texMainLogo.width, (float)texMainLogo.height },
-                               Rectangle{ 42.0f * scaleX, 22.0f * scaleY, logoW, logoH }, Vector2{0, 0}, 0.0f, WHITE);
+                               Rectangle{ 38.0f, 32.0f, logoW, logoH }, Vector2{0, 0}, 0.0f, WHITE);
             }
 
-            // Language Switcher Button Top-Right [ العربية / English ]
-            Rectangle langBtnRec = { scrW - 190.0f * scaleX, 22.0f * scaleY, 160.0f * scaleX, 42.0f * scaleY };
-            bool hovLang = CheckCollisionPointRec(mousePos, langBtnRec);
-            DrawSlantedRect(langBtnRec.x, langBtnRec.y, langBtnRec.width, langBtnRec.height, 12.0f, hovLang ? Color{ 45, 65, 95, 240 } : Color{ 25, 38, 58, 220 });
-            DrawSlantedRectLines(langBtnRec.x, langBtnRec.y, langBtnRec.width, langBtnRec.height, 12.0f, 1.5f, hovLang ? Color{ 56, 189, 248, 255 } : Color{ 70, 95, 130, 200 });
-            const char* langStr = (gCurrentLanguage == LANG_AR) ? "English [EN]" : (const char*)u8"العربية [AR]";
-            Vector2 langSz = MeasureTextEx(fontUIBold, langStr, 15 * scaleY, 0.4f);
-            DrawTextEx(fontUIBold, langStr, Vector2{ langBtnRec.x + (langBtnRec.width - langSz.x) * 0.5f, langBtnRec.y + 12.0f * scaleY }, 15 * scaleY, 0.4f, Color{ 255, 235, 60, 255 });
-            if (hovLang && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                gCurrentLanguage = (gCurrentLanguage == LANG_AR) ? LANG_EN : LANG_AR;
-                gSettings.language = (int)gCurrentLanguage;
-                SaveGameSettingsJSON("game_settings.json");
-            }
-
-            // 5. Clean Menu Items (v8.1.0: Added PLAY at top, removed Credits and Local Co-op)
+            // 5 Main Menu Items: 0: PLAY SOLO, 1: CREATE LOBBY, 2: FIND LOBBY, 3: SETTINGS, 4: EXIT GAME
+            static int menuSel = 0;
             const LocalizedString menuItems[5] = {
                 STR_PLAY,
                 STR_CREATE_LOBBY,
@@ -5251,41 +5177,55 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 STR_SETTINGS,
                 STR_EXIT_GAME
             };
-            float menuYStarts[5] = { 215.0f, 278.0f, 342.0f, 420.0f, 482.0f };
 
-            static int menuSelectedIdx = 0;
-            if (IsKeyPressed(KEY_UP))   { menuSelectedIdx = (menuSelectedIdx <= 0) ? 4 : menuSelectedIdx - 1; }
-            if (IsKeyPressed(KEY_DOWN)) { menuSelectedIdx = (menuSelectedIdx >= 4) ? 0 : menuSelectedIdx + 1; }
+            if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W))   menuSel = (menuSel + 4) % 5;
+            if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S)) menuSel = (menuSel + 1) % 5;
+
+            float menuStartX = 0.0f;
+            float menuStartY = 210.0f;
+            float menuGapY   = 60.0f;
 
             for (int m = 0; m < 5; m++) {
-                float my = menuYStarts[m] * scaleY;
-                float mw = ((m < 3) ? 320.0f : 290.0f) * scaleX;
-                float mh = ((m < 3) ? 50.0f : 42.0f) * scaleY;
-                Rectangle itemHit = { 35.0f * scaleX, my, mw, mh };
-                bool isHov = CheckCollisionPointRec(mousePos, itemHit);
-                if (isHov) menuSelectedIdx = m;
-                bool isSel = (menuSelectedIdx == m);
+                float my = menuStartY + m * menuGapY;
+                float mw = (menuSel == m) ? 390.0f : 290.0f;
+                float mh = 50.0f;
 
-                if (isSel) {
-                    DrawSlantedRect(32.0f * scaleX, my, mw + 30.0f * scaleX, mh, 14.0f, (m == 0) ? Color{ 34, 197, 94, 255 } : Color{ 255, 38, 118, 255 });
+                Rectangle itemRec = { menuStartX, my, mw, mh };
+                bool isHov = CheckCollisionPointRec(mousePos, itemRec);
+                if (isHov) menuSel = m;
+
+                if (menuSel == m) {
+                    DrawSlantedRect(0.0f, my, mw, mh, 16.0f, Color{ 34, 197, 94, 250 });
+                    DrawSlantedRectLines(0.0f, my, mw, mh, 16.0f, 2.0f, Color{ 255, 255, 255, 230 });
+
                     if (texIconArrow.id != 0) {
+                        float aw = 20.0f, ah = 28.0f;
                         DrawTexturePro(texIconArrow, Rectangle{ 0, 0, (float)texIconArrow.width, (float)texIconArrow.height },
-                                       Rectangle{ 42.0f * scaleX, my + mh * 0.5f - 11.0f * scaleY, 22.0f * scaleX, 22.0f * scaleY }, Vector2{0,0}, 0.0f, WHITE);
-                    } else {
-                        DrawTextEx(fontUIBold, ">", Vector2{ 42.0f * scaleX, my + 10.0f * scaleY }, 24 * scaleY, 0.4f, WHITE);
+                                       Rectangle{ 38.0f, my + 11.0f, aw, ah }, Vector2{0, 0}, 0.0f, WHITE);
                     }
+                    DrawTextEx(fontUIBold, LocText(menuItems[m]), Vector2{ 68.0f, my + 10.0f }, 24, 0.4f, WHITE);
+                } else {
+                    DrawTextEx(fontUIBold, LocText(menuItems[m]), Vector2{ 50.0f, my + 12.0f }, 21, 0.4f, Color{ 255, 255, 255, 235 });
                 }
 
-                float textX = (isSel ? 74.0f : 52.0f) * scaleX;
-                float textY = my + (mh - ((m < 3) ? 22.0f : 17.0f) * scaleY) * 0.5f;
-                DrawTextEx(fontUIBold, LocText(menuItems[m]), Vector2{ textX, textY }, (m < 3) ? (int)(22 * scaleY) : (int)(17 * scaleY), 0.4f, WHITE);
-
-                if ((isHov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || (isSel && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)))) {
-                    if (m == 0) { // PLAY / ابدأ اللعب
-                        singlePirateMode = false;
+                if ((isHov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || (menuSel == m && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)))) {
+                    if (m == 0) { // PLAY SOLO (Single Pirate Mode, 360 degree rotation)
+                        LanShutdown();
+                        singlePirateMode = true;
+                        p1RimAngle = 3.14159f;
+                        raft.position = Vector3{ 15.55f, 0.58f, 90.80f };
+                        raft.velocity = Vector3{ 0.0f, 0.0f, 0.0f };
+                        raft.rotationY = 3.14159f;
+                        raft.isDestroyed = false;
+                        raft.currentCP = 0;
+                        gasP1.gasEnergy = GAS_MAX;
+                        gasP1.gasDepleted = false;
                         currentScreen = SCREEN_GAMEPLAY;
                     } else if (m == 1) { // CREATE LOBBY
                         LanInitHost(7777, "8HF78N");
+                        gHostReady = false;
+                        gClientReady = false;
+                        gSoloPracticeMode = false;
                         currentScreen = SCREEN_LAN_LOBBY;
                     } else if (m == 2) { // FIND LOBBY
                         LanStartDiscoveryListener(7778);
@@ -5293,269 +5233,308 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                     } else if (m == 3) { // SETTINGS
                         currentScreen = SCREEN_SETTINGS;
                     } else if (m == 4) { // EXIT GAME
-                        break;
+                        CloseWindow();
+                        return 0;
                     }
                 }
             }
 
-            // Room Code Box next to FIND LOBBY
-            Rectangle boxFindRec = { 385.0f * scaleX, 342.0f * scaleY, 175.0f * scaleX, 50.0f * scaleY };
-            bool hovCode = CheckCollisionPointRec(mousePos, boxFindRec);
-            DrawSlantedRect(boxFindRec.x, boxFindRec.y, boxFindRec.width, boxFindRec.height, 14.0f, hovCode ? Color{ 32, 62, 75, 235 } : Color{ 22, 45, 55, 210 });
-            DrawSlantedRectLines(boxFindRec.x, boxFindRec.y, boxFindRec.width, boxFindRec.height, 14.0f, 1.8f, hovCode ? Color{ 175, 255, 45, 255 } : Color{ 60, 105, 120, 220 });
-            DrawTextEx(fontUIBold, "8HF78N", Vector2{ boxFindRec.x + 36.0f * scaleX, boxFindRec.y + 12.0f * scaleY }, (int)(22 * scaleY), 0.5f, Color{ 175, 255, 45, 255 });
-            if (hovCode && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                LanStartDiscoveryListener(7778);
-                currentScreen = SCREEN_FIND_LOBBY;
+            // Room code box next to FIND LOBBY
+            float findY = menuStartY + 2 * menuGapY;
+            DrawSlantedRect(380.0f, findY + 3.0f, 190.0f, 44.0f, 10.0f, Color{ 15, 30, 45, 215 });
+            DrawSlantedRectLines(380.0f, findY + 3.0f, 190.0f, 44.0f, 10.0f, 1.2f, Color{ 45, 85, 120, 200 });
+            DrawTextEx(fontUIBold, "8HF78N", Vector2{ 415.0f, findY + 11.0f }, 22, 0.5f, Color{ 52, 235, 120, 255 });
+
+            // Language Toggle in Top-Right
+            Rectangle langBtnRec = { scrW - 190.0f, 20.0f, 165.0f, 42.0f };
+            bool hovLang = CheckCollisionPointRec(mousePos, langBtnRec);
+            DrawSlantedRect(langBtnRec.x, langBtnRec.y, langBtnRec.width, langBtnRec.height, 10.0f, hovLang ? Color{ 45, 65, 95, 240 } : Color{ 20, 32, 48, 220 });
+            DrawSlantedRectLines(langBtnRec.x, langBtnRec.y, langBtnRec.width, langBtnRec.height, 10.0f, 1.2f, Color{ 80, 115, 160, 200 });
+            const char* langToggleTxt = (gCurrentLanguage == LANG_AR) ? "English [EN]" : LocText(STR_LANG_VALUE);
+            Vector2 ltSz = MeasureTextEx(fontUIBold, langToggleTxt, 16, 0.3f);
+            DrawTextEx(fontUIBold, langToggleTxt, Vector2{ langBtnRec.x + (langBtnRec.width - ltSz.x) * 0.5f, langBtnRec.y + 11.0f }, 16, 0.3f, Color{ 255, 225, 75, 255 });
+            if (hovLang && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                gCurrentLanguage = (gCurrentLanguage == LANG_AR) ? LANG_EN : LANG_AR;
             }
 
-            // Bottom Bar
-            float botY = scrH - 46.0f * scaleY;
-            DrawTextEx(fontUIBold, LocText(STR_ESC_BACK), Vector2{ 42.0f * scaleX, botY + 8.0f * scaleY }, (int)(14 * scaleY), 0.4f, Color{ 148, 163, 184, 255 });
-            DrawTextEx(fontUIBold, LocText(STR_ENTER_SELECT), Vector2{ 175.0f * scaleX, botY + 8.0f * scaleY }, (int)(14 * scaleY), 0.4f, Color{ 148, 163, 184, 255 });
+            // Bottom-Left key hints
+            DrawTextEx(fontUIBold, LocText(STR_ESC_BACK), Vector2{ 38.0f, scrH - 42.0f }, 15, 0.3f, Color{ 220, 230, 245, 220 });
+            DrawTextEx(fontUIBold, LocText(STR_ENTER_SELECT), Vector2{ 175.0f, scrH - 42.0f }, 15, 0.3f, Color{ 220, 230, 245, 220 });
 
-            // Bottom-Right: Replaced DISCORD with Official Game Version Tag Badge (v8.1.0)
-            float vW = 155.0f * scaleX, vH = 38.0f * scaleY;
-            float vX = scrW - vW - 30.0f * scaleX, vY = scrH - vH - 12.0f * scaleY;
-            DrawSlantedRect(vX, vY, vW, vH, 10.0f, Color{ 20, 32, 46, 225 });
-            DrawSlantedRectLines(vX, vY, vW, vH, 10.0f, 1.5f, Color{ 172, 255, 45, 200 });
-            Vector2 verSz = MeasureTextEx(fontUIBold, GAME_VERSION_TAG, 18 * scaleY, 0.4f);
-            DrawTextEx(fontUIBold, GAME_VERSION_TAG, Vector2{ vX + (vW - verSz.x) * 0.5f, vY + 9.0f * scaleY }, 18 * scaleY, 0.4f, Color{ 172, 255, 45, 255 });
-
+            // Bottom-Right Version Badge (v8.2.0)
+            DrawSlantedRect(scrW - 165.0f, scrH - 52.0f, 145.0f, 38.0f, 10.0f, Color{ 18, 28, 42, 230 });
+            DrawSlantedRectLines(scrW - 165.0f, scrH - 52.0f, 145.0f, 38.0f, 10.0f, 1.2f, Color{ 48, 70, 98, 220 });
+            Vector2 verSz = MeasureTextEx(fontUIBold, GAME_VERSION_TAG, 18, 0.4f);
+            DrawTextEx(fontUIBold, GAME_VERSION_TAG, Vector2{ scrW - 165.0f + (145.0f - verSz.x) * 0.5f, scrH - 44.0f }, 18, 0.4f, Color{ 172, 255, 45, 255 });
         } else if (currentScreen == SCREEN_LAN_LOBBY) {
             ClearBackground(Color{ 18, 22, 34, 255 });
 
-            // Bright sunny sky gradient (Plan v8.1.0 Task 3)
-            DrawRectangleGradientV(0, 0, GetScreenWidth(), GetScreenHeight(), Color{ 78, 152, 238, 255 }, Color{ 186, 224, 252, 255 });
+            float scrW = (float)GetScreenWidth();
+            float scrH = (float)GetScreenHeight();
 
+            // Authentic Stage Backdrop (Image 5 & 98a07c Parity):
+            // Upper half: Warm terracotta canyon wall (y = 0..320)
+            DrawRectangle(0, 0, (int)scrW, 320, Color{ 186, 108, 92, 255 });
+            for (int i = 0; i < 7; i++) {
+                float strataY = 45.0f + i * 42.0f;
+                DrawLineEx(Vector2{ 0.0f, strataY }, Vector2{ scrW, strataY + 14.0f }, 2.5f, Color{ 198, 118, 100, 180 });
+                DrawLineEx(Vector2{ 0.0f, strataY + 8.0f }, Vector2{ scrW, strataY + 22.0f }, 1.5f, Color{ 174, 98, 84, 180 });
+            }
+
+            // Lower half: Warm sandy / wooden flat floor (y = 320..H)
+            DrawRectangle(0, 320, (int)scrW, (int)scrH - 320, Color{ 198, 150, 116, 255 });
+            DrawLineEx(Vector2{ 0.0f, 320.0f }, Vector2{ scrW, 320.0f }, 3.0f, Color{ 145, 85, 72, 255 });
+            for (int j = 0; j < 6; j++) {
+                float floorY = 360.0f + j * 58.0f;
+                DrawLineEx(Vector2{ 0.0f, floorY }, Vector2{ scrW, floorY }, 1.5f, Color{ 182, 134, 100, 190 });
+            }
+
+            // Side desert pebbles & shrub decoration
+            DrawCircle(95, 332, 16.0f, Color{ 140, 92, 80, 220 });
+            DrawCircle(135, 338, 11.0f, Color{ 160, 110, 95, 220 });
+            DrawCircle(175, 334, 14.0f, Color{ 135, 88, 76, 220 });
+            DrawCircle((int)scrW - 110, 332, 18.0f, Color{ 140, 92, 80, 220 });
+            DrawCircle((int)scrW - 150, 338, 12.0f, Color{ 160, 110, 95, 220 });
+
+            // 3D Standing Pirates on the stage floor (feet right above color cards at y = 345)
             Camera3D lobbyCam = { 0 };
-            lobbyCam.position = Vector3{ 15.55f, 2.5f, 87.0f };
-            lobbyCam.target   = Vector3{ 15.55f, 1.1f, 80.0f };
+            lobbyCam.position = Vector3{ 0.0f, 1.05f, 4.20f };
+            lobbyCam.target   = Vector3{ 0.0f, 0.55f, 0.0f };
             lobbyCam.up       = Vector3{ 0.0f, 1.0f, 0.0f };
-            lobbyCam.fovy     = 42.0f;
+            lobbyCam.fovy     = 36.0f;
             lobbyCam.projection = CAMERA_PERSPECTIVE;
 
             BeginMode3D(lobbyCam);
-                DrawModel(wallModel, trackOffset, 1.0f, WHITE);
-                rlPushMatrix();
-                    float pBob = sinf(runTime * 2.5f) * 0.025f;
-                    rlTranslatef(15.55f, 0.15f + pBob, 80.0f);
-                    rlRotatef(0.0f, 0, 1, 0);
-                    rlScalef(1.25f, 1.25f, 1.25f);
-                    Model* pCurChar = (selectedLobbyChar % 2 == 0) ? &charB : &charA;
-                    DrawModel(*pCurChar, Vector3{0,0,0}, 1.0f, WHITE);
-                rlPopMatrix();
-
-                // If 2+ players connected, show second pirate standing side by side!
-                if (gConnectedPlayers >= 2) {
+                float pBob = sinf(runTime * 2.5f) * 0.02f;
+                if (gConnectedPlayers <= 1) {
+                    // Single pirate standing centered
                     rlPushMatrix();
-                        rlTranslatef(13.65f, 0.15f + pBob, 80.0f);
-                        rlRotatef(0.0f, 0, 1, 0);
-                        rlScalef(1.25f, 1.25f, 1.25f);
+                        rlTranslatef(0.0f, 0.08f + pBob, 0.0f);
+                        rlScalef(1.28f, 1.28f, 1.28f);
+                        Model* pCurChar = (selectedLobbyChar % 2 == 0) ? &charB : &charA;
+                        DrawModel(*pCurChar, Vector3{0,0,0}, 1.0f, WHITE);
+                    rlPopMatrix();
+                } else {
+                    // Two or more pirates standing side by side
+                    rlPushMatrix();
+                        rlTranslatef(-0.95f, 0.08f + pBob, 0.0f);
+                        rlScalef(1.28f, 1.28f, 1.28f);
+                        Model* pCurChar = (selectedLobbyChar % 2 == 0) ? &charB : &charA;
+                        DrawModel(*pCurChar, Vector3{0,0,0}, 1.0f, WHITE);
+                    rlPopMatrix();
+
+                    rlPushMatrix();
+                        rlTranslatef(0.95f, 0.08f + pBob, 0.0f);
+                        rlScalef(1.28f, 1.28f, 1.28f);
                         DrawModel(charA, Vector3{0,0,0}, 1.0f, WHITE);
                     rlPopMatrix();
                 }
             EndMode3D();
 
-            // Status badges above pirate heads
-            Vector2 headScreen = GetWorldToScreen(Vector3{ 15.55f, 2.25f + sinf(runTime * 2.5f) * 0.025f, 80.0f }, lobbyCam);
-            const char* readyBadgeText = gHostReady ? LocText(STR_READY_STATUS) : LocText(STR_WAITING_STATUS);
-            Color readyBadgeCol = gHostReady ? Color{ 34, 197, 94, 255 } : Color{ 250, 204, 21, 255 };
-            Vector2 rbSz = MeasureTextEx(fontUIBold, readyBadgeText, 16, 0.4f);
-            DrawRectangleRounded(Rectangle{ headScreen.x - rbSz.x * 0.5f - 8.0f, headScreen.y - 32.0f, rbSz.x + 16.0f, 26.0f }, 0.4f, 4, Color{ 20, 25, 40, 220 });
-            DrawTextEx(fontUIBold, readyBadgeText, Vector2{ headScreen.x - rbSz.x * 0.5f, headScreen.y - 28.0f }, 16, 0.4f, readyBadgeCol);
+            // Name Markers & Green Checkmarks above pirates
+            Vector2 p1Head = GetWorldToScreen(Vector3{ (gConnectedPlayers <= 1) ? 0.0f : -0.95f, 1.55f, 0.0f }, lobbyCam);
+            if (texMarkerYou.id != 0) {
+                float mw = 120.0f, mh = 38.0f;
+                DrawTexturePro(texMarkerYou, Rectangle{ 0, 0, (float)texMarkerYou.width, (float)texMarkerYou.height },
+                               Rectangle{ p1Head.x - mw * 0.5f, p1Head.y - 20.0f, mw, mh }, Vector2{0,0}, 0.0f, WHITE);
+            } else {
+                DrawSlantedRect(p1Head.x - 55.0f, p1Head.y - 18.0f, 110.0f, 32.0f, 8.0f, Color{ 106, 134, 178, 240 });
+                Vector2 youSz = MeasureTextEx(fontUIBold, LocText(STR_YOU_MARKER), 16, 0.4f);
+                DrawTextEx(fontUIBold, LocText(STR_YOU_MARKER), Vector2{ p1Head.x - youSz.x * 0.5f, p1Head.y - 10.0f }, 16, 0.4f, WHITE);
+            }
+
+            // Green Tik above You if ready
+            if (gHostReady) {
+                if (texIconTikGreen.id != 0) {
+                    DrawTexturePro(texIconTikGreen, Rectangle{ 0, 0, (float)texIconTikGreen.width, (float)texIconTikGreen.height },
+                                   Rectangle{ p1Head.x - 18.0f, p1Head.y - 62.0f, 36.0f, 36.0f }, Vector2{0,0}, 0.0f, WHITE);
+                } else {
+                    DrawCircle((int)p1Head.x, (int)p1Head.y - 44, 16.0f, Color{ 34, 197, 94, 255 });
+                }
+            }
+
+            if (gConnectedPlayers >= 2) {
+                Vector2 p2Head = GetWorldToScreen(Vector3{ 0.95f, 1.55f, 0.0f }, lobbyCam);
+                if (texMarkerPlayer.id != 0) {
+                    float mw = 120.0f, mh = 38.0f;
+                    DrawTexturePro(texMarkerPlayer, Rectangle{ 0, 0, (float)texMarkerPlayer.width, (float)texMarkerPlayer.height },
+                                   Rectangle{ p2Head.x - mw * 0.5f, p2Head.y - 20.0f, mw, mh }, Vector2{0,0}, 0.0f, WHITE);
+                } else {
+                    DrawSlantedRect(p2Head.x - 55.0f, p2Head.y - 18.0f, 110.0f, 32.0f, 8.0f, Color{ 180, 85, 75, 240 });
+                    Vector2 plSz = MeasureTextEx(fontUIBold, LocText(STR_PLAYER_MARKER), 16, 0.4f);
+                    DrawTextEx(fontUIBold, LocText(STR_PLAYER_MARKER), Vector2{ p2Head.x - plSz.x * 0.5f, p2Head.y - 10.0f }, 16, 0.4f, WHITE);
+                }
+
+                if (gClientReady) {
+                    if (texIconTikGreen.id != 0) {
+                        DrawTexturePro(texIconTikGreen, Rectangle{ 0, 0, (float)texIconTikGreen.width, (float)texIconTikGreen.height },
+                                       Rectangle{ p2Head.x - 18.0f, p2Head.y - 62.0f, 36.0f, 36.0f }, Vector2{0,0}, 0.0f, WHITE);
+                    } else {
+                        DrawCircle((int)p2Head.x, (int)p2Head.y - 44, 16.0f, Color{ 34, 197, 94, 255 });
+                    }
+                }
+            }
 
             // Top Center Banner: LOBBY
             float topBannerW = 320.0f, topBannerH = 48.0f;
-            float topBannerX = ((float)GetScreenWidth() - topBannerW) * 0.5f;
+            float topBannerX = (scrW - topBannerW) * 0.5f;
             DrawTrapezoid(topBannerX, 0, topBannerW, topBannerH, 18.0f, Color{ 28, 33, 53, 255 });
             DrawTrapezoidLines(topBannerX, 0, topBannerW, topBannerH, 18.0f, 1.5f, Color{ 70, 80, 110, 255 });
             Vector2 lobSz = MeasureTextEx(fontUIBold, LocText(STR_LOBBY_TITLE), 22, 0.5f);
-            DrawTextEx(fontUIBold, LocText(STR_LOBBY_TITLE), Vector2{ ((float)GetScreenWidth() - lobSz.x) * 0.5f, 12.0f }, 22, 0.5f, WHITE);
-
-            // Top-Left Solo Practice Test button
-            Rectangle soloBtnRec = { 25.0f, 16.0f, 160.0f, 44.0f };
-            bool hovSolo = CheckCollisionPointRec(mousePos, soloBtnRec);
-            DrawSlantedRect(soloBtnRec.x, soloBtnRec.y, soloBtnRec.width, soloBtnRec.height, 10.0f, hovSolo ? Color{ 56, 189, 248, 255 } : Color{ 14, 116, 144, 225 });
-            Vector2 soloSz = MeasureTextEx(fontUIBold, LocText(STR_SOLO_TEST), 14, 0.3f);
-            DrawTextEx(fontUIBold, LocText(STR_SOLO_TEST), Vector2{ soloBtnRec.x + (soloBtnRec.width - soloSz.x) * 0.5f, soloBtnRec.y + 13.0f }, 14, 0.3f, WHITE);
-            if (hovSolo && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                gSoloPracticeMode = true;
-                singlePirateMode = false;
-                currentScreen = SCREEN_GAMEPLAY;
-            }
+            DrawTextEx(fontUIBold, LocText(STR_LOBBY_TITLE), Vector2{ (scrW - lobSz.x) * 0.5f, 12.0f }, 22, 0.5f, WHITE);
 
             // Top Right: Room Code
             float codeBoxW = 210.0f, codeBoxH = 54.0f;
-            float codeBoxX = (float)GetScreenWidth() - codeBoxW - 35.0f;
+            float codeBoxX = scrW - codeBoxW - 35.0f;
             float codeBoxY = 16.0f;
             DrawSlantedRect(codeBoxX, codeBoxY, codeBoxW, codeBoxH, 12.0f, Color{ 22, 30, 48, 220 });
             DrawSlantedRectLines(codeBoxX, codeBoxY, codeBoxW, codeBoxH, 12.0f, 1.2f, Color{ 56, 75, 110, 200 });
             DrawTextEx(fontUI, LocText(STR_YOUR_CODE), Vector2{ codeBoxX + 22.0f, codeBoxY + 8.0f }, 11, 0.3f, Color{ 160, 175, 200, 255 });
-            DrawTextEx(fontUIBold, "8HF78N", Vector2{ codeBoxX + 22.0f, codeBoxY + 24.0f }, 22, 0.5f, Color{ 175, 255, 45, 255 });
-            if (texIconCopy.id != 0) {
-                DrawTexturePro(texIconCopy, Rectangle{ 0, 0, (float)texIconCopy.width, (float)texIconCopy.height },
-                               Rectangle{ codeBoxX + codeBoxW - 38.0f, codeBoxY + 24.0f, 20.0f, 20.0f }, Vector2{0,0}, 0.0f, Color{ 175, 255, 45, 255 });
-            }
+            DrawTextEx(fontUIBold, "8HF78N", Vector2{ codeBoxX + 22.0f, codeBoxY + 24.0f }, 20, 0.4f, Color{ 52, 235, 120, 255 });
 
-            // 4 Character Cards
-            float cardW = 90.0f, cardH = 96.0f, cardGap = 16.0f;
-            float startCardX = ((float)GetScreenWidth() - (4 * cardW + 3 * cardGap)) * 0.5f;
-            float cardY = (float)GetScreenHeight() * 0.50f;
+            // 4 Character Color Cards (y = 358, h = 76)
+            float cardW = 76.0f, cardH = 76.0f, cardGap = 16.0f;
+            float totalCardsW = 4 * cardW + 3 * cardGap;
+            float startCardsX = (scrW - totalCardsW) * 0.5f;
+            float cardsY = 358.0f;
 
             for (int c = 0; c < 4; c++) {
-                Rectangle cRec = { startCardX + c * (cardW + cardGap), cardY, cardW, cardH };
-                bool isHov = CheckCollisionPointRec(mousePos, cRec);
+                Rectangle cRec = { startCardsX + c * (cardW + cardGap), cardsY, cardW, cardH };
+                bool hovC = CheckCollisionPointRec(mousePos, cRec);
                 bool isSel = (selectedLobbyChar == c);
 
-                DrawRectangleRounded(cRec, 0.12f, 4, Color{ 245, 248, 252, 255 });
-                if (texLobbyCards[c].id != 0) {
-                    DrawTexturePro(texLobbyCards[c], Rectangle{ 0, 0, (float)texLobbyCards[c].width, (float)texLobbyCards[c].height },
-                                   Rectangle{ cRec.x + 8.0f, cRec.y + 6.0f, cardW - 16.0f, cardH - 12.0f }, Vector2{0,0}, 0.0f, WHITE);
-                }
+                DrawRectangleRounded(cRec, 0.18f, 4, WHITE);
                 if (isSel) {
-                    DrawRectangleRoundedLinesEx(cRec, 0.12f, 4, 3.5f, Color{ 238, 52, 132, 255 });
-                } else if (isHov) {
-                    DrawRectangleRoundedLinesEx(cRec, 0.12f, 4, 2.0f, Color{ 56, 189, 248, 255 });
+                    DrawRectangleRoundedLinesEx(cRec, 0.18f, 4, 3.5f, Color{ 238, 52, 132, 255 });
+                } else if (hovC) {
+                    DrawRectangleRoundedLinesEx(cRec, 0.18f, 4, 2.0f, Color{ 245, 158, 11, 240 });
                 }
 
-                if (isHov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                if (texLobbyCards[c].id != 0) {
+                    DrawTexturePro(texLobbyCards[c], Rectangle{ 0, 0, (float)texLobbyCards[c].width, (float)texLobbyCards[c].height },
+                                   Rectangle{ cRec.x + 6, cRec.y + 6, cardW - 12, cardH - 12 }, Vector2{0,0}, 0.0f, WHITE);
+                }
+
+                if (hovC && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                     selectedLobbyChar = c;
                 }
             }
-            if (IsKeyPressed(KEY_A) || IsKeyPressed(KEY_LEFT))  selectedLobbyChar = (selectedLobbyChar + 3) % 4;
-            if (IsKeyPressed(KEY_D) || IsKeyPressed(KEY_RIGHT)) selectedLobbyChar = (selectedLobbyChar + 1) % 4;
 
-            // Mode Selector
-            float modeBarW = 540.0f, modeBarH = 34.0f;
-            float modeBarX = ((float)GetScreenWidth() - modeBarW) * 0.5f;
-            float modeBarY = cardY + cardH + 16.0f;
-            DrawSlantedRect(modeBarX, modeBarY, modeBarW, modeBarH, 10.0f, Color{ 126, 114, 228, 255 });
-            Vector2 smSz = MeasureTextEx(fontUIBold, LocText(STR_SELECT_MODE), 15, 0.4f);
-            DrawTextEx(fontUIBold, LocText(STR_SELECT_MODE), Vector2{ ((float)GetScreenWidth() - smSz.x) * 0.5f, modeBarY + 8.0f }, 15, 0.4f, WHITE);
+            // Section: SELECT MODE (y = 452)
+            float smBarW = 285.0f, smBarH = 42.0f;
+            float smBarX = (scrW - smBarW) * 0.5f;
+            DrawSlantedRect(smBarX, 450.0f, smBarW, smBarH, 12.0f, Color{ 126, 114, 228, 255 });
+            Vector2 smSz = MeasureTextEx(fontUIBold, LocText(STR_SELECT_MODE), 18, 0.4f);
+            DrawTextEx(fontUIBold, LocText(STR_SELECT_MODE), Vector2{ (scrW - smSz.x) * 0.5f, 460.0f }, 18, 0.4f, WHITE);
 
-            float mCardW = 165.0f, mCardH = 75.0f, mCardGap = 15.0f;
-            float mStartX = ((float)GetScreenWidth() - (3 * mCardW + 2 * mCardGap)) * 0.5f;
-            float mCardsY = modeBarY + modeBarH + 6.0f;
+            // Mode thumbnails box
+            float modeBoxW = 540.0f, modeBoxH = 110.0f;
+            float modeBoxX = (scrW - modeBoxW) * 0.5f;
+            DrawRectangleRounded(Rectangle{ modeBoxX, 498.0f, modeBoxW, modeBoxH }, 0.12f, 4, WHITE);
 
-            Texture2D modeTexs[3] = { texModeFartRun, texModeTeamRace, texModeRaftRumble };
-            for (int mi = 0; mi < 3; mi++) {
-                Rectangle mcRec = { mStartX + mi * (mCardW + mCardGap), mCardsY, mCardW, mCardH };
-                DrawRectangleRounded(mcRec, 0.10f, 4, Color{ 240, 243, 250, 255 });
-                if (modeTexs[mi].id != 0) {
-                    Color mTint = (mi == 0) ? WHITE : Color{ 160, 160, 170, 180 };
-                    DrawTexturePro(modeTexs[mi], Rectangle{ 0, 0, (float)modeTexs[mi].width, (float)modeTexs[mi].height },
-                                   Rectangle{ mcRec.x + 4.0f, mcRec.y + 4.0f, mCardW - 8.0f, mCardH - 8.0f }, Vector2{0,0}, 0.0f, mTint);
-                }
-                if (mi == 0) {
-                    DrawRectangleRoundedLinesEx(mcRec, 0.10f, 4, 2.5f, Color{ 238, 52, 132, 255 });
+            // 3 Mode Thumbnails
+            float mThumbW = 160.0f, mThumbH = 94.0f;
+            Texture2D mThumbs[3] = { texModeFartRun, texModeTeamRace, texModeRaftRumble };
+            const LocalizedString mTitles[3] = { STR_MODE_FARTRUN, STR_MODE_TEAMRACE, STR_MODE_RAFTRUMBLE };
+
+            for (int m = 0; m < 3; m++) {
+                Rectangle mRec = { modeBoxX + 10.0f + m * (mThumbW + 15.0f), 506.0f, mThumbW, mThumbH };
+                bool isM0 = (m == 0);
+
+                if (mThumbs[m].id != 0) {
+                    DrawTexturePro(mThumbs[m], Rectangle{ 0, 0, (float)mThumbs[m].width, (float)mThumbs[m].height },
+                                   mRec, Vector2{0,0}, 0.0f, isM0 ? WHITE : Color{ 160, 160, 160, 200 });
                 } else {
-                    DrawRectangleRounded(Rectangle{ mcRec.x, mcRec.y + mCardH - 20.0f, mCardW, 20.0f }, 0.1f, 4, Color{ 40, 45, 60, 200 });
-                    Vector2 csSz = MeasureTextEx(fontUIBold, "Coming Soon", 11, 0.3f);
-                    DrawTextEx(fontUIBold, "Coming Soon", Vector2{ mcRec.x + (mCardW - csSz.x) * 0.5f, mcRec.y + mCardH - 16.0f }, 11, 0.3f, Color{ 200, 210, 225, 255 });
+                    DrawRectangleRec(mRec, isM0 ? Color{ 45, 125, 220, 255 } : Color{ 80, 85, 100, 255 });
+                }
+
+                if (isM0) {
+                    DrawRectangleLinesEx(mRec, 2.5f, Color{ 238, 52, 132, 255 });
+                } else {
+                    DrawRectangle(mRec.x, mRec.y + mRec.height - 28.0f, mRec.width, 28.0f, Color{ 20, 25, 35, 190 });
+                    DrawTextEx(fontUIBold, LocText(STR_COMING_SOON), Vector2{ mRec.x + 35.0f, mRec.y + mRec.height - 22.0f }, 13, 0.3f, Color{ 230, 235, 245, 255 });
                 }
             }
 
-            // Bottom-Left: INVITE FRIENDS Button (v8.1.0: Active & opens modal popup!)
-            float invW = 210.0f, invH = 46.0f;
-            float invX = 35.0f, invY = (float)GetScreenHeight() - 115.0f;
-            Rectangle invRec = { invX, invY, invW, invH };
-            bool hovInv = CheckCollisionPointRec(mousePos, invRec);
-            DrawSlantedRect(invX, invY, invW, invH, 12.0f, hovInv ? Color{ 24, 160, 235, 255 } : Color{ 14, 138, 206, 255 });
-            Vector2 invSz = MeasureTextEx(fontUIBold, LocText(STR_INVITE_FRIENDS), 15, 0.4f);
-            DrawTextEx(fontUIBold, LocText(STR_INVITE_FRIENDS), Vector2{ invX + (invW - invSz.x) * 0.5f, invY + 12.0f }, 15, 0.4f, Color{ 255, 235, 60, 255 });
+            // Bottom Buttons (Matching Image 5 exactly)
+            // 1. Left: INVITE FRIENDS
+            Rectangle invBtnRec = { 58.0f, scrH - 68.0f, 260.0f, 56.0f };
+            bool hovInv = CheckCollisionPointRec(mousePos, invBtnRec);
+            DrawSlantedRect(invBtnRec.x, invBtnRec.y, invBtnRec.width, invBtnRec.height, 12.0f, hovInv ? Color{ 18, 160, 235, 255 } : Color{ 14, 138, 206, 255 });
+            Vector2 invSz = MeasureTextEx(fontUIBold, LocText(STR_INVITE_FRIENDS), 18, 0.4f);
+            DrawTextEx(fontUIBold, LocText(STR_INVITE_FRIENDS), Vector2{ invBtnRec.x + (invBtnRec.width - invSz.x) * 0.5f, invBtnRec.y + 17.0f }, 18, 0.4f, Color{ 255, 225, 60, 255 });
             if (hovInv && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                SetClipboardText("Fart Together LAN Room Code: 8HF78N (UDP Port 7777)");
+                SetClipboardText("8HF78N");
                 gShowInviteModal = true;
-                editorMsg = (gCurrentLanguage == LANG_AR) ? (const char*)u8"تم نسخ رمز الغرفة للحافظة!" : "Room code copied to clipboard!";
-                editorMsgTimer = 2.5f;
             }
 
-            // Bottom Bar
-            float lBotH = 54.0f;
-            float lBotY = (float)GetScreenHeight() - lBotH;
-            DrawRectangle(0, (int)lBotY, GetScreenWidth(), (int)lBotH, Color{ 18, 24, 38, 255 });
+            // 2. Center: READY <-> UNREADY White Trapezoid Button
+            float readyBtnW = 270.0f, readyBtnH = 64.0f;
+            float readyBtnX = (scrW - readyBtnW) * 0.5f;
+            float readyBtnY = scrH - 64.0f;
+            Rectangle rdyClickRec = { readyBtnX, readyBtnY, readyBtnW, readyBtnH };
+            bool hovRdy = CheckCollisionPointRec(mousePos, rdyClickRec);
 
-            Rectangle btnLeaveRec = { 25.0f, lBotY + 10.0f, 130.0f, 34.0f };
-            bool hovLeave = CheckCollisionPointRec(mousePos, btnLeaveRec);
-            DrawSlantedRect(btnLeaveRec.x, btnLeaveRec.y, btnLeaveRec.width, btnLeaveRec.height, 10.0f, hovLeave ? Color{ 45, 55, 75, 255 } : Color{ 28, 36, 52, 255 });
-            DrawTextEx(fontUIBold, LocText(STR_ESC_LEAVE), Vector2{ btnLeaveRec.x + 16.0f, btnLeaveRec.y + 8.0f }, 13, 0.3f, WHITE);
-            if ((hovLeave && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_ESCAPE)) {
-                currentScreen = SCREEN_MAIN_MENU;
+            DrawTrapezoid(readyBtnX, readyBtnY, readyBtnW, readyBtnH, 18.0f, hovRdy ? Color{ 245, 245, 250, 255 } : WHITE);
+            DrawTrapezoidLines(readyBtnX, readyBtnY, readyBtnW, readyBtnH, 18.0f, 1.8f, Color{ 200, 210, 230, 255 });
+
+            bool myReady = (LanGetRole() == LAN_HOST) ? gHostReady : gClientReady;
+            if (!myReady) {
+                // [SPACE] READY (in pink-red)
+                if (texKeySpace.id != 0) {
+                    DrawTexturePro(texKeySpace, Rectangle{ 0, 0, (float)texKeySpace.width, (float)texKeySpace.height },
+                                   Rectangle{ readyBtnX + 38.0f, readyBtnY + 18.0f, 44.0f, 26.0f }, Vector2{0,0}, 0.0f, WHITE);
+                }
+                DrawTextEx(fontUIBold, LocText(STR_READY_WORD), Vector2{ readyBtnX + 96.0f, readyBtnY + 18.0f }, 24, 0.5f, Color{ 225, 82, 98, 255 });
+            } else {
+                // [X] UNREADY (in dark navy)
+                DrawRectangle(readyBtnX + 42.0f, readyBtnY + 18.0f, 28.0f, 28.0f, Color{ 28, 33, 53, 255 });
+                DrawTextEx(fontUIBold, "X", Vector2{ readyBtnX + 49.0f, readyBtnY + 21.0f }, 20, 0.4f, WHITE);
+                DrawTextEx(fontUIBold, LocText(STR_UNREADY_BTN), Vector2{ readyBtnX + 85.0f, readyBtnY + 18.0f }, 22, 0.5f, Color{ 28, 33, 53, 255 });
             }
-
-            DrawTextEx(fontUI, LocText(STR_SELECT_CHAR), Vector2{ (float)GetScreenWidth() - 240.0f, lBotY + 18.0f }, 12, 0.3f, Color{ 160, 175, 200, 255 });
-
-            // Strict Ready Rule Alert (v8.1.0)
-            if (gConnectedPlayers < 2) {
-                Vector2 warnSz = MeasureTextEx(fontUIBold, LocText(STR_MIN_PLAYERS_ALERT), 14, 0.4f);
-                float warnX = ((float)GetScreenWidth() - warnSz.x) * 0.5f;
-                DrawRectangleRounded(Rectangle{ warnX - 16.0f, lBotY - 32.0f, warnSz.x + 32.0f, 26.0f }, 0.4f, 4, Color{ 220, 38, 38, 220 });
-                DrawTextEx(fontUIBold, LocText(STR_MIN_PLAYERS_ALERT), Vector2{ warnX, lBotY - 27.0f }, 14, 0.4f, WHITE);
-            }
-
-            // Prominent Ready Button
-            float rdyW = 270.0f, rdyH = 62.0f;
-            float rdyX = ((float)GetScreenWidth() - rdyW) * 0.5f;
-            float rdyY = (float)GetScreenHeight() - rdyH;
-            Rectangle rdyHit = { rdyX, rdyY, rdyW, rdyH };
-            bool hovRdy = CheckCollisionPointRec(mousePos, rdyHit);
-
-            Color rdyBg = gHostReady ? Color{ 34, 197, 94, 255 } : (hovRdy ? Color{ 255, 235, 240, 255 } : WHITE);
-            DrawTrapezoid(rdyX, rdyY, rdyW, rdyH, 20.0f, rdyBg);
-            DrawTrapezoidLines(rdyX, rdyY, rdyW, rdyH, 20.0f, 2.5f, Color{ 238, 45, 95, 255 });
-
-            const char* rdyBtnStr = gHostReady ? LocText(STR_READY_STATUS) : LocText(STR_READY_BTN);
-            Vector2 rdySz = MeasureTextEx(fontUIBold, rdyBtnStr, 22, 0.5f);
-            DrawTextEx(fontUIBold, rdyBtnStr, Vector2{ ((float)GetScreenWidth() - rdySz.x) * 0.5f, rdyY + 18.0f }, 22, 0.5f, gHostReady ? WHITE : Color{ 238, 45, 95, 255 });
 
             if ((hovRdy && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_SPACE)) {
-                gHostReady = !gHostReady;
-                if (gConnectedPlayers >= 2 && gHostReady && gClientReady) {
-                    singlePirateMode = false;
-                    currentScreen = SCREEN_GAMEPLAY;
-                } else if (gConnectedPlayers < 2) {
-                    editorMsg = LocText(STR_MIN_PLAYERS_ALERT);
-                    editorMsgTimer = 3.0f;
+                if (LanGetRole() == LAN_HOST) gHostReady = !gHostReady;
+                else gClientReady = !gClientReady;
+            }
+
+            // 3. Right: Yellow Slanted START GAME Button (Host Only, enabled when 2+ players all-ready)
+            if (LanGetRole() == LAN_HOST) {
+                Rectangle startBtnRec = { scrW - 325.0f, scrH - 68.0f, 265.0f, 56.0f };
+                bool hovStart = CheckCollisionPointRec(mousePos, startBtnRec);
+                DrawSlantedRect(startBtnRec.x, startBtnRec.y, startBtnRec.width, startBtnRec.height, 12.0f, hovStart ? Color{ 255, 235, 65, 255 } : Color{ 246, 224, 52, 255 });
+
+                if (texIconKEnter.id != 0) {
+                    DrawTexturePro(texIconKEnter, Rectangle{ 0, 0, (float)texIconKEnter.width, (float)texIconKEnter.height },
+                                   Rectangle{ startBtnRec.x + 22.0f, startBtnRec.y + 14.0f, 28.0f, 28.0f }, Vector2{0,0}, 0.0f, WHITE);
+                }
+                Vector2 sgSz = MeasureTextEx(fontUIBold, LocText(STR_START_GAME_BTN), 20, 0.4f);
+                DrawTextEx(fontUIBold, LocText(STR_START_GAME_BTN), Vector2{ startBtnRec.x + 60.0f, startBtnRec.y + 16.0f }, 20, 0.4f, Color{ 238, 52, 132, 255 });
+
+                if ((hovStart && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_ENTER)) {
+                    if (gConnectedPlayers >= 2 && gHostReady && gClientReady) {
+                        currentScreen = SCREEN_GAMEPLAY;
+                    } else {
+                        editorMsg = LocText(STR_MIN_PLAYERS_ALERT);
+                        editorMsgTimer = 2.5f;
+                    }
                 }
             }
 
-            // Invite Modal Popup
-            if (gShowInviteModal) {
-                DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{ 10, 15, 25, 210 });
-                float mBoxW = 460.0f, mBoxH = 260.0f;
-                float mBoxX = ((float)GetScreenWidth() - mBoxW) * 0.5f;
-                float mBoxY = ((float)GetScreenHeight() - mBoxH) * 0.5f;
-                DrawRectangleRounded(Rectangle{ mBoxX, mBoxY, mBoxW, mBoxH }, 0.08f, 6, Color{ 22, 30, 48, 255 });
-                DrawRectangleRoundedLinesEx(Rectangle{ mBoxX, mBoxY, mBoxW, mBoxH }, 0.08f, 6, 2.0f, Color{ 56, 189, 248, 255 });
-
-                DrawTextEx(fontUIBold, LocText(STR_INVITE_FRIENDS), Vector2{ mBoxX + 30.0f, mBoxY + 24.0f }, 22, 0.4f, WHITE);
-                DrawTextEx(fontUI, "LAN UDP Auto-Discovery: Active (Port 7778)", Vector2{ mBoxX + 30.0f, mBoxY + 60.0f }, 14, 0.3f, Color{ 74, 222, 128, 255 });
-                DrawTextEx(fontUI, "Friends on the same Wi-Fi see your room automatically!", Vector2{ mBoxX + 30.0f, mBoxY + 84.0f }, 13, 0.3f, Color{ 203, 213, 225, 255 });
-
-                Rectangle codeRec = { mBoxX + 30.0f, mBoxY + 115.0f, 400.0f, 48.0f };
-                DrawRectangleRounded(codeRec, 0.1f, 4, Color{ 15, 20, 32, 255 });
-                DrawTextEx(fontUIBold, "ROOM CODE: 8HF78N  (Port: 7777)", Vector2{ codeRec.x + 20.0f, codeRec.y + 14.0f }, 18, 0.4f, Color{ 175, 255, 45, 255 });
-
-                Rectangle copyBtn = { mBoxX + 30.0f, mBoxY + 185.0f, 190.0f, 46.0f };
-                bool hovCp = CheckCollisionPointRec(mousePos, copyBtn);
-                DrawSlantedRect(copyBtn.x, copyBtn.y, copyBtn.width, copyBtn.height, 10.0f, hovCp ? Color{ 34, 197, 94, 255 } : Color{ 22, 163, 74, 255 });
-                DrawTextEx(fontUIBold, "Copy Code", Vector2{ copyBtn.x + 48.0f, copyBtn.y + 14.0f }, 15, 0.4f, WHITE);
-                if (hovCp && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                    SetClipboardText("8HF78N");
-                    editorMsg = "Code Copied!";
-                    editorMsgTimer = 2.0f;
-                }
-
-                Rectangle closeBtn = { mBoxX + mBoxW - 220.0f, mBoxY + 185.0f, 190.0f, 46.0f };
-                bool hovCl = CheckCollisionPointRec(mousePos, closeBtn);
-                DrawSlantedRect(closeBtn.x, closeBtn.y, closeBtn.width, closeBtn.height, 10.0f, hovCl ? Color{ 239, 68, 68, 255 } : Color{ 185, 28, 28, 255 });
-                DrawTextEx(fontUIBold, "Close", Vector2{ closeBtn.x + 68.0f, closeBtn.y + 14.0f }, 15, 0.4f, WHITE);
-                if (hovCl && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                    gShowInviteModal = false;
-                }
+            // Alert banner if host clicks start before 2 players ready
+            if (editorMsgTimer > 0.0f && !editorMsg.empty()) {
+                float abW = 560.0f, abH = 38.0f;
+                DrawTrapezoid((scrW - abW) * 0.5f, scrH - 110.0f, abW, abH, 12.0f, Color{ 220, 38, 38, 235 });
+                Vector2 emSz = MeasureTextEx(fontUIBold, editorMsg.c_str(), 16, 0.3f);
+                DrawTextEx(fontUIBold, editorMsg.c_str(), Vector2{ (scrW - emSz.x) * 0.5f, scrH - 101.0f }, 16, 0.3f, WHITE);
             }
 
+            // Bottom-Left [ESC] LEAVE
+            DrawTextEx(fontUIBold, LocText(STR_ESC_LEAVE), Vector2{ 25.0f, scrH - 95.0f }, 14, 0.3f, Color{ 220, 230, 245, 200 });
+            if (IsKeyPressed(KEY_ESCAPE)) {
+                LanShutdown();
+                currentScreen = SCREEN_MAIN_MENU;
+            }
         } else if (currentScreen == SCREEN_FIND_LOBBY) {
             ClearBackground(Color{ 18, 22, 34, 255 });
             if (texMenuOasisClean.id != 0) {
@@ -5717,7 +5696,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             }
 
             // Title: SETTINGS
-            DrawTextEx(fontUIBold, "SETTINGS", Vector2{ 220.0f, 38.0f }, 38, 0.6f, WHITE);
+            DrawTextEx(fontUIBold, LocText(STR_SETTINGS), Vector2{ 220.0f, 38.0f }, 38, 0.6f, WHITE);
 
             // 4 Slanted Tabs
             static int activeSettTab = gTestSettingsTab; // 0=GENERAL, 1=GRAPHICS, 2=AUDIO, 3=CONTROLS
@@ -5776,7 +5755,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 });
 
                 // Row 1: Camera Shake
-                DrawSettingRow(1, "Camera Shake", [&](Rectangle rRec, float ry, bool isHov) {
+                DrawSettingRow(1, LocText(STR_CAM_SHAKE_ROW), [&](Rectangle rRec, float ry, bool isHov) {
                     Rectangle bSw = { rRec.x + rRec.width - 180.0f, ry + 16.0f, 140.0f, 34.0f };
                     bool hovSw = CheckCollisionPointRec(mousePos, bSw);
                     DrawSlantedRect(bSw.x, bSw.y, bSw.width, bSw.height, 8.0f, Color{ 220, 225, 235, 255 });
@@ -5794,7 +5773,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 });
 
                 // Row 2: Max Camera Distance
-                DrawSettingRow(2, "Max Camera Distance", [&](Rectangle rRec, float ry, bool isHov) {
+                DrawSettingRow(2, LocText(STR_MAX_CAM_DIST_ROW), [&](Rectangle rRec, float ry, bool isHov) {
                     float sldX = rRec.x + rRec.width - 340.0f;
                     DrawTextEx(fontUIBold, TextFormat("%.0fm", gSettings.maxCamDist), Vector2{ sldX - 55.0f, ry + 22.0f }, 15, 0.3f, Color{ 30, 35, 55, 255 });
                     Rectangle sldBar = { sldX, ry + 27.0f, 280.0f, 10.0f };
@@ -5809,7 +5788,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 });
 
                 // Row 3: Show FPS Counter (F5)
-                DrawSettingRow(3, "Show FPS Counter (F5)", [&](Rectangle rRec, float ry, bool isHov) {
+                DrawSettingRow(2, LocText(STR_SHOW_FPS_ROW), [&](Rectangle rRec, float ry, bool isHov) {
                     Rectangle bSw = { rRec.x + rRec.width - 180.0f, ry + 16.0f, 140.0f, 34.0f };
                     bool hovSw = CheckCollisionPointRec(mousePos, bSw);
                     DrawSlantedRect(bSw.x, bSw.y, bSw.width, bSw.height, 8.0f, Color{ 220, 225, 235, 255 });
@@ -5849,7 +5828,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 DrawAudioSlider(3, "Fart & Gas Volume", gSettings.fartVolume);
 
             } else if (activeSettTab == 0) { // GENERAL
-                DrawSettingRow(0, "Device Profile", [&](Rectangle rRec, float ry, bool isHov) {
+                DrawSettingRow(1, LocText(STR_DEVICE_PROFILE), [&](Rectangle rRec, float ry, bool isHov) {
                     const char* dNames[3] = { "<  Auto-Detect  >", "<  PC (Keyboard/Mouse)  >", "<  Mobile (Touchscreen)  >" };
                     Rectangle bD = { rRec.x + rRec.width - 260.0f, ry + 16.0f, 230.0f, 34.0f };
                     bool hovD = CheckCollisionPointRec(mousePos, bD);
@@ -5862,7 +5841,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                     }
                 });
 
-                DrawSettingRow(1, "Invert Y Axis", [&](Rectangle rRec, float ry, bool isHov) {
+                DrawSettingRow(2, LocText(STR_INVERT_Y_ROW), [&](Rectangle rRec, float ry, bool isHov) {
                     Rectangle bSw = { rRec.x + rRec.width - 180.0f, ry + 16.0f, 140.0f, 34.0f };
                     bool hovSw = CheckCollisionPointRec(mousePos, bSw);
                     DrawSlantedRect(bSw.x, bSw.y, bSw.width, bSw.height, 8.0f, Color{ 220, 225, 235, 255 });
@@ -5879,7 +5858,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                     }
                 });
 
-                DrawSettingRow(2, "Level & Obstacle Editor", [&](Rectangle rRec, float ry, bool isHov) {
+                DrawSettingRow(3, LocText(STR_LEVEL_EDITOR_ROW), [&](Rectangle rRec, float ry, bool isHov) {
                     Rectangle bEd = { rRec.x + rRec.width - 250.0f, ry + 14.0f, 220.0f, 38.0f };
                     bool hovEd = CheckCollisionPointRec(mousePos, bEd);
                     DrawSlantedRect(bEd.x, bEd.y, bEd.width, bEd.height, 8.0f, hovEd ? Color{ 34, 197, 94, 255 } : Color{ 22, 163, 74, 255 });
@@ -5992,9 +5971,9 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             Rectangle bPriv = { 200.0f, botLinkY, 150.0f, 32.0f };
             Rectangle bTerms = { 370.0f, botLinkY, 150.0f, 32.0f };
             DrawSlantedRect(bPriv.x, bPriv.y, bPriv.width, bPriv.height, 8.0f, Color{ 252, 252, 255, 230 });
-            DrawTextEx(fontUIBold, "Privacy Policy", Vector2{ bPriv.x + 22.0f, bPriv.y + 8.0f }, 13, 0.3f, Color{ 80, 70, 160, 255 });
+            DrawTextEx(fontUIBold, LocText(STR_PRIVACY_POLICY), Vector2{ bPriv.x + 22.0f, bPriv.y + 8.0f }, 13, 0.3f, Color{ 80, 70, 160, 255 });
             DrawSlantedRect(bTerms.x, bTerms.y, bTerms.width, bTerms.height, 8.0f, Color{ 252, 252, 255, 230 });
-            DrawTextEx(fontUIBold, "Terms of Service", Vector2{ bTerms.x + 18.0f, bTerms.y + 8.0f }, 13, 0.3f, Color{ 80, 70, 160, 255 });
+            DrawTextEx(fontUIBold, LocText(STR_TERMS_OF_SERVICE), Vector2{ bTerms.x + 18.0f, bTerms.y + 8.0f }, 13, 0.3f, Color{ 80, 70, 160, 255 });
         }
         EndDrawing();
 
@@ -6031,6 +6010,10 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
     UnloadTexture(texLogoSplash);
     UnloadTexture(texMenuBg);
     UnloadTexture(texMarkerYou);
+    UnloadTexture(texIconTikGreen);
+    UnloadTexture(texMarkerPlayer);
+    UnloadTexture(texKeySpace);
+    UnloadTexture(texIconKEnter);
     UnloadTexture(texModeFartRun);
     UnloadTexture(texModeTeamRace);
     UnloadTexture(texModeRaftRumble);

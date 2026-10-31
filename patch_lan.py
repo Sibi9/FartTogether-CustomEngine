@@ -37,3 +37,4 @@ bool gSoloPracticeMode = false;
     print("Updated LanNetwork.cpp with ready variables")
 
 print("LAN files patched successfully!")
+

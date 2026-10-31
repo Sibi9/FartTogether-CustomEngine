@@ -78,3 +78,4 @@ for k, ar_text, en_text in words:
 
 pathlib.Path('CustomEngine/native/Localization.h').write_text(header_code, encoding='utf-8')
 print('Generated Localization.h successfully!')
+

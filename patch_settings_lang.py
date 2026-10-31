@@ -28,3 +28,4 @@ new_subtitles = '''                DrawSettingRow(3, LocText(STR_LANGUAGE_LBL), 
 text = text.replace(old_subtitles, new_subtitles)
 engine_path.write_text(text, encoding="utf-8")
 print("Settings language option patched successfully!")
+

@@ -4,3 +4,4 @@ for /f "usebackq tokens=*" %%i in (`"C:\Program Files (x86)\Microsoft Visual Stu
 )
 cl.exe /nologo /O2 /MD /I CustomEngine\vendor\raylib-6.2_win64_msvc16\include CustomEngine\test_ar_font.cpp /Fe:CustomEngine\test_ar_font.exe /link /LIBPATH:CustomEngine\vendor\raylib-6.2_win64_msvc16\lib raylib.lib winmm.lib gdi32.lib user32.lib shell32.lib opengl32.lib
 CustomEngine\test_ar_font.exe
+
