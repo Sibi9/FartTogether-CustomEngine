@@ -1265,137 +1265,259 @@ static Vector3 GetObstacleHazardWorldPos(const LevelEntity& ent) {
 static ObstacleModels gObsModels;
 static const char* LEVEL_LAYOUT_PATH = "level_layout.json";
 
-static bool CheckObstacleOBBCollision(Vector3 raftPos, const LevelEntity& ent, Vector3 animPos, float animYawDeg, float animPitchDeg, float animRollDeg) {
-    if (ent.type == ENT_TREE_JUNGLE || ent.type == ENT_GUST || ent.type == ENT_ROCK_1 || ent.type == ENT_ROCK_2 || ent.type == ENT_OBS_F18 || ent.type == ENT_CHECKPOINT) return false;
-    if (ent.type >= ENT_COL_SQUARE) return false; // Handled by custom collision shapes
+// Plan v7.3: Exact 3D Triangle Mesh Collision Architecture ("تقنية المثلثات")
+struct Tri3D {
+    Vector3 v0, v1, v2;
+};
 
-    const float boatR = 0.88f;
-    float s = (ent.scale > 0.01f) ? ent.scale : 1.0f;
+struct ObstacleTriMesh {
+    std::vector<Tri3D> triangles;
+    BoundingBox localBBox;
+    float localRadius = 0.0f;
+};
 
-    // 1. Spanned swinging roller gates (C1 & B2): two arms mounted on canyon walls, horizontal spiked roller across canal
-    if (ent.type == ENT_OBS_C1 || ent.type == ENT_OBS_B2) {
-        float fX = (ent.flipX != 0) ? (float)ent.flipX : 1.0f;
-        float fY = (ent.flipY != 0) ? (float)ent.flipY : 1.0f;
-        float fZ = (ent.flipZ != 0) ? (float)ent.flipZ : 1.0f;
+static ObstacleTriMesh gObsTriMeshes[ENT_COUNT];
+static ObstacleTriMesh gObsTriMeshF10_Arms;
+static ObstacleTriMesh gObsTriMeshF10_Hammer;
 
-        float halfW   = (ent.type == ENT_OBS_C1) ? (2.75f * s) : (5.25f * s);
-        float armLen  = (ent.type == ENT_OBS_C1) ? (3.70f * s) : (4.40f * s);
-        float hRadius = (ent.type == ENT_OBS_C1) ? (0.75f * s) : (0.80f * s);
+// Mathematically exact closest point on a 3D triangle to point p (Christer Ericson RTCD)
+static inline Vector3 ClosestPointOnTriangle(Vector3 p, Vector3 a, Vector3 b, Vector3 c) {
+    Vector3 ab = Vector3Subtract(b, a);
+    Vector3 ac = Vector3Subtract(c, a);
+    Vector3 ap = Vector3Subtract(p, a);
 
-        float radP = animPitchDeg * DEG2RAD;
-        float radY = animYawDeg   * DEG2RAD;
+    float d1 = Vector3DotProduct(ab, ap);
+    float d2 = Vector3DotProduct(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) return a; // Vertex A
 
-        // In local obstacle space:
-        // When pitch is 0: roller is lowered near water at local Y = 0, Z = +armLen
-        // When pitch is -90 deg: roller is swung high in the air at local Y = +armLen, Z = 0
-        float locY = -armLen * sinf(radP) * fY;
-        float locZ =  armLen * cosf(radP) * fZ;
+    Vector3 bp = Vector3Subtract(p, b);
+    float d3 = Vector3DotProduct(ab, bp);
+    float d4 = Vector3DotProduct(ac, bp);
+    if (d3 >= 0.0f && d4 <= d3) return b; // Vertex B
 
-        float worldRollerY = animPos.y + locY;
+    float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+        float v = d1 / (d1 - d3);
+        return Vector3Add(a, Vector3Scale(ab, v)); // Edge AB
+    }
 
-        // Raft sits at raftPos.y (~0.55m); pirates' heads reach up to raftPos.y + 1.25m
-        float rollerBottomY = worldRollerY - hRadius;
-        float rollerTopY    = worldRollerY + hRadius;
-        float boatTopY      = raftPos.y + 1.25f;
-        float boatBottomY   = raftPos.y - 0.25f;
+    Vector3 cp = Vector3Subtract(p, c);
+    float d5 = Vector3DotProduct(ab, cp);
+    float d6 = Vector3DotProduct(ac, cp);
+    if (d6 >= 0.0f && d5 <= d6) return c; // Vertex C
 
-        // When the roller is swung up in the air, the entire canal underneath is safe and open!
-        if (rollerBottomY > boatTopY || rollerTopY < boatBottomY) {
-            return false;
+    float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+        float w = d2 / (d2 - d6);
+        return Vector3Add(a, Vector3Scale(ac, w)); // Edge AC
+    }
+
+    float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+        float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return Vector3Add(b, Vector3Scale(Vector3Subtract(c, b), w)); // Edge BC
+    }
+
+    float denom = 1.0f / (va + vb + vc);
+    float v = vb * denom;
+    float w = vc * denom;
+    return Vector3Add(a, Vector3Add(Vector3Scale(ab, v), Vector3Scale(ac, w))); // Face interior
+}
+
+static void ExtractTriMeshFromModel(const Model& model, ObstacleTriMesh& outMesh) {
+    outMesh.triangles.clear();
+    Vector3 minPt = { 1e9f, 1e9f, 1e9f };
+    Vector3 maxPt = { -1e9f, -1e9f, -1e9f };
+
+    for (int mIdx = 0; mIdx < model.meshCount; mIdx++) {
+        const Mesh& m = model.meshes[mIdx];
+        const float* v = m.vertices;
+        if (!v || m.triangleCount <= 0) continue;
+
+        if (m.indices != nullptr) {
+            for (int t = 0; t < m.triangleCount; t++) {
+                int i0 = m.indices[t * 3 + 0];
+                int i1 = m.indices[t * 3 + 1];
+                int i2 = m.indices[t * 3 + 2];
+                Tri3D tri = {
+                    Vector3{ v[i0*3+0], v[i0*3+1], v[i0*3+2] },
+                    Vector3{ v[i1*3+0], v[i1*3+1], v[i1*3+2] },
+                    Vector3{ v[i2*3+0], v[i2*3+1], v[i2*3+2] }
+                };
+                outMesh.triangles.push_back(tri);
+                minPt = Vector3Min(minPt, tri.v0); minPt = Vector3Min(minPt, tri.v1); minPt = Vector3Min(minPt, tri.v2);
+                maxPt = Vector3Max(maxPt, tri.v0); maxPt = Vector3Max(maxPt, tri.v1); maxPt = Vector3Max(maxPt, tri.v2);
+            }
+        } else {
+            for (int t = 0; t < m.triangleCount; t++) {
+                const float* p = &v[t * 9];
+                Tri3D tri = {
+                    Vector3{ p[0], p[1], p[2] },
+                    Vector3{ p[3], p[4], p[5] },
+                    Vector3{ p[6], p[7], p[8] }
+                };
+                outMesh.triangles.push_back(tri);
+                minPt = Vector3Min(minPt, tri.v0); minPt = Vector3Min(minPt, tri.v1); minPt = Vector3Min(minPt, tri.v2);
+                maxPt = Vector3Max(maxPt, tri.v0); maxPt = Vector3Max(maxPt, tri.v1); maxPt = Vector3Max(maxPt, tri.v2);
+            }
+        }
+    }
+    outMesh.localBBox = BoundingBox{ minPt, maxPt };
+    float r0 = Vector3Length(minPt);
+    float r1 = Vector3Length(maxPt);
+    outMesh.localRadius = fmaxf(r0, r1);
+}
+
+// Tests boat multi-sphere collision against an obstacle's triangles with zero excess margins
+static bool TestBoatAgainstTriMesh(const ObstacleTriMesh& triMesh, const Matrix& mWorld, const Matrix& mInv,
+                                  const Vector3* boatPts, const float* boatRadii, int numPts,
+                                  Vector3* outContactNormal = nullptr) {
+    if (triMesh.triangles.empty()) return false;
+
+    for (int p = 0; p < numPts; p++) {
+        Vector3 pWorld = boatPts[p];
+        float rWorld = boatRadii[p];
+        Vector3 pLoc = Vector3Transform(pWorld, mInv);
+
+        float expR = rWorld * 1.5f;
+        if (pLoc.x < triMesh.localBBox.min.x - expR || pLoc.x > triMesh.localBBox.max.x + expR ||
+            pLoc.y < triMesh.localBBox.min.y - expR || pLoc.y > triMesh.localBBox.max.y + expR ||
+            pLoc.z < triMesh.localBBox.min.z - expR || pLoc.z > triMesh.localBBox.max.z + expR) {
+            continue;
         }
 
-        // When roller is swung down within boat height, check 2D distance to the horizontal roller line segment
-        Vector2 pLeft = {
-            animPos.x + (-halfW * fX * cosf(radY) + locZ * sinf(radY)),
-            animPos.z + ( halfW * fX * sinf(radY) + locZ * cosf(radY))
-        };
-        Vector2 pRight = {
-            animPos.x + ( halfW * fX * cosf(radY) + locZ * sinf(radY)),
-            animPos.z + (-halfW * fX * sinf(radY) + locZ * cosf(radY))
-        };
+        float rWorldSq = rWorld * rWorld;
 
-        Vector2 ptBoat = { raftPos.x, raftPos.z };
-        float distToRoller = DistPointToSegment2D(ptBoat, pLeft, pRight);
+        for (const auto& tri : triMesh.triangles) {
+            float triMinY = fminf(tri.v0.y, fminf(tri.v1.y, tri.v2.y));
+            float triMaxY = fmaxf(tri.v0.y, fmaxf(tri.v1.y, tri.v2.y));
+            if (pLoc.y < triMinY - expR || pLoc.y > triMaxY + expR) continue;
 
-        if (distToRoller < (hRadius + boatR)) {
+            float triMinX = fminf(tri.v0.x, fminf(tri.v1.x, tri.v2.x));
+            float triMaxX = fmaxf(tri.v0.x, fmaxf(tri.v1.x, tri.v2.x));
+            if (pLoc.x < triMinX - expR || pLoc.x > triMaxX + expR) continue;
+
+            float triMinZ = fminf(tri.v0.z, fminf(tri.v1.z, tri.v2.z));
+            float triMaxZ = fmaxf(tri.v0.z, fmaxf(tri.v1.z, tri.v2.z));
+            if (pLoc.z < triMinZ - expR || pLoc.z > triMaxZ + expR) continue;
+
+            Vector3 qLoc = ClosestPointOnTriangle(pLoc, tri.v0, tri.v1, tri.v2);
+            Vector3 qWorld = Vector3Transform(qLoc, mWorld);
+            float dSq = Vector3DistanceSqr(pWorld, qWorld);
+            if (dSq < rWorldSq) {
+                if (outContactNormal) {
+                    Vector3 diff = Vector3Subtract(pWorld, qWorld);
+                    float len = Vector3Length(diff);
+                    *outContactNormal = (len > 0.0001f) ? Vector3Scale(diff, 1.0f / len) : Vector3{ 0.0f, 1.0f, 0.0f };
+                }
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Plan v7.3: Exact Obstacle Triangle Collision Check
+static bool CheckObstacleTriangleMeshCollision(Vector3 raftPos, float raftRotY, const LevelEntity& ent,
+                                               Vector3 animPos, float animYawDeg, float animPitchDeg, float animRollDeg,
+                                               Vector3* outContactNormal = nullptr) {
+    if (ent.type == ENT_TREE_JUNGLE || ent.type == ENT_GUST || ent.type == ENT_CHECKPOINT) return false;
+    if (ent.type >= ENT_COL_FLAT_WALL) return false; // Handled by 12 custom shape colliders
+
+    float s = (ent.scale > 0.01f) ? ent.scale : 1.0f;
+    float meshR = gObsTriMeshes[ent.type].localRadius;
+    if (meshR <= 0.1f) meshR = 3.5f;
+    float maxReach = s * meshR + 1.8f;
+
+    // Fast spherical broad-phase check
+    float dXZ = Vector2Distance(Vector2{ raftPos.x, raftPos.z }, Vector2{ animPos.x, animPos.z });
+    if (dXZ > maxReach) return false;
+    if (fabsf(raftPos.y - animPos.y) > (maxReach + 2.0f)) return false;
+
+    // Define 6 boat test points representing the raft hull and pirates
+    Vector3 boatPts[6];
+    float boatRadii[6];
+
+    float radY = raftRotY * DEG2RAD;
+    Vector3 fwd = { sinf(radY), 0.0f, cosf(radY) };
+    Vector3 right = { cosf(radY), 0.0f, -sinf(radY) };
+
+    // Waterline center
+    boatPts[0] = Vector3{ raftPos.x, raftPos.y + 0.25f, raftPos.z };
+    boatRadii[0] = 0.50f;
+
+    // Front rim
+    boatPts[1] = Vector3Add(boatPts[0], Vector3Scale(fwd, 0.38f));
+    boatRadii[1] = 0.32f;
+
+    // Back rim
+    boatPts[2] = Vector3Subtract(boatPts[0], Vector3Scale(fwd, 0.38f));
+    boatRadii[2] = 0.32f;
+
+    // Left rim
+    boatPts[3] = Vector3Subtract(boatPts[0], Vector3Scale(right, 0.38f));
+    boatRadii[3] = 0.32f;
+
+    // Right rim
+    boatPts[4] = Vector3Add(boatPts[0], Vector3Scale(right, 0.38f));
+    boatRadii[4] = 0.32f;
+
+    // Pirates torso/head
+    boatPts[5] = Vector3{ raftPos.x, raftPos.y + 0.70f, raftPos.z };
+    boatRadii[5] = 0.38f;
+
+    // Handle ENT_OBS_F10 (Split arms and hammer)
+    if (ent.type == ENT_OBS_F10) {
+        float fx = s * (float)ent.flipX;
+        float fy = s * (float)ent.flipY;
+        float fz = s * (float)ent.flipZ;
+
+        // 1. Arms (pivot at animPos, rotated by animYaw, then animRoll around Z)
+        Matrix matScaleArms = MatrixScale(fx, fy, fz);
+        Matrix matRotZArms  = MatrixRotateZ(animRollDeg * DEG2RAD);
+        Matrix matRotYArms  = MatrixRotateY(animYawDeg * DEG2RAD);
+        Matrix matTransArms = MatrixTranslate(animPos.x, animPos.y, animPos.z);
+        Matrix mWorldArms = MatrixMultiply(matScaleArms, MatrixMultiply(matRotZArms, MatrixMultiply(matRotYArms, matTransArms)));
+        Matrix mInvArms   = MatrixInvert(mWorldArms);
+
+        if (TestBoatAgainstTriMesh(gObsTriMeshF10_Arms, mWorldArms, mInvArms, boatPts, boatRadii, 6, outContactNormal)) {
+            return true;
+        }
+
+        // 2. Hammer (wrist at -7.23, 2.20 in arms local space, hanging down with zero roll)
+        float radRoll = animRollDeg * DEG2RAD;
+        const float wristX = -7.23f, wristY = 2.20f;
+        float newWristX = wristX * cosf(radRoll) - wristY * sinf(radRoll);
+        float newWristY = wristX * sinf(radRoll) + wristY * cosf(radRoll);
+
+        Matrix matScaleHam = MatrixScale(fx, fy, fz);
+        Matrix matTransHamRel = MatrixTranslate((newWristX - wristX) * fx, (newWristY - wristY) * fy, 0.0f);
+        Matrix matRotYHam = MatrixRotateY(animYawDeg * DEG2RAD);
+        Matrix matTransHamBase = MatrixTranslate(animPos.x, animPos.y, animPos.z);
+        Matrix mWorldHam = MatrixMultiply(matScaleHam, MatrixMultiply(matTransHamRel, MatrixMultiply(matRotYHam, matTransHamBase)));
+        Matrix mInvHam   = MatrixInvert(mWorldHam);
+
+        if (TestBoatAgainstTriMesh(gObsTriMeshF10_Hammer, mWorldHam, mInvHam, boatPts, boatRadii, 6, outContactNormal)) {
             return true;
         }
         return false;
     }
 
-    // 2. Elevated swinging hammer (F10)
-    if (ent.type == ENT_OBS_F10) {
-        Vector3 hPos = GetObstacleHazardWorldPos(ent);
-        float hRadius = 0.95f * s;
-        if (fabsf((raftPos.y + 0.35f) - hPos.y) < 1.4f) {
-            float dx = raftPos.x - hPos.x;
-            float dz = raftPos.z - hPos.z;
-            if ((dx * dx + dz * dz) < ((hRadius + boatR) * (hRadius + boatR))) {
-                return true;
-            }
-        }
-        return false;
-    }
+    // Standard Obstacles
+    float fx = s * (float)ent.flipX;
+    float fy = s * (float)ent.flipY;
+    float fz = s * (float)ent.flipZ;
 
-    // 3. Rotating horizontal arm with center pillar (F13)
-    if (ent.type == ENT_OBS_F13) {
-        Vector3 hPos = GetObstacleHazardWorldPos(ent);
-        float hRadius = 0.80f * s;
-        if (fabsf((raftPos.y + 0.35f) - hPos.y) < 1.4f) {
-            float dx = raftPos.x - hPos.x;
-            float dz = raftPos.z - hPos.z;
-            if ((dx * dx + dz * dz) < ((hRadius + boatR) * (hRadius + boatR))) {
-                return true;
-            }
-        }
-        float dyBase = fabsf((raftPos.y + 0.35f) - animPos.y);
-        if (dyBase < 1.5f) {
-            float dxBase = raftPos.x - animPos.x;
-            float dzBase = raftPos.z - animPos.z;
-            if ((dxBase * dxBase + dzBase * dzBase) < ((0.65f * s + boatR) * (0.65f * s + boatR))) {
-                return true;
-            }
-        }
-        return false;
-    }
+    Matrix matScale = MatrixScale(fx, fy, fz);
+    Matrix matRotZ  = MatrixRotateZ(animRollDeg * DEG2RAD);
+    Matrix matRotX  = MatrixRotateX(animPitchDeg * DEG2RAD);
+    Matrix matRotY  = MatrixRotateY(animYawDeg * DEG2RAD);
+    Matrix matTrans = MatrixTranslate(animPos.x, animPos.y, animPos.z);
 
-    if (ent.type == ENT_OBS_A1) {
-        if (fabsf(raftPos.y - animPos.y) > 2.0f) return false;
-        float dx = raftPos.x - animPos.x;
-        float dz = raftPos.z - animPos.z;
-        float rad = -animYawDeg * DEG2RAD;
-        float lx = dx * cosf(rad) - dz * sinf(rad);
-        float lz = dx * sinf(rad) + dz * cosf(rad);
-        return (fabsf(lx) < (0.48f * s + boatR)) && (fabsf(lz) < (2.40f * s + 0.65f));
-    }
+    Matrix mWorld = MatrixMultiply(matScale, MatrixMultiply(matRotZ, MatrixMultiply(matRotX, MatrixMultiply(matRotY, matTrans))));
+    Matrix mInv   = MatrixInvert(mWorld);
 
-    float dy = fabsf((raftPos.y + 0.35f) - animPos.y);
-    if (ent.type == ENT_OBS_C5) {
-        if (dy > 4.6f * s) return false;
-    } else if (dy > 2.2f * s) {
-        return false;
-    }
-
-    float rad = -animYawDeg * DEG2RAD;
-    float dx = raftPos.x - animPos.x;
-    float dz = raftPos.z - animPos.z;
-    float localX = dx * cosf(rad) - dz * sinf(rad);
-    float localZ = dx * sinf(rad) + dz * cosf(rad);
-
-    float hx = 1.0f * s, hz = 1.0f * s;
-    switch (ent.type) {
-        case ENT_OBS_B3:  hx = 2.45f * s; hz = 0.48f * s; break;
-        case ENT_OBS_B5:  hx = 4.90f * s; hz = 0.50f * s; break;
-        case ENT_OBS_C2:  hx = 1.15f * s; hz = 1.15f * s; break;
-        case ENT_OBS_C4:  hx = 2.50f * s; hz = 1.25f * s; break;
-        case ENT_OBS_C5:  hx = 4.30f * s; hz = 0.55f * s; break;
-        case ENT_OBS_F3:  hx = 2.30f * s; hz = 0.38f * s; break;
-        case ENT_OBS_F11: hx = 0.95f * s; hz = 0.95f * s; break;
-        case ENT_OBS_F14: hx = 2.80f * s; hz = 0.45f * s; break;
-        case ENT_OBS_F23: hx = 2.80f * s; hz = 0.40f * s; break;
-        default: break;
-    }
-    return (fabsf(localX) < (hx + boatR)) && (fabsf(localZ) < (hz + boatR));
+    return TestBoatAgainstTriMesh(gObsTriMeshes[ent.type], mWorld, mInv, boatPts, boatRadii, 6, outContactNormal);
 }
 
 void AssignEntityModelAndProps(LevelEntity& e) {
@@ -1411,13 +1533,12 @@ void AssignEntityModelAndProps(LevelEntity& e) {
     if (e.arcAngleDeg <= 0.0f) e.arcAngleDeg = 180.0f;
     if (e.slideDist <= 0.0f) e.slideDist = 1.80f;
     if (e.bounceMult <= 0.0f) e.bounceMult = 1.65f;
-    bool isHazardType = (e.type >= ENT_OBS_A1 && e.type <= ENT_OBS_F23 && e.type != ENT_OBS_F18) || (e.type == ENT_COL_KILL_ZONE);
-    if (isHazardType) {
-        e.isLethal = 1;
-    } else if (e.type == ENT_OBS_F18 || e.type == ENT_ROCK_1 || e.type == ENT_ROCK_2) {
+    if (e.isLethal != 0 && e.isLethal != 1) {
+        bool isHazardType = (e.type >= ENT_OBS_A1 && e.type <= ENT_OBS_F23 && e.type != ENT_OBS_F18) || (e.type == ENT_COL_KILL_ZONE);
+        e.isLethal = isHazardType ? 1 : 0;
+    }
+    if (e.type == ENT_OBS_F18 || e.type == ENT_ROCK_1 || e.type == ENT_ROCK_2) {
         e.isLethal = 0;
-    } else if (e.isLethal != 0 && e.isLethal != 1) {
-        e.isLethal = 1;
     }
 
     switch (e.type) {
@@ -1470,51 +1591,56 @@ void AssignEntityModelAndProps(LevelEntity& e) {
 }
 
 void SaveLevelLayoutJSON(const std::string& path, const std::vector<LevelEntity>& list) {
-    std::string resolvedPath = ResolveAsset(path);
-    FILE* f = fopen(resolvedPath.c_str(), "w");
-    if (!f) f = fopen(path.c_str(), "w");
-    if (!f) return;
-    fprintf(f, "[\n");
-    for (size_t i = 0; i < list.size(); i++) {
-        const auto& e = list[i];
-        fprintf(f,
-            "  {\n"
-            "    \"id\": %d,\n"
-            "    \"type\": %d,\n"
-            "    \"x\": %.3f,\n"
-            "    \"y\": %.3f,\n"
-            "    \"z\": %.3f,\n"
-            "    \"rotX\": %.2f,\n"
-            "    \"rotY\": %.2f,\n"
-            "    \"rotZ\": %.2f,\n"
-            "    \"flipX\": %d,\n"
-            "    \"flipY\": %d,\n"
-            "    \"flipZ\": %d,\n"
-            "    \"scale\": %.2f,\n"
-            "    \"speed\": %.2f,\n"
-            "    \"radius\": %.2f,\n"
-            "    \"sizeX\": %.2f,\n"
-            "    \"sizeY\": %.2f,\n"
-            "    \"sizeZ\": %.2f,\n"
-            "    \"colBehavior\": %d,\n"
-            "    \"arcAngleDeg\": %.2f,\n"
-            "    \"animMode\": %d,\n"
-            "    \"phaseOffsetDeg\": %.2f,\n"
-            "    \"slideDist\": %.2f,\n"
-            "    \"bounceMult\": %.2f,\n"
-            "    \"isLethal\": %d\n"
-            "  }%s\n",
-            (int)i, (int)e.type, e.position.x, e.position.y, e.position.z,
-            e.rotationX, e.rotationY, e.rotationZ,
-            e.flipX, e.flipY, e.flipZ,
-            e.scale, e.animSpeed, e.radius,
-            e.sizeX, e.sizeY, e.sizeZ, e.colBehavior,
-            e.arcAngleDeg, e.animMode, e.phaseOffsetDeg,
-            e.slideDist, e.bounceMult, e.isLethal,
-            (i + 1 < list.size()) ? "," : "");
-    }
-    fprintf(f, "]\n");
-    fclose(f);
+    auto SaveToFile = [&](const std::string& targetPath) {
+        FILE* f = fopen(targetPath.c_str(), "w");
+        if (!f) return;
+        fprintf(f, "[\n");
+        for (size_t i = 0; i < list.size(); i++) {
+            const auto& e = list[i];
+            fprintf(f,
+                "  {\n"
+                "    \"id\": %d,\n"
+                "    \"type\": %d,\n"
+                "    \"x\": %.3f,\n"
+                "    \"y\": %.3f,\n"
+                "    \"z\": %.3f,\n"
+                "    \"rotX\": %.2f,\n"
+                "    \"rotY\": %.2f,\n"
+                "    \"rotZ\": %.2f,\n"
+                "    \"flipX\": %d,\n"
+                "    \"flipY\": %d,\n"
+                "    \"flipZ\": %d,\n"
+                "    \"scale\": %.2f,\n"
+                "    \"speed\": %.2f,\n"
+                "    \"radius\": %.2f,\n"
+                "    \"sizeX\": %.2f,\n"
+                "    \"sizeY\": %.2f,\n"
+                "    \"sizeZ\": %.2f,\n"
+                "    \"colBehavior\": %d,\n"
+                "    \"arcAngleDeg\": %.2f,\n"
+                "    \"animMode\": %d,\n"
+                "    \"phaseOffsetDeg\": %.2f,\n"
+                "    \"slideDist\": %.2f,\n"
+                "    \"bounceMult\": %.2f,\n"
+                "    \"isLethal\": %d\n"
+                "  }%s\n",
+                (int)i, (int)e.type, e.position.x, e.position.y, e.position.z,
+                e.rotationX, e.rotationY, e.rotationZ,
+                e.flipX, e.flipY, e.flipZ,
+                e.scale, e.animSpeed, e.radius,
+                e.sizeX, e.sizeY, e.sizeZ, e.colBehavior,
+                e.arcAngleDeg, e.animMode, e.phaseOffsetDeg,
+                e.slideDist, e.bounceMult, e.isLethal,
+                (i + 1 < list.size()) ? "," : "");
+        }
+        fprintf(f, "]\n");
+        fclose(f);
+    };
+
+    SaveToFile(ResolveAsset(path));
+    SaveToFile(path);
+    SaveToFile("CustomEngine/level_layout.json");
+    SaveToFile("../level_layout.json");
 }
 
 static bool ParseJsonFloatField(const char* objStart, const char* objEnd, const char* key, float& outVal) {
@@ -1583,7 +1709,7 @@ bool LoadLevelLayoutJSON(const std::string& path, std::vector<LevelEntity>& list
             ParseJsonFloatField(objStart, objEnd, "\"phaseOffsetDeg\"", phDeg);
             ParseJsonFloatField(objStart, objEnd, "\"slideDist\"", slDist);
             ParseJsonFloatField(objStart, objEnd, "\"bounceMult\"", bMult);
-            ParseJsonIntField(objStart, objEnd, "\"isLethal\"", lethal);
+            bool hasLethal = ParseJsonIntField(objStart, objEnd, "\"isLethal\"", lethal);
 
             LevelEntity e{};
             e.id = nextId++;
@@ -1610,6 +1736,8 @@ bool LoadLevelLayoutJSON(const std::string& path, std::vector<LevelEntity>& list
                 e.phaseOffsetDeg = phDeg;
                 e.slideDist = slDist;
                 e.bounceMult = bMult;
+            }
+            if (hasLethal) {
                 e.isLethal = lethal;
             }
             list.push_back(e);
@@ -1800,7 +1928,14 @@ int main(int argc, char** argv) {
         if (strcmp(argv[i], "--test-lan") == 0) testLanMode = true;
         if (strcmp(argv[i], "--test-select") == 0 && i + 1 < argc) testSelectIdx = atoi(argv[++i]);
 
-        if (strcmp(argv[i], "--shot-name") == 0 && i + 1 < argc) { testShotName = argv[++i]; testScreenshotMode = true; }
+        if (strcmp(argv[i], "--shot-name") == 0 && i + 1 < argc) {
+            testShotName = argv[++i];
+            if (testShotName.find(".png") == std::string::npos) testShotName += ".png";
+            if (testShotName.find("/") == std::string::npos && testShotName.find("\\") == std::string::npos) {
+                testShotName = "screenshots/" + testShotName;
+            }
+            testScreenshotMode = true;
+        }
 
         if (strcmp(argv[i], "--shot-angle") == 0 && i + 1 < argc) {
 
@@ -2009,6 +2144,27 @@ int main(int argc, char** argv) {
     gObsModels.mR2  = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_Obstacle_Rock2.obj").c_str());
     gObsModels.mTree= LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_JungleTree.obj").c_str());
     gObsModels.mCP  = cp1Model;
+
+    // Plan v7.3: Extract Exact 3D Triangle Collision Meshes for All Obstacles
+    ExtractTriMeshFromModel(gObsModels.mA1,          gObsTriMeshes[ENT_OBS_A1]);
+    ExtractTriMeshFromModel(gObsModels.mB2,          gObsTriMeshes[ENT_OBS_B2]);
+    ExtractTriMeshFromModel(gObsModels.mB3,          gObsTriMeshes[ENT_OBS_B3]);
+    ExtractTriMeshFromModel(gObsModels.mB5,          gObsTriMeshes[ENT_OBS_B5]);
+    ExtractTriMeshFromModel(gObsModels.mC1,          gObsTriMeshes[ENT_OBS_C1]);
+    ExtractTriMeshFromModel(gObsModels.mC2,          gObsTriMeshes[ENT_OBS_C2]);
+    ExtractTriMeshFromModel(gObsModels.mC4,          gObsTriMeshes[ENT_OBS_C4]);
+    ExtractTriMeshFromModel(gObsModels.mC5,          gObsTriMeshes[ENT_OBS_C5]);
+    ExtractTriMeshFromModel(gObsModels.mF3,          gObsTriMeshes[ENT_OBS_F3]);
+    ExtractTriMeshFromModel(gObsModels.mF10,         gObsTriMeshes[ENT_OBS_F10]);
+    ExtractTriMeshFromModel(gObsModels.mF10_Arms,    gObsTriMeshF10_Arms);
+    ExtractTriMeshFromModel(gObsModels.mF10_Hammer,  gObsTriMeshF10_Hammer);
+    ExtractTriMeshFromModel(gObsModels.mF11,         gObsTriMeshes[ENT_OBS_F11]);
+    ExtractTriMeshFromModel(gObsModels.mF13,         gObsTriMeshes[ENT_OBS_F13]);
+    ExtractTriMeshFromModel(gObsModels.mF14,         gObsTriMeshes[ENT_OBS_F14]);
+    ExtractTriMeshFromModel(gObsModels.mF18,         gObsTriMeshes[ENT_OBS_F18]);
+    ExtractTriMeshFromModel(gObsModels.mF23,         gObsTriMeshes[ENT_OBS_F23]);
+    ExtractTriMeshFromModel(gObsModels.mR1,          gObsTriMeshes[ENT_ROCK_1]);
+    ExtractTriMeshFromModel(gObsModels.mR2,          gObsTriMeshes[ENT_ROCK_2]);
 
     Model crocModel = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_Crocodile.obj").c_str());
     Model sharkModel= LoadModel(ResolveAsset("extracted_assets/meshes/Shark.obj").c_str());
@@ -2353,6 +2509,11 @@ int main(int argc, char** argv) {
     Vector3 editorCamPos = testEditorMode ? Vector3{ 17.2f, 2.8f, 70.8f } : Vector3{ 15.55f, 6.0f, 75.0f };
     float editorCamYaw = 3.14159f;
     float editorCamPitch = 0.35f;
+    if (testEditorMode && selectedObs >= 0 && selectedObs < (int)levelEntities.size()) {
+        editorCamPos = Vector3Add(levelEntities[selectedObs].position, Vector3{ 0.0f, 3.5f, 6.0f });
+        editorCamYaw = 3.14159f;
+        editorCamPitch = 0.35f;
+    }
     std::string editorMsg = "";
     float editorMsgTimer = 0.0f;
 
@@ -2903,50 +3064,13 @@ int main(int argc, char** argv) {
             }
         }
 
-        // 5. Check Obstacle & Hazard Collisions (Rocks & F18 Rebound are Non-Fatal!)
+        // 5. Check Obstacle & Hazard Collisions with Exact 3D Triangle Mesh Precision ("تقنية المثلثات")
         for (auto& ent : levelEntities) {
             Vector3 animPos;
             float animYaw, animPitch, animRoll;
             GetEntityAnimatedTransform(ent, animPos, animYaw, animPitch, animRoll);
 
-            if (ent.type == ENT_ROCK_1 || ent.type == ENT_ROCK_2) {
-                // الصخور: تصادم صلب منزلق فقط بدون انفجار القارب!
-                float rockR = 0.65f * ent.scale + 1.05f;
-                float dx = raft.position.x - ent.position.x;
-                float dz = raft.position.z - ent.position.z;
-                float dXZ = sqrtf(dx * dx + dz * dz);
-                if (dXZ < rockR && dXZ > 0.001f && fabsf(raft.position.y - ent.position.y) < 2.5f) {
-                    float nx = dx / dXZ, nz = dz / dXZ;
-                    raft.position.x = ent.position.x + nx * rockR;
-                    raft.position.z = ent.position.z + nz * rockR;
-                    float vn = raft.velocity.x * nx + raft.velocity.z * nz;
-                    if (vn < 0.0f) {
-                        raft.velocity.x -= vn * nx;
-                        raft.velocity.z -= vn * nz;
-                    }
-                }
-            } else if (ent.type == ENT_OBS_F18) {
-                // الصورة 5 (OBS_F18_SPIKE): عمود ارتدادي يدفع القارب عكس اتجاه قدومه وبحسب سرعة ارتطامه!
-                float postR = 0.45f * ent.scale + 1.05f;
-                float dx = raft.position.x - ent.position.x;
-                float dz = raft.position.z - ent.position.z;
-                float dXZ = sqrtf(dx * dx + dz * dz);
-                if (dXZ < postR && dXZ > 0.001f && fabsf(raft.position.y - ent.position.y) < 3.0f && !raft.isDestroyed) {
-                    Vector3 radialOut = { dx / dXZ, 0.0f, dz / dXZ };
-                    Vector3 horizVel  = { raft.velocity.x, 0.0f, raft.velocity.z };
-                    float impactSpeed = Vector3Length(horizVel);
-                    Vector3 reverseDir = (impactSpeed > 0.5f)
-                        ? Vector3Normalize(Vector3Add(Vector3Scale(Vector3Normalize(horizVel), -0.7f), Vector3Scale(radialOut, 0.3f)))
-                        : radialOut;
-                    raft.position.x = ent.position.x + radialOut.x * (postR + 0.08f);
-                    raft.position.z = ent.position.z + radialOut.z * (postR + 0.08f);
-                    float pushSpeed = Clamp(impactSpeed * 1.65f, 7.5f, 22.0f);
-                    raft.velocity.x = reverseDir.x * pushSpeed;
-                    raft.velocity.z = reverseDir.z * pushSpeed;
-                    camCtrl.shakeTrauma = fmaxf(camCtrl.shakeTrauma, Clamp(impactSpeed / 14.0f, 0.25f, 0.65f));
-                    PlaySound(sndBounce);
-                }
-            } else if (ent.type == ENT_GUST) {
+            if (ent.type == ENT_GUST) {
                 float d = Vector3Distance(raft.position, ent.position);
                 if (d < ent.radius && !raft.isDestroyed) {
                     float rad = ent.rotationY * DEG2RAD;
@@ -2955,21 +3079,51 @@ int main(int argc, char** argv) {
                     raft.velocity.z += gustDir.z * 24.0f * dt;
                     camCtrl.shakeTrauma = fmaxf(camCtrl.shakeTrauma, 0.20f);
                 }
-            } else if (CheckObstacleOBBCollision(raft.position, ent, animPos, animYaw, animPitch, animRoll)) {
-                if (!raft.isDestroyed && raft.invulnerableTimer <= 0.0f) {
-                    bool deadly = (ent.isLethal != 0) || (ent.type >= ENT_OBS_A1 && ent.type <= ENT_OBS_F23 && ent.type != ENT_OBS_F18);
-                    if (deadly) {
-                        TriggerBoatDeath(DEATH_OBSTACLE);
-                    } else {
-                        Vector3 push = Vector3Normalize(Vector3Subtract(raft.position, animPos));
-                        float impactSpd = Vector3Length(Vector3{ raft.velocity.x, 0.0f, raft.velocity.z });
-                        float pushSpeed = Clamp(impactSpd * ent.bounceMult, 7.5f, 22.0f);
-                        raft.velocity.x = push.x * pushSpeed;
-                        raft.velocity.z = push.z * pushSpeed;
-                        raft.position = Vector3Add(animPos, Vector3Scale(push, (ent.radius + 0.95f)));
-                        camCtrl.shakeTrauma = fmaxf(camCtrl.shakeTrauma, 0.35f);
-                        PlaySound(sndBounce);
+                continue;
+            }
+
+            Vector3 contactNormal = { 0, 1, 0 };
+            bool hit = CheckObstacleTriangleMeshCollision(raft.position, raft.rotationY, ent, animPos, animYaw, animPitch, animRoll, &contactNormal);
+
+            if (hit) {
+                if (ent.type == ENT_ROCK_1 || ent.type == ENT_ROCK_2) {
+                    // Solid sliding collision against rock geometry (smooth redirection, no explosion)
+                    Vector3 n = contactNormal;
+                    n.y = 0.0f;
+                    if (Vector3Length(n) > 0.001f) {
+                        n = Vector3Normalize(n);
+                        raft.position = Vector3Add(raft.position, Vector3Scale(n, 0.06f));
+                        float vn = raft.velocity.x * n.x + raft.velocity.z * n.z;
+                        if (vn < 0.0f) {
+                            raft.velocity.x -= vn * n.x * 1.25f;
+                            raft.velocity.z -= vn * n.z * 1.25f;
+                        }
                     }
+                } else if (ent.isLethal != 0) {
+                    // Lethal Hazard: Explodes boat ONLY on true contact with obstacle mesh triangles
+                    if (!raft.isDestroyed && raft.invulnerableTimer <= 0.0f) {
+                        TriggerBoatDeath(DEATH_OBSTACLE);
+                    }
+                } else {
+                    // Non-Lethal Hazard (e.g. #77 OBS_F18_SPIKE rebound pillar & custom bounce pads):
+                    // Bounces and pushes the boat away safely along contact normal, NEVER exploding!
+                    Vector3 push = contactNormal;
+                    push.y = 0.0f;
+                    if (Vector3Length(push) < 0.001f) {
+                        push = Vector3Normalize(Vector3Subtract(raft.position, animPos));
+                        push.y = 0.0f;
+                    }
+                    if (Vector3Length(push) < 0.001f) push = Vector3{ 0.0f, 0.0f, 1.0f };
+                    else push = Vector3Normalize(push);
+
+                    float impactSpd = Vector3Length(Vector3{ raft.velocity.x, 0.0f, raft.velocity.z });
+                    float pushSpeed = Clamp(impactSpd * ent.bounceMult, 8.0f, 15.0f);
+                    raft.velocity.x = push.x * pushSpeed;
+                    raft.velocity.z = push.z * pushSpeed;
+                    raft.position = Vector3Add(raft.position, Vector3Scale(push, 0.25f));
+                    raft.invulnerableTimer = 0.50f; // Temporary hazard-grace timer on bounce!
+                    camCtrl.shakeTrauma = fmaxf(camCtrl.shakeTrauma, Clamp(impactSpd / 12.0f, 0.25f, 0.55f));
+                    PlaySound(sndBounce);
                 }
             }
         }
@@ -3857,12 +4011,30 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 for (size_t i = 0; i < levelEntities.size(); i++) {
                     bool isSel = ((int)i == selectedObs);
                     Vector3 oPos = levelEntities[i].position;
-                    float r = (levelEntities[i].radius > 0.5f) ? levelEntities[i].radius : 1.5f;
-                    DrawCircle3D(Vector3{ oPos.x, 0.05f, oPos.z }, r, Vector3{ 1, 0, 0 }, 90.0f, isSel ? Color{ 255, 235, 50, 180 } : Color{ 80, 180, 255, 90 });
+                    if (isSel) {
+                        // Plan v7.3: Exact Triangle Mesh Collision Wireframe (No oversized boxes or circles!)
+                        if (levelEntities[i].model != nullptr) {
+                            Vector3 animPos = levelEntities[i].position;
+                            float animYaw = levelEntities[i].rotationY, animPitch = levelEntities[i].rotationX, animRoll = levelEntities[i].rotationZ;
+                            GetEntityAnimatedTransform(levelEntities[i], animPos, animYaw, animPitch, animRoll);
+
+                            rlPushMatrix();
+                            rlTranslatef(animPos.x, animPos.y, animPos.z);
+                            rlRotatef(animYaw, 0.0f, 1.0f, 0.0f);
+                            if (fabsf(animPitch) > 0.01f) rlRotatef(animPitch, 1.0f, 0.0f, 0.0f);
+                            if (fabsf(animRoll)  > 0.01f) rlRotatef(animRoll,  0.0f, 0.0f, 1.0f);
+                            float s = (levelEntities[i].scale > 0.01f) ? levelEntities[i].scale : 1.0f;
+                            rlScalef(s * (float)levelEntities[i].flipX, s * (float)levelEntities[i].flipY, s * (float)levelEntities[i].flipZ);
+                            Color wireCol = (levelEntities[i].isLethal != 0) ? Color{ 255, 55, 55, 240 } : Color{ 40, 235, 110, 240 };
+                            DrawModelWires(*levelEntities[i].model, Vector3{ 0, 0, 0 }, 1.001f, wireCol);
+                            rlPopMatrix();
+                        }
+                    } else {
+                        float r = (levelEntities[i].radius > 0.5f) ? levelEntities[i].radius : 1.5f;
+                        DrawCircle3D(Vector3{ oPos.x, 0.05f, oPos.z }, r * 0.75f, Vector3{ 1, 0, 0 }, 90.0f, Color{ 80, 180, 255, 70 });
+                    }
 
                     if (isSel) {
-                        BoundingBox selBBox = { Vector3Subtract(oPos, Vector3{ r, 1.4f, r }), Vector3Add(oPos, Vector3{ r, 1.4f, r }) };
-                        DrawBoundingBox(selBBox, YELLOW);
 
                         // Plan v7.0 Task 3: Universal Move + Scale + Rotate + Flip 3D Gizmo
                         // 1. Move Arrows (0 -> 2.8m)

@@ -3,7 +3,7 @@
   "sustainedMaxForce": 480.00,
   "sustainedMinForce": 480.00,
   "steerTorque": 6.00,
-  "boatMaxSpeed": 14.00,
+  "boatMaxSpeed": 12.00,
   "waterLinearDrag": 0.400,
   "gasDrainRate": 12.00,
   "gasRegenRate": 18.00
