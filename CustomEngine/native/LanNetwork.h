@@ -91,7 +91,6 @@ void LanShutdown();
 bool LanStartDiscoveryListener(uint16_t discoveryPort = 7778);
 bool LanInitHost(uint16_t gamePort = 7777, const char* roomCode = "8HF78N");
 bool LanJoinRoom(const char* hostIp, uint16_t hostPort = 7777, const char* roomCode = "8HF78N");
-inline bool LanInitClient(uint16_t hostPort = 7777, const char* hostIp = "127.0.0.1") { return LanJoinRoom(hostIp, hostPort); }
 void LanUpdateDiscoveryAndLobby(float dt);
 
 LanRole LanGetRole();
@@ -99,6 +98,13 @@ bool LanIsConnected();
 const char* LanGetStatusText();
 const char* LanGetRoomCode();
 std::vector<DiscoveredLanRoom>& LanGetDiscoveredRooms();
+
+extern bool gHostReady;
+extern bool gClientReady;
+extern int  gConnectedPlayers;
+extern bool gSoloPracticeMode;
+inline bool LanInitClient(uint16_t hostPort = 7777, const char* hostIp = "127.0.0.1") { return LanJoinRoom(hostIp, hostPort); }
+
 
 bool LanHostPollInput(LanInputPacket& outInput);
 void LanHostBroadcastState(const LanStatePacket& state);

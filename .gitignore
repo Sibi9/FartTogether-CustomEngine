@@ -9,3 +9,12 @@
 .system_generated/
 CustomEngine/scratch/
 .env
+*.obj
+android_apk_build/
+CustomEngine/*.obj
+audio_tool.exe
+test_ar_font.exe
+test_ar_render.exe
+CustomEngine/audio_tool.exe
+CustomEngine/test_ar_font.exe
+CustomEngine/test_ar_render.exe

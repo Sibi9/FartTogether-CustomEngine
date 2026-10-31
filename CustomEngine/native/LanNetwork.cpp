@@ -20,8 +20,13 @@ static float    gBeaconTimer   = 0.0f;
 static char     gCurrentRoomCode[8] = "8HF78N";
 static uint8_t  gHostCharColor   = 0;
 static uint8_t  gClientCharColor = 1;
-static uint8_t  gClientReady     = 0;
 static char     gStatusText[128] = "LAN Offline";
+
+bool gHostReady = false;
+bool gClientReady = false;
+int  gConnectedPlayers = 1;
+bool gSoloPracticeMode = false;
+
 static std::vector<DiscoveredLanRoom> gDiscoveredRooms;
 
 void LanEnsureWsa() {
