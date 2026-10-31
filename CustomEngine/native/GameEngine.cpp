@@ -959,18 +959,20 @@ enum EntityType {
     ENT_GUST = 17,    // Wind Gust zone
     ENT_CHECKPOINT = 18,  // GM_3D_CheckPointV1.obj (Unified editable Checkpoint)
     ENT_TREE_JUNGLE = 19, // GM_3D_JungleTree.obj
-    // 10 Custom Collision Shapes (Plan v6.0 Task 4 & 5)
-    ENT_COL_SQUARE = 20,   // Square base collision box
-    ENT_COL_RECT = 21,     // Rectangle / Wall collision box
-    ENT_COL_CIRCLE = 22,   // Circle horizontal collision
-    ENT_COL_CUBE = 23,     // 3D Cube
-    ENT_COL_CYLINDER = 24, // 3D Cylinder
-    ENT_COL_CAPSULE = 25,  // 3D Capsule
-    ENT_COL_SPHERE = 26,   // 3D Sphere
-    ENT_COL_WEDGE = 27,    // Wedge / Ramp
-    ENT_COL_FALL_ZONE = 28,// Fall into abyss zone
-    ENT_COL_KILL_ZONE = 29,// Explode / Kill boat zone
-    ENT_COUNT = 30
+    // 12 Custom Collision Shapes (Plan v7.0 Task 3)
+    ENT_COL_FLAT_WALL = 20, // Flat vertical wall plane
+    ENT_COL_FLAT_FLOOR = 21,// Flat horizontal water/floor supporting plane
+    ENT_COL_SQUARE = 22,   // Square base collision box
+    ENT_COL_RECT = 23,     // Rectangle / Wall collision box
+    ENT_COL_CIRCLE = 24,   // Circle horizontal collision
+    ENT_COL_CUBE = 25,     // 3D Cube
+    ENT_COL_CYLINDER = 26, // 3D Cylinder
+    ENT_COL_CAPSULE = 27,  // 3D Capsule
+    ENT_COL_SPHERE = 28,   // 3D Sphere
+    ENT_COL_WEDGE = 29,    // Wedge / Ramp
+    ENT_COL_FALL_ZONE = 30,// Fall into abyss zone
+    ENT_COL_KILL_ZONE = 31,// Explode / Kill boat zone
+    ENT_COUNT = 32
 };
 
 static const char* ENTITY_TYPE_NAMES[] = {
@@ -980,6 +982,7 @@ static const char* ENTITY_TYPE_NAMES[] = {
     "OBS_F14_SLIDER", "OBS_F18_SPIKE", "OBS_F23_DUAL",
     "ROCK_DARK_1", "ROCK_DARK_2", "WIND_GUST",
     "CHECKPOINT_GATE", "TREE_JUNGLE",
+    "COL_FLAT_WALL", "COL_FLAT_FLOOR",
     "COL_SQUARE", "COL_RECT_WALL", "COL_CIRCLE", "COL_CUBE",
     "COL_CYLINDER", "COL_CAPSULE", "COL_SPHERE", "COL_WEDGE",
     "COL_FALL_ZONE", "COL_KILL_ZONE"
@@ -1002,9 +1005,16 @@ struct LevelEntity {
     float sizeX;
     float sizeY;
     float sizeZ;
-    int colBehavior; // 0=Solid Wall, 1=Fall/Abyss, 2=Kill/Explode, 3=Bounce Pad
+    int colBehavior; // 0=Solid Wall, 1=Fall/Abyss, 2=Kill/Explode, 3=Bounce Pad, 4=Water/Floor Support
     bool cpPassed;
     Model* model;
+    // Per-obstacle custom controls (Plan v7.0 Task 2)
+    float arcAngleDeg;    // Degree of rotation arc (0 to 360)
+    int   animMode;       // 0=Ping-Pong, 1=Continuous CW (+360), -1=Continuous CCW (-360)
+    float phaseOffsetDeg; // Start phase in degrees (0..360)
+    float slideDist;      // Slide distance in meters
+    float bounceMult;     // Rebound push multiplier
+    int   isLethal;       // 1=Explodes boat on contact, 0=Non-lethal bounce/push
     // Bumper specific state
     float bumperExpandTimer;
     float bumperCooldownTimer;
@@ -1065,48 +1075,69 @@ struct ObstacleModels {
     Model mCP;
 };
 
-// Real Water Mesh Triangle Grid for accurate surface elevation and cliff-edge falling
+// Real Water Mesh Triangle Grid for accurate surface elevation and cliff-edge falling (Plan v7.0 Task 1)
 struct WaterTri2D {
     float x0, z0, x1, z1, x2, z2;
     float minX, maxX, minZ, maxZ, avgY;
 };
 static std::vector<WaterTri2D> gWaterTris;
 
+static void AddWaterTriangle(float x0, float y0, float z0, float x1, float y1, float z1, float x2, float y2, float z2) {
+    float area2 = fabsf((x1 - x0) * (z2 - z0) - (x2 - x0) * (z1 - z0));
+    if (area2 < 0.001f) return;
+    WaterTri2D wt;
+    wt.x0 = x0; wt.z0 = z0;
+    wt.x1 = x1; wt.z1 = z1;
+    wt.x2 = x2; wt.z2 = z2;
+    wt.minX = fminf(x0, fminf(x1, x2)) - 0.65f;
+    wt.maxX = fmaxf(x0, fmaxf(x1, x2)) + 0.65f;
+    wt.minZ = fminf(z0, fminf(z1, z2)) - 0.65f;
+    wt.maxZ = fmaxf(z0, fmaxf(z1, z2)) + 0.65f;
+    wt.avgY = (y0 + y1 + y2) / 3.0f;
+    gWaterTris.push_back(wt);
+}
+
 static void BuildWaterTriangleGrid(const Model& waterModel, Vector3 offset) {
     gWaterTris.clear();
-    for (int mi = 0; mi < waterModel.meshCount; mi++) {
-        const Mesh& m = waterModel.meshes[mi];
+    for (int mIdx = 0; mIdx < waterModel.meshCount; mIdx++) {
+        const Mesh& m = waterModel.meshes[mIdx];
         const float* v = m.vertices;
-        if (!v) continue;
-        if (m.indices && m.triangleCount > 0) {
+        if (!v || m.triangleCount <= 0) continue;
+
+        if (m.indices != nullptr) {
             for (int t = 0; t < m.triangleCount; t++) {
                 int i0 = m.indices[t * 3 + 0];
                 int i1 = m.indices[t * 3 + 1];
                 int i2 = m.indices[t * 3 + 2];
-                float x0 = v[i0*3+0] + offset.x, y0 = v[i0*3+1] + offset.y, z0 = v[i0*3+2] + offset.z;
-                float x1 = v[i1*3+0] + offset.x, y1 = v[i1*3+1] + offset.y, z1 = v[i1*3+2] + offset.z;
-                float x2 = v[i2*3+0] + offset.x, y2 = v[i2*3+1] + offset.y, z2 = v[i2*3+2] + offset.z;
-                WaterTri2D wt;
-                wt.x0 = x0; wt.z0 = z0; wt.x1 = x1; wt.z1 = z1; wt.x2 = x2; wt.z2 = z2;
-                wt.minX = fminf(x0, fminf(x1, x2)) - 0.50f;
-                wt.maxX = fmaxf(x0, fmaxf(x1, x2)) + 0.50f;
-                wt.minZ = fminf(z0, fminf(z1, z2)) - 0.50f;
-                wt.maxZ = fmaxf(z0, fmaxf(z1, z2)) + 0.50f;
-                wt.avgY = (y0 + y1 + y2) / 3.0f;
-                gWaterTris.push_back(wt);
+                AddWaterTriangle(
+                    v[i0*3+0] + offset.x, v[i0*3+1] + offset.y, v[i0*3+2] + offset.z,
+                    v[i1*3+0] + offset.x, v[i1*3+1] + offset.y, v[i1*3+2] + offset.z,
+                    v[i2*3+0] + offset.x, v[i2*3+1] + offset.y, v[i2*3+2] + offset.z
+                );
+            }
+        } else {
+            // Raylib loads .obj with m.indices == nullptr and sequential 9 floats per triangle!
+            for (int t = 0; t < m.triangleCount; t++) {
+                const float* p = &v[t * 9];
+                AddWaterTriangle(
+                    p[0] + offset.x, p[1] + offset.y, p[2] + offset.z,
+                    p[3] + offset.x, p[4] + offset.y, p[5] + offset.z,
+                    p[6] + offset.x, p[7] + offset.y, p[8] + offset.z
+                );
             }
         }
     }
+    printf("[WaterGrid] Loaded %zu active water surface triangles.\n", gWaterTris.size());
 }
 
-static bool IsPointOverWaterMesh(float px, float pz, float& outWaterY) {
-    // 1. Check circular start pond
+static bool IsSinglePointInWaterTri(float px, float pz, float& outWaterY) {
+    // 1. Circular start pond
     float dxPond = px - 15.43f, dzPond = pz - 84.0f;
-    if (pz >= 74.0f && (dxPond * dxPond + dzPond * dzPond) <= (15.8f * 15.8f)) {
+    if (pz >= 74.0f && (dxPond * dxPond + dzPond * dzPond) <= (16.2f * 16.2f)) {
         outWaterY = 0.55f;
         return true;
     }
-    // 2. Check water triangles of GM_3D_Demo_Water.obj
+    // 2. All triangles of GM_3D_Demo_Water.obj (including the first turn at Z=34.4!)
     for (const auto& t : gWaterTris) {
         if (px < t.minX || px > t.maxX || pz < t.minZ || pz > t.maxZ) continue;
         float dX = px - t.x2, dZ = pz - t.z2;
@@ -1115,11 +1146,21 @@ static bool IsPointOverWaterMesh(float px, float pz, float& outWaterY) {
         if (fabsf(D) < 1e-5f) continue;
         float s = (dZ12 * dX + dX21 * dZ) / D;
         float tVal = ((t.z2 - t.z0) * dX + (t.x0 - t.x2) * dZ) / D;
-        if (s >= -0.08f && tVal >= -0.08f && (s + tVal) <= 1.08f) {
+        if (s >= -0.18f && tVal >= -0.18f && (s + tVal) <= 1.18f) {
             outWaterY = t.avgY;
             return true;
         }
     }
+    return false;
+}
+
+static bool IsPointOverWaterMesh(float px, float pz, float& outWaterY) {
+    if (IsSinglePointInWaterTri(px, pz, outWaterY)) return true;
+    const float rimCheck = 0.65f;
+    if (IsSinglePointInWaterTri(px + rimCheck, pz, outWaterY)) return true;
+    if (IsSinglePointInWaterTri(px - rimCheck, pz, outWaterY)) return true;
+    if (IsSinglePointInWaterTri(px, pz + rimCheck, outWaterY)) return true;
+    if (IsSinglePointInWaterTri(px, pz - rimCheck, outWaterY)) return true;
     return false;
 }
 
@@ -1134,63 +1175,64 @@ static float DistPointToSegment2D(Vector2 p, Vector2 a, Vector2 b) {
     return Vector2Distance(p, proj);
 }
 
+// Per-obstacle accurate animated transforms (Plan v7.0 Task 2)
 static void GetEntityAnimatedTransform(const LevelEntity& ent, Vector3& outPos, float& outYaw, float& outPitch, float& outRoll) {
     outPos   = ent.position;
     outYaw   = ent.rotationY;
     outPitch = ent.rotationX;
     outRoll  = ent.rotationZ;
 
+    float phaseRad = ent.phaseOffsetDeg * DEG2RAD;
+    float t = ent.animTimer * 1.85f + phaseRad;
+    float halfArc = ent.arcAngleDeg * 0.5f;
+    bool continuous360 = (ent.animMode != 0 && ent.arcAngleDeg >= 359.0f);
+    float dirSign = (ent.animMode < 0) ? -1.0f : 1.0f;
+
     switch (ent.type) {
         case ENT_OBS_B2:
         case ENT_OBS_C1:
-            // Semicircle 180 deg swing around local X axis
-            outPitch = -90.0f + sinf(ent.animTimer * 1.85f + (float)ent.id) * 90.0f;
+            if (continuous360) outPitch = ent.rotationX + fmodf(ent.animTimer * 110.0f * dirSign + ent.phaseOffsetDeg, 360.0f);
+            else outPitch = ent.rotationX - halfArc + sinf(t) * halfArc;
             break;
 
-        case ENT_OBS_F10:
-            // Video 2: Arms rotate along symmetrical arc from left bank to right bank (-73.07° ± 73.07°)
-            outRoll = -73.07f + sinf(ent.animTimer * 1.85f + (float)ent.id) * 73.07f;
+        case ENT_OBS_F10: {
+            float maxSymArc = (ent.arcAngleDeg / 180.0f) * 73.07f;
+            if (continuous360) outRoll = ent.rotationZ + fmodf(ent.animTimer * 100.0f * dirSign + ent.phaseOffsetDeg, 360.0f);
+            else outRoll = ent.rotationZ - maxSymArc + sinf(t) * maxSymArc;
             break;
+        }
 
         case ENT_OBS_F13:
-            // Video 5: Full 360 deg horizontal circle in XZ plane around local Y axis!
-            outYaw   = fmodf(ent.rotationY - ent.animTimer * 120.0f, 360.0f);
-            outPitch = 0.0f;
-            outRoll  = 0.0f;
-            break;
-
-        case ENT_OBS_F11:
-            // Blue spiked drum: stationary
-            break;
-
         case ENT_OBS_B3:
         case ENT_OBS_B5:
         case ENT_OBS_C4:
-            outYaw = fmodf(ent.rotationY + ent.animTimer * 95.0f, 360.0f);
+            if (continuous360) outYaw = fmodf(ent.rotationY + ent.animTimer * 120.0f * dirSign + ent.phaseOffsetDeg, 360.0f);
+            else outYaw = ent.rotationY + sinf(t) * halfArc;
             break;
 
         case ENT_OBS_C5:
-            outRoll = fmodf(ent.animTimer * 80.0f, 360.0f);
+            if (continuous360) outRoll = ent.rotationZ + fmodf(ent.animTimer * 95.0f * dirSign + ent.phaseOffsetDeg, 360.0f);
+            else outRoll = ent.rotationZ + sinf(t) * halfArc;
             break;
 
         case ENT_OBS_C2:
-            outRoll = sinf(ent.animTimer * 2.0f + (float)ent.id) * 48.0f;
+            if (continuous360) outRoll = ent.rotationZ + fmodf(ent.animTimer * 100.0f * dirSign + ent.phaseOffsetDeg, 360.0f);
+            else outRoll = ent.rotationZ + sinf(t) * halfArc;
             break;
 
         case ENT_OBS_F3:
         case ENT_OBS_F23:
-            // Video 1 (OBS_F3_SWING): Full 180 deg swing (-90° to +90°)!
-            outYaw = ent.rotationY + sinf(ent.animTimer * 1.85f) * 90.0f;
+            if (continuous360) outYaw = fmodf(ent.rotationY + ent.animTimer * 110.0f * dirSign + ent.phaseOffsetDeg, 360.0f);
+            else outYaw = ent.rotationY + sinf(t) * halfArc;
             break;
 
         case ENT_OBS_F14: {
-            float slide = sinf(ent.animTimer * 2.0f + (float)ent.id) * 1.8f;
+            float slide = sinf(t) * ent.slideDist;
             float rad = ent.rotationY * DEG2RAD;
             outPos.x += cosf(rad) * slide;
             outPos.z -= sinf(rad) * slide;
             break;
         }
-
         default:
             break;
     }
@@ -1301,29 +1343,43 @@ void AssignEntityModelAndProps(LevelEntity& e) {
     if (e.sizeX <= 0.05f) e.sizeX = e.radius;
     if (e.sizeY <= 0.05f) e.sizeY = 2.0f;
     if (e.sizeZ <= 0.05f) e.sizeZ = e.radius;
+    if (e.arcAngleDeg <= 0.0f) e.arcAngleDeg = 180.0f;
+    if (e.slideDist <= 0.0f) e.slideDist = 1.80f;
+    if (e.bounceMult <= 0.0f) e.bounceMult = 1.65f;
+    if (e.isLethal != 0 && e.isLethal != 1) e.isLethal = 1;
 
     switch (e.type) {
         case ENT_OBS_A1:  e.model = &gObsModels.mA1;  e.radius = 1.85f * e.scale; break;
-        case ENT_OBS_B2:  e.model = &gObsModels.mB2;  e.radius = 3.20f * e.scale; break;
-        case ENT_OBS_B3:  e.model = &gObsModels.mB3;  e.radius = 2.50f * e.scale; break;
-        case ENT_OBS_B5:  e.model = &gObsModels.mB5;  e.radius = 3.80f * e.scale; break;
-        case ENT_OBS_C1:  e.model = &gObsModels.mC1;  e.radius = 2.50f * e.scale; break;
-        case ENT_OBS_C2:  e.model = &gObsModels.mC2;  e.radius = 2.20f * e.scale; break;
-        case ENT_OBS_C4:  e.model = &gObsModels.mC4;  e.radius = 2.50f * e.scale; break;
-        case ENT_OBS_C5:  e.model = &gObsModels.mC5;  e.radius = 3.80f * e.scale; break;
-        case ENT_OBS_F3:  e.model = &gObsModels.mF3;  e.radius = 2.20f * e.scale; break;
-        case ENT_OBS_F10: e.model = &gObsModels.mF10; e.radius = 3.50f * e.scale; break;
+        case ENT_OBS_B2:  e.model = &gObsModels.mB2;  e.radius = 3.20f * e.scale; e.arcAngleDeg = 180.0f; e.animMode = 0; break;
+        case ENT_OBS_B3:  e.model = &gObsModels.mB3;  e.radius = 2.50f * e.scale; e.arcAngleDeg = 360.0f; e.animMode = -1; break;
+        case ENT_OBS_B5:  e.model = &gObsModels.mB5;  e.radius = 3.80f * e.scale; e.arcAngleDeg = 360.0f; e.animMode = -1; break;
+        case ENT_OBS_C1:  e.model = &gObsModels.mC1;  e.radius = 2.50f * e.scale; e.arcAngleDeg = 180.0f; e.animMode = 0; break;
+        case ENT_OBS_C2:  e.model = &gObsModels.mC2;  e.radius = 2.20f * e.scale; e.arcAngleDeg = 130.0f; e.animMode = 0; break;
+        case ENT_OBS_C4:  e.model = &gObsModels.mC4;  e.radius = 2.50f * e.scale; e.arcAngleDeg = 360.0f; e.animMode = -1; break;
+        case ENT_OBS_C5:  e.model = &gObsModels.mC5;  e.radius = 3.80f * e.scale; e.arcAngleDeg = 360.0f; e.animMode = -1; break;
+        case ENT_OBS_F3:  e.model = &gObsModels.mF3;  e.radius = 2.20f * e.scale; e.arcAngleDeg = 180.0f; e.animMode = 0; break;
+        case ENT_OBS_F10: e.model = &gObsModels.mF10; e.radius = 3.50f * e.scale; e.arcAngleDeg = 180.0f; e.animMode = 0; break;
         case ENT_OBS_F11: e.model = &gObsModels.mF11; e.radius = 1.65f * e.scale; break;
-        case ENT_OBS_F13: e.model = &gObsModels.mF13; e.radius = 2.80f * e.scale; break;
-        case ENT_OBS_F14: e.model = &gObsModels.mF14; e.radius = 2.40f * e.scale; break;
-        case ENT_OBS_F18: e.model = &gObsModels.mF18; e.radius = 1.20f * e.scale; break;
-        case ENT_OBS_F23: e.model = &gObsModels.mF23; e.radius = 2.80f * e.scale; break;
-        case ENT_ROCK_1:  e.model = &gObsModels.mR1;  e.radius = 2.10f * e.scale; break;
-        case ENT_ROCK_2:  e.model = &gObsModels.mR2;  e.radius = 2.30f * e.scale; break;
+        case ENT_OBS_F13: e.model = &gObsModels.mF13; e.radius = 2.80f * e.scale; e.arcAngleDeg = 360.0f; e.animMode = -1; break;
+        case ENT_OBS_F14: e.model = &gObsModels.mF14; e.radius = 2.40f * e.scale; e.slideDist = 1.80f; break;
+        case ENT_OBS_F18: e.model = &gObsModels.mF18; e.radius = 1.20f * e.scale; e.isLethal = 0; e.bounceMult = 1.65f; break;
+        case ENT_OBS_F23: e.model = &gObsModels.mF23; e.radius = 2.80f * e.scale; e.arcAngleDeg = 180.0f; e.animMode = 0; break;
+        case ENT_ROCK_1:  e.model = &gObsModels.mR1;  e.radius = 2.10f * e.scale; e.isLethal = 0; e.bounceMult = 1.65f; break;
+        case ENT_ROCK_2:  e.model = &gObsModels.mR2;  e.radius = 2.30f * e.scale; e.isLethal = 0; e.bounceMult = 1.65f; break;
         case ENT_GUST:         e.model = nullptr;         e.radius = 4.50f * e.scale; break;
         case ENT_CHECKPOINT:   e.model = &gObsModels.mCP;  e.radius = 3.50f * e.scale; break;
         case ENT_TREE_JUNGLE:  e.model = &gObsModels.mTree;e.radius = 1.35f * e.scale; break;
-        // Custom Collision Shapes
+        // 12 Custom Collision Shapes
+        case ENT_COL_FLAT_WALL:
+            e.model = nullptr;
+            e.sizeX = 0.25f; e.sizeY = 3.50f; e.sizeZ = 6.00f;
+            e.colBehavior = 0; e.radius = 3.0f;
+            break;
+        case ENT_COL_FLAT_FLOOR:
+            e.model = nullptr;
+            e.sizeX = 8.00f; e.sizeY = 0.25f; e.sizeZ = 8.00f;
+            e.colBehavior = 4; e.radius = 4.0f;
+            break;
         case ENT_COL_SQUARE:
         case ENT_COL_RECT:
         case ENT_COL_CIRCLE:
@@ -1368,13 +1424,21 @@ void SaveLevelLayoutJSON(const std::string& path, const std::vector<LevelEntity>
             "    \"sizeX\": %.2f,\n"
             "    \"sizeY\": %.2f,\n"
             "    \"sizeZ\": %.2f,\n"
-            "    \"colBehavior\": %d\n"
+            "    \"colBehavior\": %d,\n"
+            "    \"arcAngleDeg\": %.2f,\n"
+            "    \"animMode\": %d,\n"
+            "    \"phaseOffsetDeg\": %.2f,\n"
+            "    \"slideDist\": %.2f,\n"
+            "    \"bounceMult\": %.2f,\n"
+            "    \"isLethal\": %d\n"
             "  }%s\n",
             (int)i, (int)e.type, e.position.x, e.position.y, e.position.z,
             e.rotationX, e.rotationY, e.rotationZ,
             e.flipX, e.flipY, e.flipZ,
             e.scale, e.animSpeed, e.radius,
             e.sizeX, e.sizeY, e.sizeZ, e.colBehavior,
+            e.arcAngleDeg, e.animMode, e.phaseOffsetDeg,
+            e.slideDist, e.bounceMult, e.isLethal,
             (i + 1 < list.size()) ? "," : "");
     }
     fprintf(f, "]\n");
@@ -1418,6 +1482,12 @@ bool LoadLevelLayoutJSON(const std::string& path, std::vector<LevelEntity>& list
             float scale = 1.0f, spd = 1.0f, rad = 2.0f;
             float szX = 2.0f, szY = 2.0f, szZ = 2.0f;
             int colBeh = 0;
+            float arcDeg = 180.0f;
+            int aMode = 0;
+            float phDeg = 0.0f;
+            float slDist = 1.80f;
+            float bMult = 1.65f;
+            int lethal = 1;
 
             ParseJsonFloatField(objStart, objEnd, "\"x\"", x);
             ParseJsonFloatField(objStart, objEnd, "\"y\"", y);
@@ -1435,6 +1505,13 @@ bool LoadLevelLayoutJSON(const std::string& path, std::vector<LevelEntity>& list
             ParseJsonFloatField(objStart, objEnd, "\"sizeY\"", szY);
             ParseJsonFloatField(objStart, objEnd, "\"sizeZ\"", szZ);
             ParseJsonIntField(objStart, objEnd, "\"colBehavior\"", colBeh);
+
+            bool hasArc = ParseJsonFloatField(objStart, objEnd, "\"arcAngleDeg\"", arcDeg);
+            ParseJsonIntField(objStart, objEnd, "\"animMode\"", aMode);
+            ParseJsonFloatField(objStart, objEnd, "\"phaseOffsetDeg\"", phDeg);
+            ParseJsonFloatField(objStart, objEnd, "\"slideDist\"", slDist);
+            ParseJsonFloatField(objStart, objEnd, "\"bounceMult\"", bMult);
+            ParseJsonIntField(objStart, objEnd, "\"isLethal\"", lethal);
 
             LevelEntity e{};
             e.id = nextId++;
@@ -1455,6 +1532,14 @@ bool LoadLevelLayoutJSON(const std::string& path, std::vector<LevelEntity>& list
             e.colBehavior = colBeh;
             e.cpPassed = false;
             AssignEntityModelAndProps(e);
+            if (hasArc) {
+                e.arcAngleDeg = arcDeg;
+                e.animMode = aMode;
+                e.phaseOffsetDeg = phDeg;
+                e.slideDist = slDist;
+                e.bounceMult = bMult;
+                e.isLethal = lethal;
+            }
             list.push_back(e);
         }
         cursor = objEnd + 1;
@@ -1462,6 +1547,159 @@ bool LoadLevelLayoutJSON(const std::string& path, std::vector<LevelEntity>& list
     UnloadFileText(rawText);
     return !list.empty();
 }
+
+// Plan v7.0 Slanted & Trapezoid UI Drawing Primitives (Authentic Fart Together UI)
+static void DrawSlantedRect(float x, float y, float w, float h, float slant, Color col) {
+    Vector2 v1 = { x + slant, y };
+    Vector2 v2 = { x,         y + h };
+    Vector2 v3 = { x + w,     y + h };
+    Vector2 v4 = { x + w + slant, y };
+    DrawTriangle(v1, v2, v3, col);
+    DrawTriangle(v1, v3, v4, col);
+}
+
+static void DrawSlantedRectLines(float x, float y, float w, float h, float slant, float thick, Color col) {
+    Vector2 v1 = { x + slant, y };
+    Vector2 v2 = { x,         y + h };
+    Vector2 v3 = { x + w,     y + h };
+    Vector2 v4 = { x + w + slant, y };
+    DrawLineEx(v1, v2, thick, col);
+    DrawLineEx(v2, v3, thick, col);
+    DrawLineEx(v3, v4, thick, col);
+    DrawLineEx(v4, v1, thick, col);
+}
+
+static void DrawTrapezoid(float x, float y, float w, float h, float inset, Color col) {
+    Vector2 v1 = { x + inset, y };
+    Vector2 v2 = { x,         y + h };
+    Vector2 v3 = { x + w,     y + h };
+    Vector2 v4 = { x + w - inset, y };
+    DrawTriangle(v1, v2, v3, col);
+    DrawTriangle(v1, v3, v4, col);
+}
+
+static void DrawTrapezoidLines(float x, float y, float w, float h, float inset, float thick, Color col) {
+    Vector2 v1 = { x + inset, y };
+    Vector2 v2 = { x,         y + h };
+    Vector2 v3 = { x + w,     y + h };
+    Vector2 v4 = { x + w - inset, y };
+    DrawLineEx(v1, v2, thick, col);
+    DrawLineEx(v2, v3, thick, col);
+    DrawLineEx(v3, v4, thick, col);
+    DrawLineEx(v4, v1, thick, col);
+}
+
+// 3D Isometric Shape Miniature Renderer for Left Dock Shape Cards (Plan v7.0 Task 3)
+static void DrawColliderShapeIcon2D(int shapeIdx, Rectangle r, Color iconCol) {
+    float cx = r.x + 20.0f;
+    float cy = r.y + r.height * 0.5f;
+
+    switch (shapeIdx) {
+        case 0: { // Flat Wall (Cyan thin vertical wall plane)
+            Vector2 p1 = { cx - 10, cy - 14 };
+            Vector2 p2 = { cx + 8,  cy - 8 };
+            Vector2 p3 = { cx + 8,  cy + 14 };
+            Vector2 p4 = { cx - 10, cy + 8 };
+            DrawTriangle(p1, p4, p3, ColorAlpha(iconCol, 0.45f));
+            DrawTriangle(p1, p3, p2, ColorAlpha(iconCol, 0.45f));
+            DrawLineEx(p1, p2, 1.8f, iconCol);
+            DrawLineEx(p2, p3, 1.8f, iconCol);
+            DrawLineEx(p3, p4, 1.8f, iconCol);
+            DrawLineEx(p4, p1, 1.8f, iconCol);
+            break;
+        }
+        case 1: { // Flat Floor (Green/Cyan horizontal ground grid)
+            Vector2 p1 = { cx,      cy - 12 };
+            Vector2 p2 = { cx + 15, cy };
+            Vector2 p3 = { cx,      cy + 12 };
+            Vector2 p4 = { cx - 15, cy };
+            DrawTriangle(p1, p4, p3, ColorAlpha(iconCol, 0.40f));
+            DrawTriangle(p1, p3, p2, ColorAlpha(iconCol, 0.40f));
+            DrawLineEx(p1, p2, 1.5f, iconCol);
+            DrawLineEx(p2, p3, 1.5f, iconCol);
+            DrawLineEx(p3, p4, 1.5f, iconCol);
+            DrawLineEx(p4, p1, 1.5f, iconCol);
+            DrawLineEx(Vector2{ cx, cy - 6 }, Vector2{ cx, cy + 6 }, 1.2f, iconCol);
+            DrawLineEx(Vector2{ cx - 7, cy }, Vector2{ cx + 7, cy }, 1.2f, iconCol);
+            break;
+        }
+        case 2: { // Square
+            DrawRectangleLinesEx(Rectangle{ cx - 11, cy - 11, 22, 22 }, 1.8f, iconCol);
+            DrawLineEx(Vector2{ cx - 11, cy - 11 }, Vector2{ cx + 11, cy + 11 }, 1.0f, ColorAlpha(iconCol, 0.5f));
+            break;
+        }
+        case 3: { // Rect Wall
+            DrawRectangleLinesEx(Rectangle{ cx - 14, cy - 9, 28, 18 }, 1.8f, iconCol);
+            DrawRectangle(cx - 12, cy - 7, 24, 14, ColorAlpha(iconCol, 0.35f));
+            break;
+        }
+        case 4: { // Circle
+            DrawCircleLines(cx, cy, 12.0f, iconCol);
+            DrawCircle(cx, cy, 10.0f, ColorAlpha(iconCol, 0.35f));
+            break;
+        }
+        case 5: { // 3D Cube
+            Vector2 top[4] = { { cx, cy - 14 }, { cx + 11, cy - 7 }, { cx, cy }, { cx - 11, cy - 7 } };
+            DrawTriangle(top[0], top[3], top[2], ColorBrightness(iconCol, 0.2f));
+            DrawTriangle(top[0], top[2], top[1], ColorBrightness(iconCol, 0.2f));
+            Vector2 left[4] = { { cx - 11, cy - 7 }, { cx, cy }, { cx, cy + 12 }, { cx - 11, cy + 5 } };
+            DrawTriangle(left[0], left[3], left[2], ColorAlpha(iconCol, 0.85f));
+            DrawTriangle(left[0], left[2], left[1], ColorAlpha(iconCol, 0.85f));
+            Vector2 right[4] = { { cx, cy }, { cx + 11, cy - 7 }, { cx + 11, cy + 5 }, { cx, cy + 12 } };
+            DrawTriangle(right[0], right[2], right[1], ColorBrightness(iconCol, -0.2f));
+            DrawTriangle(right[0], right[3], right[2], ColorBrightness(iconCol, -0.2f));
+            break;
+        }
+        case 6: { // Cylinder
+            DrawEllipseLines(cx, cy - 7, 10, 4, iconCol);
+            DrawEllipseLines(cx, cy + 7, 10, 4, iconCol);
+            DrawLineEx(Vector2{ cx - 10, cy - 7 }, Vector2{ cx - 10, cy + 7 }, 1.5f, iconCol);
+            DrawLineEx(Vector2{ cx + 10, cy - 7 }, Vector2{ cx + 10, cy + 7 }, 1.5f, iconCol);
+            break;
+        }
+        case 7: { // Capsule
+            DrawCircleLines(cx, cy - 6, 8.0f, iconCol);
+            DrawCircleLines(cx, cy + 6, 8.0f, iconCol);
+            DrawLineEx(Vector2{ cx - 8, cy - 6 }, Vector2{ cx - 8, cy + 6 }, 1.5f, iconCol);
+            DrawLineEx(Vector2{ cx + 8, cy - 6 }, Vector2{ cx + 8, cy + 6 }, 1.5f, iconCol);
+            break;
+        }
+        case 8: { // Sphere
+            DrawCircleLines(cx, cy, 11.0f, iconCol);
+            DrawEllipseLines(cx, cy, 11, 4, iconCol);
+            DrawEllipseLines(cx, cy, 4, 11, iconCol);
+            break;
+        }
+        case 9: { // Wedge Ramp
+            Vector2 w1 = { cx - 12, cy + 10 };
+            Vector2 w2 = { cx + 12, cy + 10 };
+            Vector2 w3 = { cx + 12, cy - 10 };
+            DrawTriangle(w1, w2, w3, ColorAlpha(iconCol, 0.45f));
+            DrawLineEx(w1, w2, 1.8f, iconCol);
+            DrawLineEx(w2, w3, 1.8f, iconCol);
+            DrawLineEx(w3, w1, 1.8f, iconCol);
+            break;
+        }
+        case 10: { // Fall Zone (Orange box with down arrows)
+            DrawRectangleLinesEx(Rectangle{ cx - 12, cy - 10, 24, 20 }, 1.5f, iconCol);
+            DrawLineEx(Vector2{ cx - 4, cy - 6 }, Vector2{ cx - 4, cy + 4 }, 2.0f, iconCol);
+            DrawLineEx(Vector2{ cx - 7, cy + 1 }, Vector2{ cx - 4, cy + 5 }, 2.0f, iconCol);
+            DrawLineEx(Vector2{ cx - 1, cy + 1 }, Vector2{ cx - 4, cy + 5 }, 2.0f, iconCol);
+            DrawLineEx(Vector2{ cx + 4, cy - 6 }, Vector2{ cx + 4, cy + 4 }, 2.0f, iconCol);
+            DrawLineEx(Vector2{ cx + 1, cy + 1 }, Vector2{ cx + 4, cy + 5 }, 2.0f, iconCol);
+            DrawLineEx(Vector2{ cx + 7, cy + 1 }, Vector2{ cx + 4, cy + 5 }, 2.0f, iconCol);
+            break;
+        }
+        case 11: { // Kill Box (Red danger box with cross)
+            DrawRectangleLinesEx(Rectangle{ cx - 12, cy - 10, 24, 20 }, 1.8f, iconCol);
+            DrawLineEx(Vector2{ cx - 6, cy - 5 }, Vector2{ cx + 6, cy + 5 }, 2.2f, iconCol);
+            DrawLineEx(Vector2{ cx + 6, cy - 5 }, Vector2{ cx - 6, cy + 5 }, 2.2f, iconCol);
+            break;
+        }
+        default: break;
+    }
+}
+
 int main(int argc, char** argv) {
 
     bool testScreenshotMode = false;
@@ -1534,7 +1772,7 @@ int main(int argc, char** argv) {
     bool leftDockCollapsed = false;
     bool visualCatalogOpen = testCatalogMode;
     int editorGizmoMode = 0; // 0=Select, 1=Move, 2=Rotate, 3=Scale
-    int gActiveGizmoAxis = -1; // -1=none, 0=X, 1=Y, 2=Z
+    int gActiveGizmoAxis = -1; int gActiveGizmoMode = 0; // -1=none, 0=X, 1=Y, 2=Z
     int hierarchyScroll = 0;
     int catalogScroll = 0;
 
@@ -1826,10 +2064,42 @@ int main(int argc, char** argv) {
     Sound sndExplode = LoadSound(ResolveAudioFile("boat_explode.wav").c_str());
     Sound sndBounce  = LoadSound(ResolveAudioFile("fart_4.wav").c_str());
 
-    // Load authentic UI textures for Main Menu and Lobby
-    Texture2D texLogoSplash = LoadTexture(ResolveAsset("extracted_assets/textures/Logo_Splash.png").c_str());
-    Texture2D texMenuBg     = LoadTexture(ResolveAsset("extracted_assets/textures/Background.png").c_str());
-    Texture2D texModeFartRun = LoadTexture(ResolveAsset("extracted_assets/textures/Mode_FartRun.png").c_str());
+    // Load authentic UI textures for Main Menu, Lobby, and Settings (Plan v7.0 Task 4)
+    Texture2D texMainLogo        = LoadTexture(ResolveAsset("extracted_assets/textures/Icon_Logo.png").c_str());
+    Texture2D texLogoSplash      = LoadTexture(ResolveAsset("extracted_assets/textures/Logo_Splash.png").c_str());
+    Texture2D texMenuBg          = LoadTexture(ResolveAsset("extracted_assets/textures/Background.png").c_str());
+    Texture2D texMarkerYou       = LoadTexture(ResolveAsset("extracted_assets/textures/Marker_BlueYou.png").c_str());
+    Texture2D texModeFartRun     = LoadTexture(ResolveAsset("extracted_assets/textures/Mode_FartRun.png").c_str());
+    Texture2D texModeTeamRace    = LoadTexture(ResolveAsset("extracted_assets/textures/Mode_TeamRace.png").c_str());
+    Texture2D texModeRaftRumble  = LoadTexture(ResolveAsset("extracted_assets/textures/Mode_RaftRumble.png").c_str());
+    Texture2D texIconGeneral     = LoadTexture(ResolveAsset("extracted_assets/textures/Icon_General.png").c_str());
+    Texture2D texIconGraphic     = LoadTexture(ResolveAsset("extracted_assets/textures/Icon_Graphic.png").c_str());
+    Texture2D texIconSound       = LoadTexture(ResolveAsset("extracted_assets/textures/Icon_Sound.png").c_str());
+    Texture2D texIconControl     = LoadTexture(ResolveAsset("extracted_assets/textures/Icon_Control.png").c_str());
+    Texture2D texIconDiscord     = LoadTexture(ResolveAsset("extracted_assets/textures/Icon_Discord.png").c_str());
+    Texture2D texIconCopy        = LoadTexture(ResolveAsset("extracted_assets/textures/Icon_Copy.png").c_str());
+    Texture2D texIconArrow       = LoadTexture(ResolveAsset("extracted_assets/textures/Icon_ArrowM.png").c_str());
+    SetTextureFilter(texMainLogo, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(texMarkerYou, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(texModeFartRun, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(texModeTeamRace, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(texModeRaftRumble, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(texIconGeneral, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(texIconGraphic, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(texIconSound, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(texIconControl, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(texIconDiscord, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(texIconCopy, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(texIconArrow, TEXTURE_FILTER_BILINEAR);
+
+    Texture2D texLobbyCards[4] = {
+        LoadTexture(ResolveAsset("extracted_assets/textures/Character_LobbyGrey.png").c_str()),
+        LoadTexture(ResolveAsset("extracted_assets/textures/Character_LobbyGreen.png").c_str()),
+        LoadTexture(ResolveAsset("extracted_assets/textures/Character_LobbyBlue.png").c_str()),
+        LoadTexture(ResolveAsset("extracted_assets/textures/Character_LobbyOrange.png").c_str())
+    };
+    for (int k = 0; k < 4; k++) SetTextureFilter(texLobbyCards[k], TEXTURE_FILTER_BILINEAR);
+
     Texture2D texLobbyChars[4] = {
         LoadTexture(ResolveAsset("extracted_assets/textures/Character_LobbyGreen.png").c_str()),
         LoadTexture(ResolveAsset("extracted_assets/textures/Character_LobbyOrange.png").c_str()),
@@ -2442,6 +2712,18 @@ int main(int argc, char** argv) {
             // Task 4: Accurate water mesh boundary check — stops buoyancy on dry cliffs / air!
             float dummyY = 0.55f;
             overWater = IsPointOverWaterMesh(raft.position.x, raft.position.z, dummyY);
+            for (const auto& ent : levelEntities) {
+                if (ent.type == ENT_COL_FLAT_FLOOR || ent.colBehavior == 4) {
+                    float dx = fabsf(raft.position.x - ent.position.x);
+                    float dz = fabsf(raft.position.z - ent.position.z);
+                    float hx = (ent.sizeX > 0.05f) ? ent.sizeX : 4.0f;
+                    float hz = (ent.sizeZ > 0.05f) ? ent.sizeZ : 4.0f;
+                    if (dx <= (hx + 0.88f) && dz <= (hz + 0.88f)) {
+                        overWater = true;
+                        dummyY = fmaxf(dummyY, ent.position.y);
+                    }
+                }
+            }
         }
 
         // Downstream slope acceleration ONLY on waterfalls/ramps (Z < 30)
@@ -2491,9 +2773,9 @@ int main(int argc, char** argv) {
         raft.roll  = Lerp(raft.roll, Clamp(raft.angularVelocityY * 0.025f, -0.08f, 0.08f), 10.0f * dt);
         raft.speed = horizSpeed;
 
-        // 5. Check Custom Collision Shapes (10 types) & Obstacles
+        // 5. Check Custom Collision Shapes (12 types) & Obstacles
         for (const auto& ent : levelEntities) {
-            if (ent.type >= ENT_COL_SQUARE && ent.type <= ENT_COL_KILL_ZONE) {
+            if (ent.type >= ENT_COL_FLAT_WALL && ent.type < ENT_COUNT) {
                 float rad = -ent.rotationY * DEG2RAD;
                 float dx = raft.position.x - ent.position.x;
                 float dz = raft.position.z - ent.position.z;
@@ -2513,7 +2795,10 @@ int main(int argc, char** argv) {
                 }
 
                 if (inside) {
-                    if (ent.colBehavior == 1 || ent.type == ENT_COL_FALL_ZONE) {
+                    if (ent.colBehavior == 4 || ent.type == ENT_COL_FLAT_FLOOR) {
+                        overWater = true;
+                        raft.position.y = fmaxf(raft.position.y, ent.position.y + 0.35f);
+                    } else if (ent.colBehavior == 1 || ent.type == ENT_COL_FALL_ZONE) {
                         overWater = false;
                     } else if (ent.colBehavior == 2 || ent.type == ENT_COL_KILL_ZONE) {
                         if (!raft.isDestroyed && raft.invulnerableTimer <= 0.0f) {
@@ -2523,7 +2808,7 @@ int main(int argc, char** argv) {
                         Vector3 push = Vector3Normalize(Vector3Subtract(raft.position, ent.position));
                         raft.velocity = Vector3Scale(push, 18.0f);
                         PlaySound(fartSounds[3]);
-                    } else { // 0 = Solid Wall
+                    } else { // 0 = Solid Wall (Flat Wall, Square, Cube, etc.)
                         float penX = (hx + boatR) - fabsf(lx);
                         float penZ = (hz + boatR) - fabsf(lz);
                         if (penX < penZ) {
@@ -2600,7 +2885,18 @@ int main(int argc, char** argv) {
                 }
             } else if (CheckObstacleOBBCollision(raft.position, ent, animPos, animYaw, animRoll)) {
                 if (!raft.isDestroyed) {
-                    TriggerBoatDeath(DEATH_OBSTACLE);
+                    if (ent.isLethal) {
+                        TriggerBoatDeath(DEATH_OBSTACLE);
+                    } else {
+                        Vector3 push = Vector3Normalize(Vector3Subtract(raft.position, animPos));
+                        float impactSpd = Vector3Length(Vector3{ raft.velocity.x, 0.0f, raft.velocity.z });
+                        float pushSpeed = Clamp(impactSpd * ent.bounceMult, 7.5f, 22.0f);
+                        raft.velocity.x = push.x * pushSpeed;
+                        raft.velocity.z = push.z * pushSpeed;
+                        raft.position = Vector3Add(animPos, Vector3Scale(push, (ent.radius + 0.95f)));
+                        camCtrl.shakeTrauma = fmaxf(camCtrl.shakeTrauma, 0.35f);
+                        PlaySound(sndBounce);
+                    }
                 }
             }
         }
@@ -2880,62 +3176,83 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             if (selectedObs >= 0 && selectedObs < (int)levelEntities.size()) {
                 LevelEntity& sel = levelEntities[selectedObs];
                 Vector3 oPos = sel.position;
-                Vector2 sOrig  = GetWorldToScreen(oPos, camera);
-                Vector2 sXEnd  = GetWorldToScreen(Vector3Add(oPos, Vector3{ 3.2f, 0.0f, 0.0f }), camera);
-                Vector2 sYEnd  = GetWorldToScreen(Vector3Add(oPos, Vector3{ 0.0f, 3.2f, 0.0f }), camera);
-                Vector2 sZEnd  = GetWorldToScreen(Vector3Add(oPos, Vector3{ 0.0f, 0.0f, 3.2f }), camera);
+                Vector2 sOrig   = GetWorldToScreen(oPos, camera);
+                Vector2 sMoveX  = GetWorldToScreen(Vector3Add(oPos, Vector3{ 2.8f, 0.0f, 0.0f }), camera);
+                Vector2 sMoveY  = GetWorldToScreen(Vector3Add(oPos, Vector3{ 0.0f, 2.8f, 0.0f }), camera);
+                Vector2 sMoveZ  = GetWorldToScreen(Vector3Add(oPos, Vector3{ 0.0f, 0.0f, 2.8f }), camera);
 
-                Vector2 sFlipX = GetWorldToScreen(Vector3Add(oPos, Vector3{ -1.8f, 0.0f, 0.0f }), camera);
-                Vector2 sFlipY = GetWorldToScreen(Vector3Add(oPos, Vector3{ 0.0f, -1.8f, 0.0f }), camera);
-                Vector2 sFlipZ = GetWorldToScreen(Vector3Add(oPos, Vector3{ 0.0f, 0.0f, -1.8f }), camera);
+                Vector2 sScaleX = GetWorldToScreen(Vector3Add(oPos, Vector3{ 3.8f, 0.0f, 0.0f }), camera);
+                Vector2 sScaleY = GetWorldToScreen(Vector3Add(oPos, Vector3{ 0.0f, 3.8f, 0.0f }), camera);
+                Vector2 sScaleZ = GetWorldToScreen(Vector3Add(oPos, Vector3{ 0.0f, 0.0f, 3.8f }), camera);
+
+                Vector2 sRotX   = GetWorldToScreen(Vector3Add(oPos, Vector3{ 0.0f, 1.55f, 1.55f }), camera);
+                Vector2 sRotY   = GetWorldToScreen(Vector3Add(oPos, Vector3{ 1.55f, 0.0f, 1.55f }), camera);
+                Vector2 sRotZ   = GetWorldToScreen(Vector3Add(oPos, Vector3{ 1.55f, 1.55f, 0.0f }), camera);
+
+                Vector2 sFlipX  = GetWorldToScreen(Vector3Add(oPos, Vector3{ -1.8f, 0.0f, 0.0f }), camera);
+                Vector2 sFlipY  = GetWorldToScreen(Vector3Add(oPos, Vector3{ 0.0f, -1.8f, 0.0f }), camera);
+                Vector2 sFlipZ  = GetWorldToScreen(Vector3Add(oPos, Vector3{ 0.0f, 0.0f, -1.8f }), camera);
 
                 if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !mouseOverUI) {
-                    if (Vector2Distance(mousePos, sFlipX) < 18.0f) {
-                        sel.flipX *= -1;
-                        sel.rotationY = fmodf(-sel.rotationY + 360.0f, 360.0f);
-                        editorMsg = "Flipped Selected Object along X Axis!";
-                        editorMsgTimer = 2.0f;
-                    } else if (Vector2Distance(mousePos, sFlipY) < 18.0f) {
-                        sel.flipY *= -1;
-                        sel.rotationZ = fmodf(sel.rotationZ + 180.0f, 360.0f);
-                        editorMsg = "Flipped Selected Object along Y Axis!";
-                        editorMsgTimer = 2.0f;
-                    } else if (Vector2Distance(mousePos, sFlipZ) < 18.0f) {
-                        sel.flipZ *= -1;
-                        sel.rotationY = fmodf(sel.rotationY + 180.0f, 360.0f);
-                        editorMsg = "Flipped Selected Object along Z Axis!";
-                        editorMsgTimer = 2.0f;
-                    } else {
-                        float dX = DistPointToSegment2D(mousePos, sOrig, sXEnd);
-                        float dY = DistPointToSegment2D(mousePos, sOrig, sYEnd);
-                        float dZ = DistPointToSegment2D(mousePos, sOrig, sZEnd);
+                    if (Vector2Distance(mousePos, sScaleX) < 18.0f) { gActiveGizmoMode = 2; gActiveGizmoAxis = 0; }
+                    else if (Vector2Distance(mousePos, sScaleY) < 18.0f) { gActiveGizmoMode = 2; gActiveGizmoAxis = 1; }
+                    else if (Vector2Distance(mousePos, sScaleZ) < 18.0f) { gActiveGizmoMode = 2; gActiveGizmoAxis = 2; }
+                    else if (Vector2Distance(mousePos, sOrig) < 16.0f && editorGizmoMode == 3) { gActiveGizmoMode = 3; gActiveGizmoAxis = 0; }
+                    else if (Vector2Distance(mousePos, sRotX) < 18.0f) { gActiveGizmoMode = 1; gActiveGizmoAxis = 0; }
+                    else if (Vector2Distance(mousePos, sRotY) < 18.0f) { gActiveGizmoMode = 1; gActiveGizmoAxis = 1; }
+                    else if (Vector2Distance(mousePos, sRotZ) < 18.0f) { gActiveGizmoMode = 1; gActiveGizmoAxis = 2; }
+                    else if (Vector2Distance(mousePos, sFlipX) < 16.0f) { sel.flipX *= -1; sel.rotationY = fmodf(-sel.rotationY + 360.0f, 360.0f); editorMsg = "Flipped Object along X Axis!"; editorMsgTimer = 2.0f; }
+                    else if (Vector2Distance(mousePos, sFlipY) < 16.0f) { sel.flipY *= -1; sel.rotationZ = fmodf(sel.rotationZ + 180.0f, 360.0f); editorMsg = "Flipped Object along Y Axis!"; editorMsgTimer = 2.0f; }
+                    else if (Vector2Distance(mousePos, sFlipZ) < 16.0f) { sel.flipZ *= -1; sel.rotationY = fmodf(sel.rotationY + 180.0f, 360.0f); editorMsg = "Flipped Object along Z Axis!"; editorMsgTimer = 2.0f; }
+                    else {
+                        float dX = DistPointToSegment2D(mousePos, sOrig, sMoveX);
+                        float dY = DistPointToSegment2D(mousePos, sOrig, sMoveY);
+                        float dZ = DistPointToSegment2D(mousePos, sOrig, sMoveZ);
                         float minD = fminf(dX, fminf(dY, dZ));
                         if (minD < 20.0f) {
-                            if (minD == dX) gActiveGizmoAxis = 0;
-                            else if (minD == dY) gActiveGizmoAxis = 1;
-                            else gActiveGizmoAxis = 2;
+                            gActiveGizmoAxis = (minD == dX) ? 0 : ((minD == dY) ? 1 : 2);
+                            if (editorGizmoMode == 2) gActiveGizmoMode = 1; // Rotate
+                            else if (editorGizmoMode == 3) gActiveGizmoMode = 2; // Scale
+                            else gActiveGizmoMode = 0; // Move
                         }
                     }
                 }
 
                 if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
                     gActiveGizmoAxis = -1;
+                    gActiveGizmoMode = 0;
                 }
 
                 if (gActiveGizmoAxis >= 0 && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
                     Vector2 mDelta = GetMouseDelta();
-                    Vector2 axisEnd = (gActiveGizmoAxis == 0) ? sXEnd : ((gActiveGizmoAxis == 1) ? sYEnd : sZEnd);
+                    Vector2 axisEnd = (gActiveGizmoAxis == 0) ? sMoveX : ((gActiveGizmoAxis == 1) ? sMoveY : sMoveZ);
                     Vector2 screenDir = { axisEnd.x - sOrig.x, axisEnd.y - sOrig.y };
-                    float screenLen = Vector2Length(screenDir);
-                    if (screenLen > 1.0f) {
-                        screenDir.x /= screenLen;
-                        screenDir.y /= screenLen;
-                        float pixelsMoved = mDelta.x * screenDir.x + mDelta.y * screenDir.y;
-                        float worldPerPixel = 3.2f / screenLen;
-                        float deltaWorld = pixelsMoved * worldPerPixel;
+                    float screenLen = fmaxf(Vector2Length(screenDir), 1.0f);
+                    screenDir.x /= screenLen; screenDir.y /= screenLen;
+                    float projPixels = mDelta.x * screenDir.x + mDelta.y * screenDir.y;
+
+                    if (gActiveGizmoMode == 0) { // Move
+                        float deltaWorld = projPixels * (2.8f / screenLen);
                         if (gActiveGizmoAxis == 0) sel.position.x += deltaWorld;
                         if (gActiveGizmoAxis == 1) sel.position.y += deltaWorld;
                         if (gActiveGizmoAxis == 2) sel.position.z += deltaWorld;
+                    } else if (gActiveGizmoMode == 2) { // Axis Scale
+                        float deltaScale = projPixels * 0.025f;
+                        if (gActiveGizmoAxis == 0) sel.sizeX = fmaxf(0.10f, sel.sizeX + deltaScale);
+                        if (gActiveGizmoAxis == 1) sel.sizeY = fmaxf(0.10f, sel.sizeY + deltaScale);
+                        if (gActiveGizmoAxis == 2) sel.sizeZ = fmaxf(0.10f, sel.sizeZ + deltaScale);
+                        sel.scale = fmaxf(0.15f, (sel.sizeX + sel.sizeY + sel.sizeZ) / 3.0f);
+                    } else if (gActiveGizmoMode == 3) { // Uniform Scale
+                        float deltaScale = (mDelta.x - mDelta.y) * 0.015f;
+                        sel.scale = fmaxf(0.15f, sel.scale + deltaScale);
+                        sel.sizeX = fmaxf(0.10f, sel.sizeX + deltaScale);
+                        sel.sizeY = fmaxf(0.10f, sel.sizeY + deltaScale);
+                        sel.sizeZ = fmaxf(0.10f, sel.sizeZ + deltaScale);
+                    } else if (gActiveGizmoMode == 1) { // Rotate
+                        float deltaDeg = (mDelta.x - mDelta.y) * 0.65f;
+                        if (gActiveGizmoAxis == 0) sel.rotationX = fmodf(sel.rotationX + deltaDeg + 360.0f, 360.0f);
+                        if (gActiveGizmoAxis == 1) sel.rotationY = fmodf(sel.rotationY + deltaDeg + 360.0f, 360.0f);
+                        if (gActiveGizmoAxis == 2) sel.rotationZ = fmodf(sel.rotationZ + deltaDeg + 360.0f, 360.0f);
                     }
                 }
             }
@@ -3203,13 +3520,14 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 continue;
             }
 
-            // Task 4: Custom Collision Shapes rendering in editor mode
-            if (ent.type >= ENT_COL_SQUARE && ent.type <= ENT_COL_KILL_ZONE) {
+            // Task 3: 12 Custom Collision Shapes rendering in editor mode
+            if (ent.type >= ENT_COL_FLAT_WALL && ent.type < ENT_COUNT) {
                 if (editorMode) {
-                    Color colTint = Color{ 0, 180, 255, 140 }; // Solid Wall
+                    Color colTint = Color{ 0, 200, 255, 140 }; // Solid Wall
                     if (ent.colBehavior == 1 || ent.type == ENT_COL_FALL_ZONE) colTint = Color{ 255, 160, 0, 140 }; // Fall Zone
                     else if (ent.colBehavior == 2 || ent.type == ENT_COL_KILL_ZONE) colTint = Color{ 240, 40, 40, 160 }; // Kill Zone
                     else if (ent.colBehavior == 3) colTint = Color{ 220, 50, 220, 150 }; // Bounce Pad
+                    else if (ent.colBehavior == 4 || ent.type == ENT_COL_FLAT_FLOOR) colTint = Color{ 50, 230, 130, 150 }; // Water/Floor Support
 
                     rlPushMatrix();
                     rlTranslatef(animPos.x, animPos.y, animPos.z);
@@ -3221,6 +3539,12 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                         DrawCylinderWires(Vector3{ 0, 0, 0 }, hx, hx, hy * 2.0f, 16, colTint);
                     } else if (ent.type == ENT_COL_SPHERE) {
                         DrawSphereWires(Vector3{ 0, 0, 0 }, hx, 12, 12, colTint);
+                    } else if (ent.type == ENT_COL_FLAT_FLOOR) {
+                        DrawCubeWires(Vector3{ 0, 0, 0 }, hx * 2.0f, 0.15f, hz * 2.0f, colTint);
+                        DrawCube(Vector3{ 0, 0, 0 }, hx * 2.0f, 0.05f, hz * 2.0f, ColorAlpha(colTint, 0.25f));
+                    } else if (ent.type == ENT_COL_FLAT_WALL) {
+                        DrawCubeWires(Vector3{ 0, 0, 0 }, hx * 2.0f, hy * 2.0f, hz * 2.0f, colTint);
+                        DrawCube(Vector3{ 0, 0, 0 }, 0.05f, hy * 2.0f, hz * 2.0f, ColorAlpha(colTint, 0.30f));
                     } else {
                         DrawCubeWires(Vector3{ 0, 0, 0 }, hx * 2.0f, hy * 2.0f, hz * 2.0f, colTint);
                     }
@@ -3467,18 +3791,36 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                         BoundingBox selBBox = { Vector3Subtract(oPos, Vector3{ r, 1.4f, r }), Vector3Add(oPos, Vector3{ r, 1.4f, r }) };
                         DrawBoundingBox(selBBox, YELLOW);
 
-                        // Task 5: 3D Interactive Gizmo with X/Y/Z arrows and negative Flip cubes!
-                        DrawLine3D(oPos, Vector3Add(oPos, Vector3{ 3.2f, 0, 0 }), RED);
-                        DrawLine3D(oPos, Vector3Add(oPos, Vector3{ 0, 3.2f, 0 }), GREEN);
-                        DrawLine3D(oPos, Vector3Add(oPos, Vector3{ 0, 0, 3.2f }), BLUE);
-                        DrawSphere(Vector3Add(oPos, Vector3{ 3.2f, 0, 0 }), 0.22f, RED);
-                        DrawSphere(Vector3Add(oPos, Vector3{ 0, 3.2f, 0 }), 0.22f, GREEN);
-                        DrawSphere(Vector3Add(oPos, Vector3{ 0, 0, 3.2f }), 0.22f, BLUE);
+                        // Plan v7.0 Task 3: Universal Move + Scale + Rotate + Flip 3D Gizmo
+                        // 1. Move Arrows (0 -> 2.8m)
+                        DrawLine3D(oPos, Vector3Add(oPos, Vector3{ 2.8f, 0, 0 }), RED);
+                        DrawLine3D(oPos, Vector3Add(oPos, Vector3{ 0, 2.8f, 0 }), GREEN);
+                        DrawLine3D(oPos, Vector3Add(oPos, Vector3{ 0, 0, 2.8f }), BLUE);
+                        DrawSphere(Vector3Add(oPos, Vector3{ 2.8f, 0, 0 }), 0.18f, RED);
+                        DrawSphere(Vector3Add(oPos, Vector3{ 0, 2.8f, 0 }), 0.18f, GREEN);
+                        DrawSphere(Vector3Add(oPos, Vector3{ 0, 0, 2.8f }), 0.18f, BLUE);
 
-                        // Negative Flip handles (-X, -Y, -Z)
-                        DrawCube(Vector3Add(oPos, Vector3{ -1.8f, 0, 0 }), 0.35f, 0.35f, 0.35f, Color{ 220, 50, 50, 220 });
-                        DrawCube(Vector3Add(oPos, Vector3{ 0, -1.8f, 0 }), 0.35f, 0.35f, 0.35f, Color{ 50, 200, 50, 220 });
-                        DrawCube(Vector3Add(oPos, Vector3{ 0, 0, -1.8f }), 0.35f, 0.35f, 0.35f, Color{ 50, 100, 220, 220 });
+                        // 2. Scale Cubes (at 3.8m on axes + white cube at center)
+                        DrawLine3D(Vector3Add(oPos, Vector3{ 2.8f, 0, 0 }), Vector3Add(oPos, Vector3{ 3.8f, 0, 0 }), Color{ 255, 120, 120, 255 });
+                        DrawLine3D(Vector3Add(oPos, Vector3{ 0, 2.8f, 0 }), Vector3Add(oPos, Vector3{ 0, 3.8f, 0 }), Color{ 120, 255, 120, 255 });
+                        DrawLine3D(Vector3Add(oPos, Vector3{ 0, 0, 2.8f }), Vector3Add(oPos, Vector3{ 0, 0, 3.8f }), Color{ 120, 150, 255, 255 });
+                        DrawCube(Vector3Add(oPos, Vector3{ 3.8f, 0, 0 }), 0.32f, 0.32f, 0.32f, RED);
+                        DrawCube(Vector3Add(oPos, Vector3{ 0, 3.8f, 0 }), 0.32f, 0.32f, 0.32f, GREEN);
+                        DrawCube(Vector3Add(oPos, Vector3{ 0, 0, 3.8f }), 0.32f, 0.32f, 0.32f, BLUE);
+                        DrawCube(oPos, 0.28f, 0.28f, 0.28f, WHITE);
+
+                        // 3. 3D Rotation Rings (radius 2.2m)
+                        DrawCircle3D(oPos, 2.2f, Vector3{ 1, 0, 0 }, 90.0f, Color{ 0, 255, 120, 170 }); // Yaw ring
+                        DrawCircle3D(oPos, 2.2f, Vector3{ 0, 1, 0 }, 90.0f, Color{ 255, 60, 60, 170 }); // Pitch ring
+                        DrawCircle3D(oPos, 2.2f, Vector3{ 0, 0, 1 }, 90.0f, Color{ 60, 120, 255, 170 }); // Roll ring
+                        DrawSphere(Vector3Add(oPos, Vector3{ 1.55f, 0.0f, 1.55f }), 0.16f, Color{ 0, 255, 120, 255 });
+                        DrawSphere(Vector3Add(oPos, Vector3{ 0.0f, 1.55f, 1.55f }), 0.16f, Color{ 255, 60, 60, 255 });
+                        DrawSphere(Vector3Add(oPos, Vector3{ 1.55f, 1.55f, 0.0f }), 0.16f, Color{ 60, 120, 255, 255 });
+
+                        // 4. Negative Flip handles (-X, -Y, -Z)
+                        DrawCube(Vector3Add(oPos, Vector3{ -1.8f, 0, 0 }), 0.32f, 0.32f, 0.32f, Color{ 220, 50, 50, 220 });
+                        DrawCube(Vector3Add(oPos, Vector3{ 0, -1.8f, 0 }), 0.32f, 0.32f, 0.32f, Color{ 50, 200, 50, 220 });
+                        DrawCube(Vector3Add(oPos, Vector3{ 0, 0, -1.8f }), 0.32f, 0.32f, 0.32f, Color{ 50, 100, 220, 220 });
                     }
                 }
             }
@@ -3787,52 +4129,71 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 DrawTextEx(fontUIBold, "Collision Shapes (10 Types)", Vector2{ 12.0f, ly }, 13, 0.4f, Color{ 255, 215, 0, 255 });
                 ly += 22.0f;
 
-                // 10 Custom Collision Shape Buttons (2 columns)
-                const char* shapeNames[] = {
-                    "+ Square", "+ Rect Wall",
-                    "+ Circle", "+ 3D Cube",
-                    "+ Cylinder", "+ Capsule",
-                    "+ Sphere", "+ Wedge Ramp",
-                    "+ Fall Zone", "+ Kill Box"
+                // 12 Visual Isometric Collision Shape Cards (Plan v7.0 Task 3)
+                const char* shapeLabels[12] = {
+                    "Flat Wall", "Flat Floor",
+                    "Square", "Rect Wall",
+                    "Circle", "3D Cube",
+                    "Cylinder", "Capsule",
+                    "Sphere", "Wedge Ramp",
+                    "Fall Zone", "Kill Box"
                 };
-                EntityType shapeTypes[] = {
+                EntityType shapeTypes[12] = {
+                    ENT_COL_FLAT_WALL, ENT_COL_FLAT_FLOOR,
                     ENT_COL_SQUARE, ENT_COL_RECT,
                     ENT_COL_CIRCLE, ENT_COL_CUBE,
                     ENT_COL_CYLINDER, ENT_COL_CAPSULE,
                     ENT_COL_SPHERE, ENT_COL_WEDGE,
                     ENT_COL_FALL_ZONE, ENT_COL_KILL_ZONE
                 };
+                Color shapeColors[12] = {
+                    Color{ 0, 220, 255, 255 }, Color{ 50, 230, 140, 255 },
+                    Color{ 255, 215, 0, 255 }, Color{ 100, 180, 255, 255 },
+                    Color{ 255, 140, 50, 255 }, Color{ 120, 150, 255, 255 },
+                    Color{ 180, 120, 255, 255 }, Color{ 255, 120, 200, 255 },
+                    Color{ 100, 230, 255, 255 }, Color{ 230, 200, 80, 255 },
+                    Color{ 255, 160, 40, 255 }, Color{ 240, 50, 50, 255 }
+                };
 
-                for (int s = 0; s < 10; s += 2) {
-                    Rectangle b1 = { 10.0f, ly, 120.0f, 24.0f };
-                    Rectangle b2 = { 136.0f, ly, 120.0f, 24.0f };
-                    Color cBg = (s >= 8) ? Color{ 140, 50, 40, 255 } : Color{ 40, 55, 80, 255 };
+                auto SpawnShape = [&](EntityType st, int beh) {
+                    LevelEntity ne{};
+                    ne.id = (int)levelEntities.size();
+                    ne.type = st;
+                    Vector3 fwd = { -sinf(editorCamYaw) * cosf(editorCamPitch), sinf(editorCamPitch), -cosf(editorCamYaw) * cosf(editorCamPitch) };
+                    ne.position = Vector3Add(editorCamPos, Vector3Scale(fwd, 6.0f));
+                    ne.scale = 1.0f;
+                    ne.sizeX = 2.0f; ne.sizeY = 2.0f; ne.sizeZ = 2.0f;
+                    ne.radius = 2.0f;
+                    ne.flipX = 1; ne.flipY = 1; ne.flipZ = 1;
+                    ne.colBehavior = beh;
+                    AssignEntityModelAndProps(ne);
+                    levelEntities.push_back(ne);
+                    selectedObs = (int)levelEntities.size() - 1;
+                    editorMsg = TextFormat("Spawned %s!", ENTITY_TYPE_NAMES[st]);
+                    editorMsgTimer = 2.0f;
+                };
 
-                    auto SpawnShape = [&](EntityType st, int beh) {
-                        LevelEntity ne{};
-                        ne.id = (int)levelEntities.size();
-                        ne.type = st;
-                        Vector3 fwd = { -sinf(editorCamYaw) * cosf(editorCamPitch), sinf(editorCamPitch), -cosf(editorCamYaw) * cosf(editorCamPitch) };
-                        ne.position = Vector3Add(editorCamPos, Vector3Scale(fwd, 6.0f));
-                        ne.scale = 1.0f;
-                        ne.sizeX = 2.0f; ne.sizeY = 2.0f; ne.sizeZ = 2.0f;
-                        ne.radius = 2.0f;
-                        ne.flipX = 1; ne.flipY = 1; ne.flipZ = 1;
-                        ne.colBehavior = beh;
-                        AssignEntityModelAndProps(ne);
-                        levelEntities.push_back(ne);
-                        selectedObs = (int)levelEntities.size() - 1;
-                        editorMsg = TextFormat("Spawned %s!", ENTITY_TYPE_NAMES[st]);
-                        editorMsgTimer = 2.0f;
+                for (int s = 0; s < 12; s += 2) {
+                    Rectangle b1 = { 10.0f, ly, 120.0f, 48.0f };
+                    Rectangle b2 = { 136.0f, ly, 120.0f, 48.0f };
+
+                    auto DrawShapeCard = [&](Rectangle cRec, int idx) {
+                        bool hov = CheckCollisionPointRec(mousePos, cRec);
+                        Color cFill = hov ? Color{ 36, 45, 62, 255 } : Color{ 24, 30, 42, 255 };
+                        Color cBrd  = hov ? shapeColors[idx] : Color{ 48, 58, 80, 255 };
+                        DrawRectangleRounded(cRec, 0.15f, 3, cFill);
+                        DrawRectangleRoundedLinesEx(cRec, 0.15f, 3, 1.2f, cBrd);
+                        DrawColliderShapeIcon2D(idx, cRec, shapeColors[idx]);
+                        DrawTextEx(fontUIBold, shapeLabels[idx], Vector2{ cRec.x + 36.0f, cRec.y + 16.0f }, 11, 0.2f, WHITE);
+                        if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                            int beh = (shapeTypes[idx] == ENT_COL_FLAT_FLOOR) ? 4 : ((shapeTypes[idx] == ENT_COL_FALL_ZONE) ? 1 : ((shapeTypes[idx] == ENT_COL_KILL_ZONE) ? 2 : 0));
+                            SpawnShape(shapeTypes[idx], beh);
+                        }
                     };
 
-                    if (DrawGButton(b1, shapeNames[s], cBg, WHITE)) {
-                        SpawnShape(shapeTypes[s], (shapeTypes[s] == ENT_COL_FALL_ZONE) ? 1 : ((shapeTypes[s] == ENT_COL_KILL_ZONE) ? 2 : 0));
-                    }
-                    if (DrawGButton(b2, shapeNames[s+1], cBg, WHITE)) {
-                        SpawnShape(shapeTypes[s+1], (shapeTypes[s+1] == ENT_COL_FALL_ZONE) ? 1 : ((shapeTypes[s+1] == ENT_COL_KILL_ZONE) ? 2 : 0));
-                    }
-                    ly += 27.0f;
+                    DrawShapeCard(b1, s);
+                    DrawShapeCard(b2, s + 1);
+                    ly += 52.0f;
                 }
 
                 ly += 8.0f;
@@ -4073,6 +4434,65 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                         editorMsgTimer = 2.0f;
                     }
                     ry += 28.0f;
+
+                    // Obstacle Specific Controls (Plan v7.0 Task 2)
+                    DrawLine((int)rightRec.x + 10, (int)ry, (int)screenW - 10, (int)ry, Color{ 52, 60, 78, 255 }); ry += 8.0f;
+                    DrawTextEx(fontUIBold, "Obstacle Specific Controls:", Vector2{ rightRec.x + 14, ry }, 12, 0.4f, Color{ 255, 215, 0, 255 }); ry += 16.0f;
+
+                    // Arc Angle
+                    DrawTextEx(fontUI, TextFormat("Arc Angle: %.0f deg", o.arcAngleDeg), Vector2{ rightRec.x + 14, ry }, 11, 0.3f, Color{ 220, 225, 235, 255 }); ry += 14.0f;
+                    Rectangle bA1 = { rightRec.x + 12, ry, 68, 20 };
+                    Rectangle bA2 = { rightRec.x + 84, ry, 68, 20 };
+                    Rectangle bA3 = { rightRec.x + 158, ry, 68, 20 };
+                    Rectangle bA4 = { rightRec.x + 230, ry, 68, 20 };
+                    if (DrawGButton(bA1, "60 deg", Color{ 36, 43, 58, 255 }, WHITE, o.arcAngleDeg == 60.0f)) o.arcAngleDeg = 60.0f;
+                    if (DrawGButton(bA2, "90 deg", Color{ 36, 43, 58, 255 }, WHITE, o.arcAngleDeg == 90.0f)) o.arcAngleDeg = 90.0f;
+                    if (DrawGButton(bA3, "180 deg", Color{ 36, 43, 58, 255 }, WHITE, o.arcAngleDeg == 180.0f)) o.arcAngleDeg = 180.0f;
+                    if (DrawGButton(bA4, "360 deg", Color{ 36, 43, 58, 255 }, WHITE, o.arcAngleDeg >= 359.0f)) o.arcAngleDeg = 360.0f;
+                    ry += 24.0f;
+
+                    // Motion Mode
+                    DrawTextEx(fontUI, "Motion Mode & Direction:", Vector2{ rightRec.x + 14, ry }, 11, 0.3f, Color{ 220, 225, 235, 255 }); ry += 14.0f;
+                    Rectangle bM1 = { rightRec.x + 12, ry, 94, 20 };
+                    Rectangle bM2 = { rightRec.x + 110, ry, 94, 20 };
+                    Rectangle bM3 = { rightRec.x + 208, ry, 94, 20 };
+                    if (DrawGButton(bM1, "Ping-Pong", Color{ 36, 43, 58, 255 }, WHITE, o.animMode == 0)) o.animMode = 0;
+                    if (DrawGButton(bM2, "360 CW", Color{ 36, 43, 58, 255 }, WHITE, o.animMode == 1)) { o.animMode = 1; if (o.arcAngleDeg < 359.0f) o.arcAngleDeg = 360.0f; }
+                    if (DrawGButton(bM3, "360 CCW", Color{ 36, 43, 58, 255 }, WHITE, o.animMode == -1)) { o.animMode = -1; if (o.arcAngleDeg < 359.0f) o.arcAngleDeg = 360.0f; }
+                    ry += 24.0f;
+
+                    // Speed & Phase
+                    DrawTextEx(fontUI, TextFormat("Speed: %.1fx | Phase: %.0f deg", o.animSpeed, o.phaseOffsetDeg), Vector2{ rightRec.x + 14, ry }, 11, 0.3f, Color{ 220, 225, 235, 255 }); ry += 14.0f;
+                    Rectangle bSpM = { rightRec.x + 12, ry, 68, 20 };
+                    Rectangle bSpP = { rightRec.x + 84, ry, 68, 20 };
+                    Rectangle bPhM = { rightRec.x + 158, ry, 68, 20 };
+                    Rectangle bPhP = { rightRec.x + 230, ry, 68, 20 };
+                    if (DrawGButton(bSpM, "Spd -0.2", Color{ 36, 43, 58, 255 }, WHITE)) o.animSpeed = Clamp(o.animSpeed - 0.2f, 0.0f, 5.0f);
+                    if (DrawGButton(bSpP, "Spd +0.2", Color{ 36, 43, 58, 255 }, WHITE)) o.animSpeed = Clamp(o.animSpeed + 0.2f, 0.0f, 5.0f);
+                    if (DrawGButton(bPhM, "Phase -45", Color{ 36, 43, 58, 255 }, WHITE)) o.phaseOffsetDeg = fmodf(o.phaseOffsetDeg - 45.0f + 360.0f, 360.0f);
+                    if (DrawGButton(bPhP, "Phase +45", Color{ 36, 43, 58, 255 }, WHITE)) o.phaseOffsetDeg = fmodf(o.phaseOffsetDeg + 45.0f, 360.0f);
+                    ry += 24.0f;
+
+                    // Slide Dist & Bounce Mult
+                    DrawTextEx(fontUI, TextFormat("Slide: %.2fm | Bounce: %.2fx", o.slideDist, o.bounceMult), Vector2{ rightRec.x + 14, ry }, 11, 0.3f, Color{ 220, 225, 235, 255 }); ry += 14.0f;
+                    Rectangle bSlM = { rightRec.x + 12, ry, 68, 20 };
+                    Rectangle bSlP = { rightRec.x + 84, ry, 68, 20 };
+                    Rectangle bBncM = { rightRec.x + 158, ry, 68, 20 };
+                    Rectangle bBncP = { rightRec.x + 230, ry, 68, 20 };
+                    if (DrawGButton(bSlM, "Sl -0.25", Color{ 36, 43, 58, 255 }, WHITE)) o.slideDist = Clamp(o.slideDist - 0.25f, 0.2f, 8.0f);
+                    if (DrawGButton(bSlP, "Sl +0.25", Color{ 36, 43, 58, 255 }, WHITE)) o.slideDist = Clamp(o.slideDist + 0.25f, 0.2f, 8.0f);
+                    if (DrawGButton(bBncM, "Bnc -0.25", Color{ 36, 43, 58, 255 }, WHITE)) o.bounceMult = Clamp(o.bounceMult - 0.25f, 0.5f, 5.0f);
+                    if (DrawGButton(bBncP, "Bnc +0.25", Color{ 36, 43, 58, 255 }, WHITE)) o.bounceMult = Clamp(o.bounceMult + 0.25f, 0.5f, 5.0f);
+                    ry += 24.0f;
+
+                    // Collision Lethality
+                    Rectangle bLethal = { rightRec.x + 12, ry, rightDockW - 24, 22 };
+                    const char* letText = o.isLethal ? "Effect: LETHAL (Explode Boat)" : "Effect: NON-LETHAL (Push / Bounce)";
+                    Color letCol = o.isLethal ? Color{ 150, 45, 45, 255 } : Color{ 45, 120, 75, 255 };
+                    if (DrawGButton(bLethal, letText, letCol, WHITE, true)) {
+                        o.isLethal = !o.isLethal;
+                    }
+                    ry += 26.0f;
                 } else {
                     DrawRectangleRec(Rectangle{ rightRec.x + 12, ry, rightDockW - 24, 60 }, Color{ 22, 26, 34, 255 });
                     DrawTextEx(fontUI, "No entity selected.", Vector2{ rightRec.x + 24, ry + 12 }, 12, 0.3f, Color{ 200, 205, 215, 255 });
@@ -4134,211 +4554,489 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
         }
         } else if (currentScreen == SCREEN_MAIN_MENU) {
             ClearBackground(Color{ 18, 22, 34, 255 });
-            if (texMenuBg.id != 0) {
-                DrawTexturePro(texMenuBg, Rectangle{ 0, 0, (float)texMenuBg.width, (float)texMenuBg.height },
-                               Rectangle{ 0, 0, (float)GetScreenWidth(), (float)GetScreenHeight() }, Vector2{0, 0}, 0.0f, WHITE);
-            }
-            DrawRectangleGradientV(0, 0, GetScreenWidth(), GetScreenHeight(), Color{ 10, 15, 28, 140 }, Color{ 5, 8, 18, 210 });
 
-            float logoBob = sinf(runTime * 2.4f) * 10.0f;
-            float logoW = 620.0f;
-            float logoH = 260.0f;
-            if (texLogoSplash.id != 0) {
-                float aspect = (float)texLogoSplash.width / (float)texLogoSplash.height;
-                logoH = 250.0f;
-                logoW = logoH * aspect;
-                float logoX = ((float)GetScreenWidth() - logoW) * 0.5f;
-                float logoY = 60.0f + logoBob;
-                DrawTexturePro(texLogoSplash, Rectangle{ 0, 0, (float)texLogoSplash.width, (float)texLogoSplash.height },
-                               Rectangle{ logoX, logoY, logoW, logoH }, Vector2{0, 0}, 0.0f, WHITE);
+            // 1. Live 3D Scene of Start Basin / Pond (Plan v7.0 Task 4, matching 1.jpg)
+            Camera3D menuCam = { 0 };
+            menuCam.position = Vector3{ 9.8f, 4.3f, 99.8f };
+            menuCam.target   = Vector3{ 15.6f, 0.8f, 86.2f };
+            menuCam.up       = Vector3{ 0.0f, 1.0f, 0.0f };
+            menuCam.fovy     = 50.0f;
+            menuCam.projection = CAMERA_PERSPECTIVE;
+
+            BeginMode3D(menuCam);
+                DrawModel(wallModel, trackOffset, 1.0f, WHITE);
+                DrawModel(waterModel, trackOffset, 1.0f, WHITE);
+                rlPushMatrix();
+                    rlTranslatef(startGatePos.x, startGatePos.y, startGatePos.z);
+                    DrawModel(startModel, Vector3{0,0,0}, 1.0f, WHITE);
+                rlPopMatrix();
+
+                // Raft gently floating with wave bob in pond
+                float raftBob = sinf(runTime * 2.0f) * 0.04f;
+                Vector3 menuRaftPos = Vector3{ 15.43f, 0.58f + raftBob, 88.5f };
+                rlPushMatrix();
+                    rlTranslatef(menuRaftPos.x, menuRaftPos.y, menuRaftPos.z);
+                    rlRotatef(180.0f + sinf(runTime * 0.8f) * 4.0f, 0, 1, 0);
+                    DrawModel(boatModel, Vector3{0,0,0}, 1.0f, WHITE);
+                rlPopMatrix();
+
+                // Hippos swimming in the pond (Grey in front, Green behind)
+                rlPushMatrix();
+                    float h1Bob = sinf(runTime * 1.8f) * 0.03f;
+                    rlTranslatef(14.8f, -0.25f + h1Bob, 92.5f);
+                    rlRotatef(20.0f + sinf(runTime * 0.5f) * 15.0f, 0, 1, 0);
+                    rlScalef(0.9f, 0.9f, 0.9f);
+                    DrawModel(charB, Vector3{0,0,0}, 1.0f, WHITE);
+                rlPopMatrix();
+
+                rlPushMatrix();
+                    float h2Bob = sinf(runTime * 2.2f + 1.0f) * 0.03f;
+                    rlTranslatef(13.2f, -0.25f + h2Bob, 84.8f);
+                    rlRotatef(190.0f + sinf(runTime * 0.6f) * 12.0f, 0, 1, 0);
+                    rlScalef(0.9f, 0.9f, 0.9f);
+                    DrawModel(charA, Vector3{0,0,0}, 1.0f, WHITE);
+                rlPopMatrix();
+            EndMode3D();
+
+            // 2. Authentic Top-Left Logo (Icon_Logo.png)
+            if (texMainLogo.id != 0) {
+                float logoW = 340.0f;
+                float logoH = 175.0f;
+                DrawTexturePro(texMainLogo, Rectangle{ 0, 0, (float)texMainLogo.width, (float)texMainLogo.height },
+                               Rectangle{ 42.0f, 26.0f, logoW, logoH }, Vector2{0, 0}, 0.0f, WHITE);
             } else {
-                Vector2 lsz = MeasureTextEx(fontUIBold, "FART TOGETHER", 48, 1.0f);
-                DrawTextEx(fontUIBold, "FART TOGETHER", Vector2{ ((float)GetScreenWidth() - lsz.x) * 0.5f, 100.0f + logoBob }, 48, 1.0f, Color{ 255, 215, 0, 255 });
+                DrawTextEx(fontUIBold, "FART TOGETHER", Vector2{ 50, 40 }, 42, 1.0f, Color{ 255, 215, 0, 255 });
             }
 
-            float cardW = 460.0f;
-            float cardH = 360.0f;
-            float cardX = ((float)GetScreenWidth() - cardW) * 0.5f;
-            float cardY = 380.0f;
-            Rectangle menuCard = { cardX, cardY, cardW, cardH };
-            DrawRectangleRounded(menuCard, 0.12f, 4, Color{ 15, 23, 42, 235 });
-            DrawRectangleRoundedLinesEx(menuCard, 0.12f, 4, 1.8f, Color{ 59, 130, 246, 180 });
+            // 3. Authentic Left Menu Items with Slanted Pink Highlight
+            const char* menuLabels[6] = {
+                "CREATE LOBBY", "FIND LOBBY", "PLAY LOCAL CO-OP",
+                "SETTINGS", "CREDITS", "EXIT GAME"
+            };
+            float menuYStarts[6] = { 245.0f, 310.0f, 395.0f, 448.0f, 498.0f, 548.0f };
 
-            float by = cardY + 28.0f;
-            Rectangle btnSolo = { cardX + 24.0f, by, cardW - 48.0f, 54.0f };
-            if (DrawMenuBtn(btnSolo, "PLAY SOLO FART RUN (1P)", Color{ 37, 99, 235, 255 }, WHITE, 18, true)) {
-                singlePirateMode = true;
-                currentScreen = SCREEN_GAMEPLAY;
-                p1RimAngle = -PI;
+            static int menuSelectedIdx = 1;
+            if (IsKeyPressed(KEY_UP))   { menuSelectedIdx = (menuSelectedIdx <= 0) ? 5 : menuSelectedIdx - 1; }
+            if (IsKeyPressed(KEY_DOWN)) { menuSelectedIdx = (menuSelectedIdx >= 5) ? 0 : menuSelectedIdx + 1; }
+
+            for (int m = 0; m < 6; m++) {
+                float my = menuYStarts[m];
+                float mw = (m < 2) ? 320.0f : 290.0f;
+                float mh = (m < 2) ? 50.0f : 42.0f;
+                Rectangle itemHit = { 35.0f, my, mw, mh };
+                bool isHov = CheckCollisionPointRec(mousePos, itemHit);
+                if (isHov) menuSelectedIdx = m;
+                bool isSel = (menuSelectedIdx == m);
+
+                if (isSel) {
+                    DrawSlantedRect(32.0f, my, mw + 30.0f, mh, 14.0f, Color{ 255, 38, 118, 255 });
+                    if (texIconArrow.id != 0) {
+                        DrawTexturePro(texIconArrow, Rectangle{ 0, 0, (float)texIconArrow.width, (float)texIconArrow.height },
+                                       Rectangle{ 42.0f, my + mh * 0.5f - 11.0f, 22.0f, 22.0f }, Vector2{0,0}, 0.0f, WHITE);
+                    } else {
+                        DrawTextEx(fontUIBold, ">", Vector2{ 42.0f, my + 10.0f }, 24, 0.4f, WHITE);
+                    }
+                }
+
+                float textX = isSel ? 74.0f : 52.0f;
+                float textY = my + (mh - ((m < 2) ? 24.0f : 18.0f)) * 0.5f;
+                DrawTextEx(fontUIBold, menuLabels[m], Vector2{ textX, textY }, (m < 2) ? 24 : 18, 0.4f, WHITE);
+
+                if ((isHov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || (isSel && IsKeyPressed(KEY_ENTER))) {
+                    if (m == 0) { // CREATE LOBBY
+                        LanInitHost(7777);
+                        currentScreen = SCREEN_LAN_LOBBY;
+                    } else if (m == 1) { // FIND LOBBY
+                        LanInitClient(7777);
+                        currentScreen = SCREEN_LAN_LOBBY;
+                    } else if (m == 2) { // PLAY LOCAL CO-OP
+                        singlePirateMode = false;
+                        currentScreen = SCREEN_GAMEPLAY;
+                    } else if (m == 3) { // SETTINGS
+                        currentScreen = SCREEN_SETTINGS;
+                    } else if (m == 4) { // CREDITS
+                        editorMsg = "Fart Together - Authentic Custom Engine by DeepMind AI";
+                        editorMsgTimer = 3.5f;
+                    } else if (m == 5) { // EXIT
+                        break;
+                    }
+                }
             }
-            by += 68.0f;
 
-            Rectangle btnLan = { cardX + 24.0f, by, cardW - 48.0f, 54.0f };
-            if (DrawMenuBtn(btnLan, "LAN MULTIPLAYER (CO-OP)", Color{ 16, 149, 193, 255 }, WHITE, 18, true)) {
+            // Slanted dark box with lime-green code GGFD54Y next to FIND LOBBY
+            Rectangle boxFindRec = { 385.0f, 310.0f, 175.0f, 50.0f };
+            bool hovCode = CheckCollisionPointRec(mousePos, boxFindRec);
+            DrawSlantedRect(boxFindRec.x, boxFindRec.y, boxFindRec.width, boxFindRec.height, 14.0f, hovCode ? Color{ 32, 62, 75, 235 } : Color{ 22, 45, 55, 210 });
+            DrawSlantedRectLines(boxFindRec.x, boxFindRec.y, boxFindRec.width, boxFindRec.height, 14.0f, 1.8f, hovCode ? Color{ 175, 255, 45, 255 } : Color{ 60, 105, 120, 220 });
+            DrawTextEx(fontUIBold, "GGFD54Y", Vector2{ boxFindRec.x + 32.0f, boxFindRec.y + 12.0f }, 24, 0.5f, Color{ 175, 255, 45, 255 });
+            if (hovCode && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                LanInitClient(7777);
                 currentScreen = SCREEN_LAN_LOBBY;
             }
-            by += 68.0f;
 
-            Rectangle btnSett = { cardX + 24.0f, by, cardW - 48.0f, 48.0f };
-            if (DrawMenuBtn(btnSett, "SETTINGS & AUDIO", Color{ 51, 65, 85, 255 }, WHITE, 16, true)) {
-                currentScreen = SCREEN_SETTINGS;
+            // Bottom Bar
+            float botY = (float)GetScreenHeight() - 44.0f;
+            DrawSlantedRect(30.0f, botY, 110.0f, 32.0f, 10.0f, Color{ 20, 26, 38, 220 });
+            DrawTextEx(fontUIBold, "[ESC] BACK", Vector2{ 42.0f, botY + 8.0f }, 13, 0.3f, Color{ 200, 210, 225, 255 });
+
+            DrawSlantedRect(150.0f, botY, 125.0f, 32.0f, 10.0f, Color{ 20, 26, 38, 220 });
+            DrawTextEx(fontUIBold, "[ENTER] SELECT", Vector2{ 162.0f, botY + 8.0f }, 13, 0.3f, Color{ 200, 210, 225, 255 });
+
+            const char* verStr = "v0.0.1 / Authentic Demo";
+            Vector2 vSz = MeasureTextEx(fontUI, verStr, 13, 0.3f);
+            DrawTextEx(fontUI, verStr, Vector2{ ((float)GetScreenWidth() - vSz.x) * 0.5f, botY + 8.0f }, 13, 0.3f, Color{ 148, 163, 184, 200 });
+
+            Rectangle discRec = { (float)GetScreenWidth() - 155.0f, botY, 125.0f, 32.0f };
+            bool hovDisc = CheckCollisionPointRec(mousePos, discRec);
+            DrawSlantedRect(discRec.x, discRec.y, discRec.width, discRec.height, 10.0f, hovDisc ? Color{ 88, 101, 242, 255 } : Color{ 20, 26, 38, 220 });
+            if (texIconDiscord.id != 0) {
+                DrawTexturePro(texIconDiscord, Rectangle{ 0, 0, (float)texIconDiscord.width, (float)texIconDiscord.height },
+                               Rectangle{ discRec.x + 14.0f, botY + 5.0f, 22.0f, 22.0f }, Vector2{0,0}, 0.0f, WHITE);
             }
-            by += 60.0f;
-
-            Rectangle btnQuit = { cardX + 24.0f, by, cardW - 48.0f, 48.0f };
-            if (DrawMenuBtn(btnQuit, "EXIT GAME", Color{ 127, 29, 29, 255 }, WHITE, 16, true)) {
-                break;
-            }
-
-            const char* footerText = "Authentic 1:1 C++ Native Engine  |  Flat Water Buoyancy  |  360 deg Solo Steering";
-            Vector2 fsz = MeasureTextEx(fontUI, footerText, 12, 0.3f);
-            DrawTextEx(fontUI, footerText, Vector2{ ((float)GetScreenWidth() - fsz.x) * 0.5f, (float)GetScreenHeight() - 32.0f }, 12, 0.3f, Color{ 148, 163, 184, 200 });
+            DrawTextEx(fontUIBold, "DISCORD", Vector2{ discRec.x + 42.0f, botY + 8.0f }, 13, 0.3f, WHITE);
 
         } else if (currentScreen == SCREEN_LAN_LOBBY) {
             ClearBackground(Color{ 18, 22, 34, 255 });
-            if (texMenuBg.id != 0) {
-                DrawTexturePro(texMenuBg, Rectangle{ 0, 0, (float)texMenuBg.width, (float)texMenuBg.height },
-                               Rectangle{ 0, 0, (float)GetScreenWidth(), (float)GetScreenHeight() }, Vector2{0, 0}, 0.0f, WHITE);
+
+            // Live 3D Scene of Canyon & Standing Pirate (Plan v7.0 Task 4, matching image_98a07c.jpg)
+            Camera3D lobbyCam = { 0 };
+            lobbyCam.position = Vector3{ 15.55f, 2.2f, 85.2f };
+            lobbyCam.target   = Vector3{ 15.55f, 1.25f, 80.0f };
+            lobbyCam.up       = Vector3{ 0.0f, 1.0f, 0.0f };
+            lobbyCam.fovy     = 42.0f;
+            lobbyCam.projection = CAMERA_PERSPECTIVE;
+
+            BeginMode3D(lobbyCam);
+                DrawModel(wallModel, trackOffset, 1.0f, WHITE);
+                rlPushMatrix();
+                    float pBob = sinf(runTime * 2.5f) * 0.025f;
+                    rlTranslatef(15.55f, 0.15f + pBob, 80.0f);
+                    rlRotatef(0.0f, 0, 1, 0); // facing camera
+                    rlScalef(1.25f, 1.25f, 1.25f);
+                    Model* pCurChar = (selectedLobbyChar % 2 == 0) ? &charB : &charA;
+                    DrawModel(*pCurChar, Vector3{0,0,0}, 1.0f, WHITE);
+                rlPopMatrix();
+            EndMode3D();
+
+            // Blue YOU Marker floating above head
+            Vector2 headScreen = GetWorldToScreen(Vector3{ 15.55f, 2.15f + sinf(runTime * 2.5f) * 0.025f, 80.0f }, lobbyCam);
+            if (texMarkerYou.id != 0) {
+                float mW = 78.0f, mH = 34.0f;
+                DrawTexturePro(texMarkerYou, Rectangle{ 0, 0, (float)texMarkerYou.width, (float)texMarkerYou.height },
+                               Rectangle{ headScreen.x - mW * 0.5f, headScreen.y - mH, mW, mH }, Vector2{0,0}, 0.0f, WHITE);
+            } else {
+                DrawTextEx(fontUIBold, "YOU", Vector2{ headScreen.x - 16, headScreen.y - 25 }, 16, 0.3f, Color{ 56, 189, 248, 255 });
             }
-            DrawRectangleGradientV(0, 0, GetScreenWidth(), GetScreenHeight(), Color{ 10, 15, 28, 160 }, Color{ 5, 8, 18, 230 });
 
-            float lobbyW = 860.0f;
-            float lobbyH = 680.0f;
-            float lobbyX = ((float)GetScreenWidth() - lobbyW) * 0.5f;
-            float lobbyY = 80.0f;
-            Rectangle lobbyCard = { lobbyX, lobbyY, lobbyW, lobbyH };
-            DrawRectangleRounded(lobbyCard, 0.08f, 4, Color{ 15, 23, 42, 240 });
-            DrawRectangleRoundedLinesEx(lobbyCard, 0.08f, 4, 1.8f, Color{ 16, 149, 193, 200 });
+            // Top Center Trapezoid Banner "LOBBY"
+            float topBannerW = 280.0f, topBannerH = 48.0f;
+            float topBannerX = ((float)GetScreenWidth() - topBannerW) * 0.5f;
+            DrawTrapezoid(topBannerX, 0, topBannerW, topBannerH, 18.0f, Color{ 28, 33, 53, 255 });
+            DrawTrapezoidLines(topBannerX, 0, topBannerW, topBannerH, 18.0f, 1.5f, Color{ 70, 80, 110, 255 });
+            Vector2 lobSz = MeasureTextEx(fontUIBold, "LOBBY", 22, 0.5f);
+            DrawTextEx(fontUIBold, "LOBBY", Vector2{ ((float)GetScreenWidth() - lobSz.x) * 0.5f, 12.0f }, 22, 0.5f, WHITE);
 
-            DrawTextEx(fontUIBold, "LAN MULTIPLAYER CO-OP LOBBY", Vector2{ lobbyX + 32.0f, lobbyY + 24.0f }, 24, 0.5f, Color{ 255, 215, 0, 255 });
-            DrawTextEx(fontUI, "Choose your Hippo Pirate and sync across Local Area Network", Vector2{ lobbyX + 34.0f, lobbyY + 56.0f }, 13, 0.3f, Color{ 148, 163, 184, 255 });
+            // Top Right: YOUR LOBBY CODE 8HF78N + Copy Icon
+            float codeBoxW = 210.0f, codeBoxH = 54.0f;
+            float codeBoxX = (float)GetScreenWidth() - codeBoxW - 35.0f;
+            float codeBoxY = 16.0f;
+            DrawSlantedRect(codeBoxX, codeBoxY, codeBoxW, codeBoxH, 12.0f, Color{ 22, 30, 48, 220 });
+            DrawSlantedRectLines(codeBoxX, codeBoxY, codeBoxW, codeBoxH, 12.0f, 1.2f, Color{ 56, 75, 110, 200 });
+            DrawTextEx(fontUI, "YOUR LOBBY CODE", Vector2{ codeBoxX + 22.0f, codeBoxY + 8.0f }, 11, 0.3f, Color{ 160, 175, 200, 255 });
+            DrawTextEx(fontUIBold, "8HF78N", Vector2{ codeBoxX + 22.0f, codeBoxY + 24.0f }, 22, 0.5f, Color{ 175, 255, 45, 255 });
+            if (texIconCopy.id != 0) {
+                DrawTexturePro(texIconCopy, Rectangle{ 0, 0, (float)texIconCopy.width, (float)texIconCopy.height },
+                               Rectangle{ codeBoxX + codeBoxW - 38.0f, codeBoxY + 24.0f, 20.0f, 20.0f }, Vector2{0,0}, 0.0f, Color{ 175, 255, 45, 255 });
+            }
 
-            float charW = 180.0f;
-            float charH = 220.0f;
-            float charGap = 16.0f;
-            float charStartX = lobbyX + (lobbyW - (4 * charW + 3 * charGap)) * 0.5f;
-            float charY = lobbyY + 95.0f;
+            // 4 Character Cards below the standing character
+            float cardW = 90.0f, cardH = 96.0f, cardGap = 16.0f;
+            float startCardX = ((float)GetScreenWidth() - (4 * cardW + 3 * cardGap)) * 0.5f;
+            float cardY = (float)GetScreenHeight() * 0.50f;
 
-            const char* charNames[4] = { "Chunky Green", "Fiery Orange", "Speedy Blue", "Smoky Grey" };
-            for (int k = 0; k < 4; k++) {
-                Rectangle cRec = { charStartX + k * (charW + charGap), charY, charW, charH };
-                bool hov = CheckCollisionPointRec(mousePos, cRec);
-                bool sel = (selectedLobbyChar == k);
-                Color cFill = sel ? Color{ 30, 58, 95, 255 } : (hov ? Color{ 25, 35, 55, 255 } : Color{ 18, 26, 42, 240 });
-                Color cBorder = sel ? Color{ 255, 215, 0, 255 } : (hov ? Color{ 59, 130, 246, 255 } : Color{ 51, 65, 85, 200 });
+            for (int c = 0; c < 4; c++) {
+                Rectangle cRec = { startCardX + c * (cardW + cardGap), cardY, cardW, cardH };
+                bool isHov = CheckCollisionPointRec(mousePos, cRec);
+                bool isSel = (selectedLobbyChar == c);
 
-                DrawRectangleRounded(cRec, 0.12f, 4, cFill);
-                DrawRectangleRoundedLinesEx(cRec, 0.12f, 4, sel ? 2.5f : 1.2f, cBorder);
-
-                if (texLobbyChars[k].id != 0) {
-                    float sprW = 140.0f;
-                    float sprH = 140.0f;
-                    DrawTexturePro(texLobbyChars[k], Rectangle{ 0, 0, (float)texLobbyChars[k].width, (float)texLobbyChars[k].height },
-                                   Rectangle{ cRec.x + (charW - sprW) * 0.5f, cRec.y + 12.0f, sprW, sprH }, Vector2{0, 0}, 0.0f, WHITE);
+                DrawRectangleRounded(cRec, 0.12f, 4, Color{ 245, 248, 252, 255 });
+                if (texLobbyCards[c].id != 0) {
+                    DrawTexturePro(texLobbyCards[c], Rectangle{ 0, 0, (float)texLobbyCards[c].width, (float)texLobbyCards[c].height },
+                                   Rectangle{ cRec.x + 8.0f, cRec.y + 6.0f, cardW - 16.0f, cardH - 12.0f }, Vector2{0,0}, 0.0f, WHITE);
                 }
-                Vector2 nsz = MeasureTextEx(fontUIBold, charNames[k], 14, 0.3f);
-                DrawTextEx(fontUIBold, charNames[k], Vector2{ cRec.x + (charW - nsz.x) * 0.5f, cRec.y + 165.0f }, 14, 0.3f, sel ? Color{ 255, 215, 0, 255 } : WHITE);
-                const char* stLabel = sel ? "V SELECTED" : "SELECT";
-                Vector2 ssz = MeasureTextEx(fontUI, stLabel, 11, 0.2f);
-                DrawTextEx(fontUI, stLabel, Vector2{ cRec.x + (charW - ssz.x) * 0.5f, cRec.y + 190.0f }, 11, 0.2f, sel ? Color{ 74, 222, 128, 255 } : Color{ 148, 163, 184, 200 });
+                if (isSel) {
+                    DrawRectangleRoundedLinesEx(cRec, 0.12f, 4, 3.5f, Color{ 238, 52, 132, 255 });
+                } else if (isHov) {
+                    DrawRectangleRoundedLinesEx(cRec, 0.12f, 4, 2.0f, Color{ 56, 189, 248, 255 });
+                }
 
-                if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                    selectedLobbyChar = k;
+                if (isHov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                    selectedLobbyChar = c;
+                }
+            }
+            if (IsKeyPressed(KEY_A) || IsKeyPressed(KEY_LEFT))  selectedLobbyChar = (selectedLobbyChar + 3) % 4;
+            if (IsKeyPressed(KEY_D) || IsKeyPressed(KEY_RIGHT)) selectedLobbyChar = (selectedLobbyChar + 1) % 4;
+
+            // Mode Selector: Purple Slanted Bar + 3 Mode Cards
+            float modeBarW = 540.0f, modeBarH = 34.0f;
+            float modeBarX = ((float)GetScreenWidth() - modeBarW) * 0.5f;
+            float modeBarY = cardY + cardH + 16.0f;
+            DrawSlantedRect(modeBarX, modeBarY, modeBarW, modeBarH, 10.0f, Color{ 126, 114, 228, 255 });
+            Vector2 smSz = MeasureTextEx(fontUIBold, "SELECT MODE", 15, 0.4f);
+            DrawTextEx(fontUIBold, "SELECT MODE", Vector2{ ((float)GetScreenWidth() - smSz.x) * 0.5f, modeBarY + 8.0f }, 15, 0.4f, WHITE);
+
+            float mCardW = 165.0f, mCardH = 75.0f, mCardGap = 15.0f;
+            float mStartX = ((float)GetScreenWidth() - (3 * mCardW + 2 * mCardGap)) * 0.5f;
+            float mCardsY = modeBarY + modeBarH + 6.0f;
+
+            Texture2D modeTexs[3] = { texModeFartRun, texModeTeamRace, texModeRaftRumble };
+            for (int mi = 0; mi < 3; mi++) {
+                Rectangle mcRec = { mStartX + mi * (mCardW + mCardGap), mCardsY, mCardW, mCardH };
+                DrawRectangleRounded(mcRec, 0.10f, 4, Color{ 240, 243, 250, 255 });
+                if (modeTexs[mi].id != 0) {
+                    Color mTint = (mi == 0) ? WHITE : Color{ 160, 160, 170, 180 };
+                    DrawTexturePro(modeTexs[mi], Rectangle{ 0, 0, (float)modeTexs[mi].width, (float)modeTexs[mi].height },
+                                   Rectangle{ mcRec.x + 4.0f, mcRec.y + 4.0f, mCardW - 8.0f, mCardH - 8.0f }, Vector2{0,0}, 0.0f, mTint);
+                }
+                if (mi == 0) {
+                    DrawRectangleRoundedLinesEx(mcRec, 0.10f, 4, 2.5f, Color{ 238, 52, 132, 255 });
+                } else {
+                    DrawRectangleRounded(Rectangle{ mcRec.x, mcRec.y + mCardH - 20.0f, mCardW, 20.0f }, 0.1f, 4, Color{ 40, 45, 60, 200 });
+                    Vector2 csSz = MeasureTextEx(fontUIBold, "Coming Soon", 11, 0.3f);
+                    DrawTextEx(fontUIBold, "Coming Soon", Vector2{ mcRec.x + (mCardW - csSz.x) * 0.5f, mcRec.y + mCardH - 16.0f }, 11, 0.3f, Color{ 200, 210, 225, 255 });
                 }
             }
 
-            float netY = charY + charH + 30.0f;
-            DrawTextEx(fontUIBold, "LAN Network Configuration:", Vector2{ lobbyX + 34.0f, netY }, 15, 0.4f, WHITE);
-            netY += 25.0f;
-
-            Rectangle btnHost = { lobbyX + 34.0f, netY, 260.0f, 44.0f };
-            Rectangle btnJoin = { lobbyX + 310.0f, netY, 260.0f, 44.0f };
-            bool isHost = (LanGetRole() == LAN_HOST);
-            bool isClient = (LanGetRole() == LAN_CLIENT);
-
-            if (DrawMenuBtn(btnHost, isHost ? "V HOSTING ROOM (Port 7777)" : "HOST LAN ROOM (Port 7777)",
-                            isHost ? Color{ 22, 101, 52, 255 } : Color{ 30, 41, 59, 255 }, WHITE, 13, true)) {
-                if (isHost) LanShutdown(); else LanInitHost(7777);
+            // Bottom-Left: Slanted Blue INVITE FRIENDS / Host LAN
+            float invW = 210.0f, invH = 46.0f;
+            float invX = 35.0f, invY = (float)GetScreenHeight() - 115.0f;
+            Rectangle invRec = { invX, invY, invW, invH };
+            bool hovInv = CheckCollisionPointRec(mousePos, invRec);
+            DrawSlantedRect(invX, invY, invW, invH, 12.0f, hovInv ? Color{ 24, 160, 235, 255 } : Color{ 14, 138, 206, 255 });
+            DrawTextEx(fontUIBold, "INVITE FRIENDS", Vector2{ invX + 32.0f, invY + 12.0f }, 15, 0.4f, Color{ 255, 235, 60, 255 });
+            if (hovInv && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                if (LanGetRole() == LAN_OFFLINE) LanInitHost(7777);
+                editorMsg = "Hosted LAN Room on port 7777!";
+                editorMsgTimer = 2.5f;
             }
 
-            if (DrawMenuBtn(btnJoin, isClient ? "V CONNECTED AS CLIENT" : "JOIN LOCAL HOST (7777)",
-                            isClient ? Color{ 22, 101, 52, 255 } : Color{ 30, 41, 59, 255 }, WHITE, 13, true)) {
-                if (isClient) LanShutdown(); else LanInitClient(7777);
-            }
+            // Bottom Bar (Navy)
+            float lBotH = 54.0f;
+            float lBotY = (float)GetScreenHeight() - lBotH;
+            DrawRectangle(0, (int)lBotY, GetScreenWidth(), (int)lBotH, Color{ 18, 24, 38, 255 });
 
-            Rectangle statusRec = { lobbyX + 590.0f, netY, lobbyW - 624.0f, 44.0f };
-            DrawRectangleRounded(statusRec, 0.2f, 4, Color{ 18, 26, 42, 255 });
-            DrawRectangleRoundedLinesEx(statusRec, 0.2f, 4, 1.0f, Color{ 51, 65, 85, 200 });
-            const char* roleStr = isHost ? "ROLE: HOST" : (isClient ? "ROLE: CLIENT" : "ROLE: OFFLINE");
-            DrawTextEx(fontUIBold, roleStr, Vector2{ statusRec.x + 14.0f, statusRec.y + 8.0f }, 12, 0.3f, isHost ? Color{ 74, 222, 128, 255 } : (isClient ? Color{ 56, 189, 248, 255 } : Color{ 148, 163, 184, 255 }));
-            DrawTextEx(fontUI, "Status: Ready to Sync", Vector2{ statusRec.x + 14.0f, statusRec.y + 24.0f }, 11, 0.2f, Color{ 200, 210, 225, 255 });
-
-            float actY = lobbyY + lobbyH - 75.0f;
-            Rectangle btnBack = { lobbyX + 34.0f, actY, 220.0f, 48.0f };
-            if (DrawMenuBtn(btnBack, "<- BACK TO MENU", Color{ 51, 65, 85, 255 }, WHITE, 14, true)) {
+            Rectangle btnLeaveRec = { 25.0f, lBotY + 10.0f, 130.0f, 34.0f };
+            bool hovLeave = CheckCollisionPointRec(mousePos, btnLeaveRec);
+            DrawSlantedRect(btnLeaveRec.x, btnLeaveRec.y, btnLeaveRec.width, btnLeaveRec.height, 10.0f, hovLeave ? Color{ 45, 55, 75, 255 } : Color{ 28, 36, 52, 255 });
+            DrawTextEx(fontUIBold, "[ESC] LEAVE", Vector2{ btnLeaveRec.x + 16.0f, btnLeaveRec.y + 8.0f }, 13, 0.3f, WHITE);
+            if ((hovLeave && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_ESCAPE)) {
                 currentScreen = SCREEN_MAIN_MENU;
             }
 
-            Rectangle btnStartLan = { lobbyX + lobbyW - 320.0f, actY, 286.0f, 48.0f };
-            if (DrawMenuBtn(btnStartLan, "START MULTIPLAYER MATCH", Color{ 37, 99, 235, 255 }, WHITE, 14, true)) {
+            DrawTextEx(fontUI, "[A / D] SELECT CHARACTER", Vector2{ (float)GetScreenWidth() - 220.0f, lBotY + 18.0f }, 12, 0.3f, Color{ 160, 175, 200, 255 });
+
+            // Prominent White Trapezoid Button [SPACE] READY
+            float rdyW = 270.0f, rdyH = 62.0f;
+            float rdyX = ((float)GetScreenWidth() - rdyW) * 0.5f;
+            float rdyY = (float)GetScreenHeight() - rdyH;
+            Rectangle rdyHit = { rdyX, rdyY, rdyW, rdyH };
+            bool hovRdy = CheckCollisionPointRec(mousePos, rdyHit);
+
+            DrawTrapezoid(rdyX, rdyY, rdyW, rdyH, 20.0f, hovRdy ? Color{ 255, 235, 240, 255 } : WHITE);
+            DrawTrapezoidLines(rdyX, rdyY, rdyW, rdyH, 20.0f, 2.5f, Color{ 238, 45, 95, 255 });
+            Vector2 rdySz = MeasureTextEx(fontUIBold, "[SPACE] READY", 24, 0.5f);
+            DrawTextEx(fontUIBold, "[SPACE] READY", Vector2{ ((float)GetScreenWidth() - rdySz.x) * 0.5f, rdyY + 18.0f }, 24, 0.5f, Color{ 238, 45, 95, 255 });
+
+            if ((hovRdy && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_SPACE)) {
                 singlePirateMode = false;
                 currentScreen = SCREEN_GAMEPLAY;
             }
 
         } else if (currentScreen == SCREEN_SETTINGS) {
             ClearBackground(Color{ 18, 22, 34, 255 });
-            if (texMenuBg.id != 0) {
-                DrawTexturePro(texMenuBg, Rectangle{ 0, 0, (float)texMenuBg.width, (float)texMenuBg.height },
-                               Rectangle{ 0, 0, (float)GetScreenWidth(), (float)GetScreenHeight() }, Vector2{0, 0}, 0.0f, WHITE);
+
+            // Live 3D Background with warm dimming (Plan v7.0 Task 4, matching image_98a083.jpg & image_98a080.jpg)
+            Camera3D settCam = { 0 };
+            settCam.position = Vector3{ 9.8f, 4.3f, 99.8f };
+            settCam.target   = Vector3{ 15.6f, 0.8f, 86.2f };
+            settCam.up       = Vector3{ 0.0f, 1.0f, 0.0f };
+            settCam.fovy     = 50.0f;
+            settCam.projection = CAMERA_PERSPECTIVE;
+
+            BeginMode3D(settCam);
+                DrawModel(wallModel, trackOffset, 1.0f, WHITE);
+                DrawModel(waterModel, trackOffset, 1.0f, WHITE);
+            EndMode3D();
+            DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{ 12, 16, 26, 175 });
+
+            // Top-Left Pink Slanted Back Button
+            Rectangle backRec = { 0.0f, 32.0f, 120.0f, 54.0f };
+            bool hovBack = CheckCollisionPointRec(mousePos, backRec);
+            DrawSlantedRect(backRec.x, backRec.y, backRec.width, backRec.height, 14.0f, hovBack ? Color{ 255, 60, 135, 255 } : Color{ 255, 38, 118, 255 });
+            if (texIconArrow.id != 0) {
+                DrawTexturePro(texIconArrow, Rectangle{ 0, 0, -(float)texIconArrow.width, (float)texIconArrow.height },
+                               Rectangle{ 45.0f, backRec.y + 14.0f, 26.0f, 26.0f }, Vector2{0,0}, 0.0f, WHITE);
             }
-            DrawRectangleGradientV(0, 0, GetScreenWidth(), GetScreenHeight(), Color{ 10, 15, 28, 160 }, Color{ 5, 8, 18, 230 });
-
-            float settW = 640.0f;
-            float settH = 580.0f;
-            float settX = ((float)GetScreenWidth() - settW) * 0.5f;
-            float settY = 120.0f;
-            Rectangle settCard = { settX, settY, settW, settH };
-            DrawRectangleRounded(settCard, 0.08f, 4, Color{ 15, 23, 42, 240 });
-            DrawRectangleRoundedLinesEx(settCard, 0.08f, 4, 1.8f, Color{ 71, 140, 191, 200 });
-
-            DrawTextEx(fontUIBold, "SETTINGS & AUDIO", Vector2{ settX + 32.0f, settY + 28.0f }, 22, 0.5f, Color{ 255, 215, 0, 255 });
-            DrawTextEx(fontUI, "Configure audio levels, display and engine physics defaults", Vector2{ settX + 34.0f, settY + 58.0f }, 13, 0.3f, Color{ 148, 163, 184, 255 });
-
-            float sy = settY + 105.0f;
-            DrawTextEx(fontUIBold, "Audio Settings:", Vector2{ settX + 34.0f, sy }, 15, 0.4f, WHITE);
-            sy += 28.0f;
-
-            DrawTextEx(fontUI, TextFormat("Master Volume: %d%%", (int)(masterVolume * 100.0f)), Vector2{ settX + 34.0f, sy + 6.0f }, 14, 0.3f, Color{ 220, 225, 235, 255 });
-            Rectangle btnVolM = { settX + 380.0f, sy, 80.0f, 32.0f };
-            Rectangle btnVolP = { settX + 470.0f, sy, 80.0f, 32.0f };
-            if (DrawMenuBtn(btnVolM, "-10%", Color{ 36, 43, 58, 255 }, WHITE, 13, true)) {
-                masterVolume = Clamp(masterVolume - 0.10f, 0.0f, 1.0f);
-                SetMasterVolume(masterVolume);
-            }
-            if (DrawMenuBtn(btnVolP, "+10%", Color{ 36, 43, 58, 255 }, WHITE, 13, true)) {
-                masterVolume = Clamp(masterVolume + 0.10f, 0.0f, 1.0f);
-                SetMasterVolume(masterVolume);
-            }
-            sy += 50.0f;
-
-            DrawTextEx(fontUIBold, "Engine & Physics Features:", Vector2{ settX + 34.0f, sy }, 15, 0.4f, WHITE);
-            sy += 28.0f;
-
-            DrawTextEx(fontUI, "Water Buoyancy: 100% Flat (Roll=0, Pitch=0) [Active]", Vector2{ settX + 34.0f, sy }, 13, 0.3f, Color{ 74, 222, 128, 255 });
-            sy += 26.0f;
-            DrawTextEx(fontUI, "Obstacle Collision: Non-fatal Rocks & Rebound Pillar [Active]", Vector2{ settX + 34.0f, sy }, 13, 0.3f, Color{ 74, 222, 128, 255 });
-            sy += 26.0f;
-            DrawTextEx(fontUI, "Solo Mode Steering: 360 deg Free Rim Rotation [Active]", Vector2{ settX + 34.0f, sy }, 13, 0.3f, Color{ 74, 222, 128, 255 });
-            sy += 26.0f;
-            DrawTextEx(fontUI, "Fart Gas Propulsion: Persistent physics_config.json [Active]", Vector2{ settX + 34.0f, sy }, 13, 0.3f, Color{ 74, 222, 128, 255 });
-
-            float actY = settY + settH - 70.0f;
-            Rectangle btnBackMenu = { settX + 34.0f, actY, 200.0f, 44.0f };
-            if (DrawMenuBtn(btnBackMenu, "<- BACK TO MENU", Color{ 51, 65, 85, 255 }, WHITE, 14, true)) {
+            if ((hovBack && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_ESCAPE)) {
                 currentScreen = SCREEN_MAIN_MENU;
             }
-        }
 
+            // Title: SETTINGS
+            DrawTextEx(fontUIBold, "SETTINGS", Vector2{ 220.0f, 38.0f }, 38, 0.6f, WHITE);
+
+            // 4 Slanted Tabs
+            static int activeSettTab = 1; // 0=GENERAL, 1=GRAPHICS, 2=AUDIO, 3=CONTROLS
+            const char* tabNames[4] = { "GENERAL", "GRAPHICS", "AUDIO", "CONTROLS" };
+            Texture2D tabIcons[4] = { texIconGeneral, texIconGraphic, texIconSound, texIconControl };
+
+            float tabW = 205.0f, tabH = 50.0f, tabX = 200.0f, tabY = 125.0f;
+            for (int tb = 0; tb < 4; tb++) {
+                Rectangle tRec = { tabX + tb * (tabW + 14.0f), tabY, tabW, tabH };
+                bool hovTab = CheckCollisionPointRec(mousePos, tRec);
+                bool isAct = (activeSettTab == tb);
+
+                Color tBg = isAct ? Color{ 138, 122, 245, 255 } : (hovTab ? Color{ 45, 52, 75, 240 } : Color{ 28, 33, 48, 235 });
+                DrawSlantedRect(tRec.x, tRec.y, tRec.width, tRec.height, 12.0f, tBg);
+
+                if (tabIcons[tb].id != 0) {
+                    DrawTexturePro(tabIcons[tb], Rectangle{ 0, 0, (float)tabIcons[tb].width, (float)tabIcons[tb].height },
+                                   Rectangle{ tRec.x + 28.0f, tRec.y + 12.0f, 24.0f, 24.0f }, Vector2{0,0}, 0.0f, WHITE);
+                }
+                DrawTextEx(fontUIBold, tabNames[tb], Vector2{ tRec.x + 60.0f, tRec.y + 15.0f }, 15, 0.4f, WHITE);
+
+                if (hovTab && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) activeSettTab = tb;
+            }
+
+            // Settings Rows
+            float rowX = 200.0f, rowW = 875.0f, rowH = 64.0f, rowY = 195.0f, rowGap = 12.0f;
+            static int qualityIdx = 2; // 0=Low, 1=Med, 2=High, 3=Ultra
+            static bool cameraShake = true;
+            static float maxCamDist = 30.0f;
+            static float audioVolMaster = 80.0f;
+            static float audioVolMusic = 80.0f;
+            static float audioVolSFX = 80.0f;
+            static float audioVolFart = 80.0f;
+
+            auto DrawSettingRow = [&](int idx, const char* label, auto drawControls) {
+                float ry = rowY + idx * (rowH + rowGap);
+                Rectangle rRec = { rowX, ry, rowW, rowH };
+                bool isHov = CheckCollisionPointRec(mousePos, rRec);
+
+                Color rowBg = isHov ? Color{ 250, 232, 82, 255 } : Color{ 252, 252, 255, 255 };
+                Color txtCol = isHov ? Color{ 24, 24, 34, 255 } : Color{ 105, 95, 205, 255 };
+
+                DrawSlantedRect(rRec.x, rRec.y, rRec.width, rRec.height, 12.0f, rowBg);
+                DrawTextEx(fontUIBold, label, Vector2{ rRec.x + 40.0f, ry + 22.0f }, 17, 0.4f, txtCol);
+
+                drawControls(rRec, ry, isHov);
+            };
+
+            if (activeSettTab == 1) { // GRAPHICS
+                // Row 0: Quality
+                DrawSettingRow(0, "Quality", [&](Rectangle rRec, float ry, bool isHov) {
+                    const char* qNames[4] = { "<  Low  >", "<  Medium  >", "<  High  >", "<  Ultra  >" };
+                    Rectangle bQ = { rRec.x + rRec.width - 240.0f, ry + 16.0f, 200.0f, 34.0f };
+                    bool hovQ = CheckCollisionPointRec(mousePos, bQ);
+                    DrawSlantedRect(bQ.x, bQ.y, bQ.width, bQ.height, 8.0f, hovQ ? Color{ 126, 114, 228, 255 } : Color{ 230, 235, 248, 255 });
+                    Vector2 qSz = MeasureTextEx(fontUIBold, qNames[qualityIdx], 15, 0.3f);
+                    DrawTextEx(fontUIBold, qNames[qualityIdx], Vector2{ bQ.x + (bQ.width - qSz.x) * 0.5f, bQ.y + 8.0f }, 15, 0.3f, hovQ ? WHITE : Color{ 30, 35, 55, 255 });
+                    if (hovQ && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) qualityIdx = (qualityIdx + 1) % 4;
+                });
+
+                // Row 1: Camera Shake
+                DrawSettingRow(1, "Camera Shake", [&](Rectangle rRec, float ry, bool isHov) {
+                    Rectangle bSw = { rRec.x + rRec.width - 180.0f, ry + 16.0f, 140.0f, 34.0f };
+                    bool hovSw = CheckCollisionPointRec(mousePos, bSw);
+                    DrawSlantedRect(bSw.x, bSw.y, bSw.width, bSw.height, 8.0f, Color{ 220, 225, 235, 255 });
+                    if (cameraShake) {
+                        DrawSlantedRect(bSw.x + 65.0f, bSw.y + 2.0f, 70.0f, 30.0f, 8.0f, Color{ 52, 185, 58, 255 });
+                    } else {
+                        DrawSlantedRect(bSw.x + 4.0f, bSw.y + 2.0f, 65.0f, 30.0f, 8.0f, Color{ 120, 125, 140, 255 });
+                    }
+                    DrawTextEx(fontUIBold, "OFF", Vector2{ bSw.x + 22.0f, bSw.y + 8.0f }, 13, 0.3f, cameraShake ? Color{ 120, 125, 140, 255 } : WHITE);
+                    DrawTextEx(fontUIBold, "ON", Vector2{ bSw.x + 88.0f, bSw.y + 8.0f }, 13, 0.3f, cameraShake ? WHITE : Color{ 120, 125, 140, 255 });
+                    if (hovSw && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) cameraShake = !cameraShake;
+                });
+
+                // Row 2: Max Camera Distance
+                DrawSettingRow(2, "Max Camera Distance", [&](Rectangle rRec, float ry, bool isHov) {
+                    float sldX = rRec.x + rRec.width - 340.0f;
+                    DrawTextEx(fontUIBold, TextFormat("%.0fm", maxCamDist), Vector2{ sldX - 55.0f, ry + 22.0f }, 15, 0.3f, Color{ 30, 35, 55, 255 });
+                    Rectangle sldBar = { sldX, ry + 27.0f, 280.0f, 10.0f };
+                    DrawRectangleRounded(sldBar, 0.5f, 4, Color{ 215, 220, 235, 255 });
+                    float frac = (maxCamDist - 10.0f) / 40.0f;
+                    DrawRectangleRounded(Rectangle{ sldBar.x, sldBar.y, sldBar.width * frac, 10.0f }, 0.5f, 4, Color{ 126, 114, 228, 255 });
+                    DrawCircle(sldBar.x + sldBar.width * frac, sldBar.y + 5.0f, 10.0f, Color{ 238, 52, 132, 255 });
+                    if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mousePos, Rectangle{ sldBar.x - 10, sldBar.y - 12, sldBar.width + 20, 34 })) {
+                        maxCamDist = Clamp(10.0f + ((mousePos.x - sldBar.x) / sldBar.width) * 40.0f, 10.0f, 50.0f);
+                    }
+                });
+
+                // Row 3: Target Frame Rate
+                DrawSettingRow(3, "Target Frame Rate", [&](Rectangle rRec, float ry, bool isHov) {
+                    DrawTextEx(fontUIBold, "<  60 FPS  >", Vector2{ rRec.x + rRec.width - 180.0f, ry + 22.0f }, 16, 0.4f, Color{ 30, 35, 55, 255 });
+                });
+            } else if (activeSettTab == 2) { // AUDIO
+                auto DrawAudioSlider = [&](int idx, const char* lbl, float& val) {
+                    DrawSettingRow(idx, lbl, [&](Rectangle rRec, float ry, bool isHov) {
+                        float sldX = rRec.x + rRec.width - 340.0f;
+                        DrawTextEx(fontUIBold, TextFormat("%.0f", val), Vector2{ sldX - 45.0f, ry + 22.0f }, 16, 0.3f, Color{ 30, 35, 55, 255 });
+                        Rectangle sldBar = { sldX, ry + 27.0f, 280.0f, 10.0f };
+                        DrawRectangleRounded(sldBar, 0.5f, 4, Color{ 215, 220, 235, 255 });
+                        float frac = val / 100.0f;
+                        DrawRectangleRounded(Rectangle{ sldBar.x, sldBar.y, sldBar.width * frac, 10.0f }, 0.5f, 4, Color{ 126, 114, 228, 255 });
+                        DrawCircle(sldBar.x + sldBar.width * frac, sldBar.y + 5.0f, 10.0f, Color{ 238, 52, 132, 255 });
+                        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mousePos, Rectangle{ sldBar.x - 10, sldBar.y - 12, sldBar.width + 20, 34 })) {
+                            val = Clamp(((mousePos.x - sldBar.x) / sldBar.width) * 100.0f, 0.0f, 100.0f);
+                            if (idx == 0) SetMasterVolume(val / 100.0f);
+                        }
+                    });
+                };
+                DrawAudioSlider(0, "Master Volume", audioVolMaster);
+                DrawAudioSlider(1, "Music", audioVolMusic);
+                DrawAudioSlider(2, "Sound Effects (SFX)", audioVolSFX);
+                DrawAudioSlider(3, "Fart Volume", audioVolFart);
+            } else if (activeSettTab == 0) { // GENERAL
+                DrawSettingRow(0, "Language", [&](Rectangle rRec, float ry, bool isHov) {
+                    DrawTextEx(fontUIBold, "<  English  >", Vector2{ rRec.x + rRec.width - 180.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+                });
+                DrawSettingRow(1, "Invert Y Axis", [&](Rectangle rRec, float ry, bool isHov) {
+                    DrawTextEx(fontUIBold, "[ OFF | ON ]", Vector2{ rRec.x + rRec.width - 170.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+                });
+                DrawSettingRow(2, "Controller Vibration", [&](Rectangle rRec, float ry, bool isHov) {
+                    DrawTextEx(fontUIBold, "[ OFF | ON ]", Vector2{ rRec.x + rRec.width - 170.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+                });
+                DrawSettingRow(3, "Subtitles", [&](Rectangle rRec, float ry, bool isHov) {
+                    DrawTextEx(fontUIBold, "[ OFF | ON ]", Vector2{ rRec.x + rRec.width - 170.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+                });
+            } else { // CONTROLS
+                DrawSettingRow(0, "P1 Fart Gas Controls", [&](Rectangle rRec, float ry, bool isHov) {
+                    DrawTextEx(fontUIBold, "A (Left)  /  D (Right)", Vector2{ rRec.x + rRec.width - 240.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+                });
+                DrawSettingRow(1, "Dual Fart Boost", [&](Rectangle rRec, float ry, bool isHov) {
+                    DrawTextEx(fontUIBold, "A + D Simultaneously", Vector2{ rRec.x + rRec.width - 240.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+                });
+                DrawSettingRow(2, "Steering Mechanism", [&](Rectangle rRec, float ry, bool isHov) {
+                    DrawTextEx(fontUIBold, "360 deg Rim Free Rotation", Vector2{ rRec.x + rRec.width - 270.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+                });
+                DrawSettingRow(3, "Reset Key Bindings", [&](Rectangle rRec, float ry, bool isHov) {
+                    DrawTextEx(fontUIBold, "[ Reset to Defaults ]", Vector2{ rRec.x + rRec.width - 210.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+                });
+            }
+
+            // Scrollbar on right
+            DrawRectangleRounded(Rectangle{ 1100.0f, rowY, 8.0f, 4 * rowH + 3 * rowGap }, 0.5f, 4, Color{ 220, 225, 240, 255 });
+            DrawRectangleRounded(Rectangle{ 1100.0f, rowY + 30.0f, 8.0f, 90.0f }, 0.5f, 4, Color{ 126, 114, 228, 255 });
+
+            // Bottom Links
+            float botLinkY = (float)GetScreenHeight() - 48.0f;
+            Rectangle bPriv = { 200.0f, botLinkY, 150.0f, 32.0f };
+            Rectangle bTerms = { 370.0f, botLinkY, 150.0f, 32.0f };
+            DrawSlantedRect(bPriv.x, bPriv.y, bPriv.width, bPriv.height, 8.0f, Color{ 252, 252, 255, 230 });
+            DrawTextEx(fontUIBold, "Privacy Policy", Vector2{ bPriv.x + 22.0f, bPriv.y + 8.0f }, 13, 0.3f, Color{ 80, 70, 160, 255 });
+            DrawSlantedRect(bTerms.x, bTerms.y, bTerms.width, bTerms.height, 8.0f, Color{ 252, 252, 255, 230 });
+            DrawTextEx(fontUIBold, "Terms of Service", Vector2{ bTerms.x + 18.0f, bTerms.y + 8.0f }, 13, 0.3f, Color{ 80, 70, 160, 255 });
+        }
         EndDrawing();
 
         testFrameCount++;
@@ -4360,9 +5058,21 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
     for (int s = 0; s < 2; s++) UnloadSound(sndHold[s]);
     UnloadSound(sndExplode);
     UnloadSound(sndBounce);
+    UnloadTexture(texMainLogo);
     UnloadTexture(texLogoSplash);
     UnloadTexture(texMenuBg);
+    UnloadTexture(texMarkerYou);
     UnloadTexture(texModeFartRun);
+    UnloadTexture(texModeTeamRace);
+    UnloadTexture(texModeRaftRumble);
+    UnloadTexture(texIconGeneral);
+    UnloadTexture(texIconGraphic);
+    UnloadTexture(texIconSound);
+    UnloadTexture(texIconControl);
+    UnloadTexture(texIconDiscord);
+    UnloadTexture(texIconCopy);
+    UnloadTexture(texIconArrow);
+    for (int k = 0; k < 4; k++) UnloadTexture(texLobbyCards[k]);
     for (int k = 0; k < 4; k++) UnloadTexture(texLobbyChars[k]);
 
     for (int f = 0; f < 4; f++) UnloadTexture(texFart[f]);
