@@ -1346,7 +1346,14 @@ void AssignEntityModelAndProps(LevelEntity& e) {
     if (e.arcAngleDeg <= 0.0f) e.arcAngleDeg = 180.0f;
     if (e.slideDist <= 0.0f) e.slideDist = 1.80f;
     if (e.bounceMult <= 0.0f) e.bounceMult = 1.65f;
-    if (e.isLethal != 0 && e.isLethal != 1) e.isLethal = 1;
+    bool isHazardType = (e.type >= ENT_OBS_A1 && e.type <= ENT_OBS_F23 && e.type != ENT_OBS_F18) || (e.type == ENT_COL_KILL_ZONE);
+    if (isHazardType) {
+        e.isLethal = 1;
+    } else if (e.type == ENT_OBS_F18 || e.type == ENT_ROCK_1 || e.type == ENT_ROCK_2) {
+        e.isLethal = 0;
+    } else if (e.isLethal != 0 && e.isLethal != 1) {
+        e.isLethal = 1;
+    }
 
     switch (e.type) {
         case ENT_OBS_A1:  e.model = &gObsModels.mA1;  e.radius = 1.85f * e.scale; break;
@@ -1487,7 +1494,7 @@ bool LoadLevelLayoutJSON(const std::string& path, std::vector<LevelEntity>& list
             float phDeg = 0.0f;
             float slDist = 1.80f;
             float bMult = 1.65f;
-            int lethal = 1;
+            int lethal = ((t >= ENT_OBS_A1 && t <= ENT_OBS_F23 && t != ENT_OBS_F18) || t == ENT_COL_KILL_ZONE) ? 1 : 0;
 
             ParseJsonFloatField(objStart, objEnd, "\"x\"", x);
             ParseJsonFloatField(objStart, objEnd, "\"y\"", y);
@@ -2884,8 +2891,9 @@ int main(int argc, char** argv) {
                     camCtrl.shakeTrauma = fmaxf(camCtrl.shakeTrauma, 0.20f);
                 }
             } else if (CheckObstacleOBBCollision(raft.position, ent, animPos, animYaw, animRoll)) {
-                if (!raft.isDestroyed) {
-                    if (ent.isLethal) {
+                if (!raft.isDestroyed && raft.invulnerableTimer <= 0.0f) {
+                    bool deadly = (ent.isLethal != 0) || (ent.type >= ENT_OBS_A1 && ent.type <= ENT_OBS_F23 && ent.type != ENT_OBS_F18);
+                    if (deadly) {
                         TriggerBoatDeath(DEATH_OBSTACLE);
                     } else {
                         Vector3 push = Vector3Normalize(Vector3Subtract(raft.position, animPos));
