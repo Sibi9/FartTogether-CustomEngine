@@ -1265,20 +1265,85 @@ static Vector3 GetObstacleHazardWorldPos(const LevelEntity& ent) {
 static ObstacleModels gObsModels;
 static const char* LEVEL_LAYOUT_PATH = "level_layout.json";
 
-static bool CheckObstacleOBBCollision(Vector3 raftPos, const LevelEntity& ent, Vector3 animPos, float animYawDeg, float animRollDeg) {
+static bool CheckObstacleOBBCollision(Vector3 raftPos, const LevelEntity& ent, Vector3 animPos, float animYawDeg, float animPitchDeg, float animRollDeg) {
     if (ent.type == ENT_TREE_JUNGLE || ent.type == ENT_GUST || ent.type == ENT_ROCK_1 || ent.type == ENT_ROCK_2 || ent.type == ENT_OBS_F18 || ent.type == ENT_CHECKPOINT) return false;
     if (ent.type >= ENT_COL_SQUARE) return false; // Handled by custom collision shapes
 
     const float boatR = 0.88f;
     float s = (ent.scale > 0.01f) ? ent.scale : 1.0f;
 
-    // For elevated swinging arm hazards (B2, C1, F10, F13), check exact 3D hazard head position
-    if (ent.type == ENT_OBS_B2 || ent.type == ENT_OBS_C1 || ent.type == ENT_OBS_F10 || ent.type == ENT_OBS_F13) {
+    // 1. Spanned swinging roller gates (C1 & B2): two arms mounted on canyon walls, horizontal spiked roller across canal
+    if (ent.type == ENT_OBS_C1 || ent.type == ENT_OBS_B2) {
+        float fX = (ent.flipX != 0) ? (float)ent.flipX : 1.0f;
+        float fY = (ent.flipY != 0) ? (float)ent.flipY : 1.0f;
+        float fZ = (ent.flipZ != 0) ? (float)ent.flipZ : 1.0f;
+
+        float halfW   = (ent.type == ENT_OBS_C1) ? (2.75f * s) : (5.25f * s);
+        float armLen  = (ent.type == ENT_OBS_C1) ? (3.70f * s) : (4.40f * s);
+        float hRadius = (ent.type == ENT_OBS_C1) ? (0.75f * s) : (0.80f * s);
+
+        float radP = animPitchDeg * DEG2RAD;
+        float radY = animYawDeg   * DEG2RAD;
+
+        // In local obstacle space:
+        // When pitch is 0: roller is lowered near water at local Y = 0, Z = +armLen
+        // When pitch is -90 deg: roller is swung high in the air at local Y = +armLen, Z = 0
+        float locY = -armLen * sinf(radP) * fY;
+        float locZ =  armLen * cosf(radP) * fZ;
+
+        float worldRollerY = animPos.y + locY;
+
+        // Raft sits at raftPos.y (~0.55m); pirates' heads reach up to raftPos.y + 1.25m
+        float rollerBottomY = worldRollerY - hRadius;
+        float rollerTopY    = worldRollerY + hRadius;
+        float boatTopY      = raftPos.y + 1.25f;
+        float boatBottomY   = raftPos.y - 0.25f;
+
+        // When the roller is swung up in the air, the entire canal underneath is safe and open!
+        if (rollerBottomY > boatTopY || rollerTopY < boatBottomY) {
+            return false;
+        }
+
+        // When roller is swung down within boat height, check 2D distance to the horizontal roller line segment
+        Vector2 pLeft = {
+            animPos.x + (-halfW * fX * cosf(radY) + locZ * sinf(radY)),
+            animPos.z + ( halfW * fX * sinf(radY) + locZ * cosf(radY))
+        };
+        Vector2 pRight = {
+            animPos.x + ( halfW * fX * cosf(radY) + locZ * sinf(radY)),
+            animPos.z + (-halfW * fX * sinf(radY) + locZ * cosf(radY))
+        };
+
+        Vector2 ptBoat = { raftPos.x, raftPos.z };
+        float distToRoller = DistPointToSegment2D(ptBoat, pLeft, pRight);
+
+        if (distToRoller < (hRadius + boatR)) {
+            return true;
+        }
+        return false;
+    }
+
+    // 2. Elevated swinging hammer (F10)
+    if (ent.type == ENT_OBS_F10) {
         Vector3 hPos = GetObstacleHazardWorldPos(ent);
+        float hRadius = 0.95f * s;
         if (fabsf((raftPos.y + 0.35f) - hPos.y) < 1.4f) {
             float dx = raftPos.x - hPos.x;
             float dz = raftPos.z - hPos.z;
-            float hRadius = (ent.type == ENT_OBS_F10) ? (0.95f * s) : (0.80f * s);
+            if ((dx * dx + dz * dz) < ((hRadius + boatR) * (hRadius + boatR))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // 3. Rotating horizontal arm with center pillar (F13)
+    if (ent.type == ENT_OBS_F13) {
+        Vector3 hPos = GetObstacleHazardWorldPos(ent);
+        float hRadius = 0.80f * s;
+        if (fabsf((raftPos.y + 0.35f) - hPos.y) < 1.4f) {
+            float dx = raftPos.x - hPos.x;
+            float dz = raftPos.z - hPos.z;
             if ((dx * dx + dz * dz) < ((hRadius + boatR) * (hRadius + boatR))) {
                 return true;
             }
@@ -2890,7 +2955,7 @@ int main(int argc, char** argv) {
                     raft.velocity.z += gustDir.z * 24.0f * dt;
                     camCtrl.shakeTrauma = fmaxf(camCtrl.shakeTrauma, 0.20f);
                 }
-            } else if (CheckObstacleOBBCollision(raft.position, ent, animPos, animYaw, animRoll)) {
+            } else if (CheckObstacleOBBCollision(raft.position, ent, animPos, animYaw, animPitch, animRoll)) {
                 if (!raft.isDestroyed && raft.invulnerableTimer <= 0.0f) {
                     bool deadly = (ent.isLethal != 0) || (ent.type >= ENT_OBS_A1 && ent.type <= ENT_OBS_F23 && ent.type != ENT_OBS_F18);
                     if (deadly) {
