@@ -2279,12 +2279,16 @@ int main(int argc, char** argv) {
     Model sharkModel= LoadModel(ResolveAsset("extracted_assets/meshes/Shark.obj").c_str());
 
     // Canyon Environment Clustered Sectors (scene_2..15, excluding scene 0 with flying shards)
+#if !defined(PLATFORM_ANDROID) && !defined(__ANDROID__)
     static const int ENV_SECTOR_COUNT = 14;
     Model envSectors[ENV_SECTOR_COUNT];
     for (int s = 0; s < ENV_SECTOR_COUNT; s++) {
         std::string secName = "extracted_assets/meshes/Combined_Mesh_root__scene_" + std::to_string(s + 2) + ".obj";
         envSectors[s] = LoadModel(ResolveAsset(secName).c_str());
     }
+#else
+    static const int ENV_SECTOR_COUNT = 0;
+#endif
 
     auto ApplyMat = [&](Model& m) {
         for (int i = 0; i < m.materialCount; i++) {
@@ -2367,9 +2371,11 @@ int main(int argc, char** argv) {
 
     // Wall and Environment Sectors use vertically flipped bgr texture -> Authentic Green Foliage & Brown Cliffs!
     ApplyBgrMat(wallModel);
+#if !defined(PLATFORM_ANDROID) && !defined(__ANDROID__)
     for (int s = 0; s < ENV_SECTOR_COUNT; s++) {
         ApplyBgrMat(envSectors[s]);
     }
+#endif
 
     // Water Material setup
 
@@ -3932,9 +3938,11 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
             SetShaderValue(shaderLighting, uRednessLoc, &zeroRed, SHADER_UNIFORM_FLOAT);
 
+#if !defined(PLATFORM_ANDROID) && !defined(__ANDROID__)
             for (int s = 0; s < ENV_SECTOR_COUNT; s++) {
                 DrawModel(envSectors[s], Vector3{ 0, 0, 0 }, 1.0f, WHITE);
             }
+#endif
 
             // B. Authentic Canyon Walls
 
@@ -6052,9 +6060,11 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
     UnloadTexture(texFinish);
     UnloadTexture(texEsc);
 
+#if !defined(PLATFORM_ANDROID) && !defined(__ANDROID__)
     for (int s = 0; s < ENV_SECTOR_COUNT; s++) {
         UnloadModel(envSectors[s]);
     }
+#endif
     UnloadModel(wallModel);
     UnloadModel(waterModel);
     UnloadModel(wallColModel);

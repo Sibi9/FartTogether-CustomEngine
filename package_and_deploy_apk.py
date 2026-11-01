@@ -98,18 +98,15 @@ def build_and_deploy():
         if p.exists():
             shutil.copy2(p, assets_dir / cfg)
 
-    # 4. Setup native libraries from android_abi_build
+    # 4. Setup native libraries from android_abi_build (both libmain.so and libc++_shared.so)
     lib_dir = build_dir / "lib"
     abi_source_dir = pathlib.Path("android_abi_build")
     for abi in ["arm64-v8a", "armeabi-v7a", "x86_64"]:
-        so_file = abi_source_dir / abi / "libmain.so"
-        if so_file.exists():
-            target_abi_dir = lib_dir / abi
-            target_abi_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(so_file, target_abi_dir / "libmain.so")
-            print(f"Copied {abi}/libmain.so ({so_file.stat().st_size:,} bytes)")
-        else:
-            print(f"WARNING: Missing {abi}/libmain.so!")
+        target_abi_dir = lib_dir / abi
+        target_abi_dir.mkdir(parents=True, exist_ok=True)
+        for so in (abi_source_dir / abi).glob("*.so"):
+            shutil.copy2(so, target_abi_dir / so.name)
+            print(f"Copied {abi}/{so.name} ({so.stat().st_size:,} bytes)")
 
     sdk_root = pathlib.Path(os.environ.get("LOCALAPPDATA")) / "Android" / "Sdk"
     aapt2 = sdk_root / "build-tools" / "34.0.0" / "aapt2.exe"
@@ -123,29 +120,33 @@ def build_and_deploy():
     subprocess.run(cmd_compile, check=True)
 
     print("Step 2: Linking APK package with aapt2...")
-    unaligned_apk = build_dir / "unaligned.apk"
+    unaligned_res_apk = build_dir / "unaligned_res.apk"
     cmd_link = [
         str(aapt2), "link",
         "-I", str(android_jar),
         "--manifest", str(build_dir / "AndroidManifest.xml"),
-        "-o", str(unaligned_apk),
+        "-o", str(unaligned_res_apk),
         str(build_dir / "compiled_res.zip"),
         "-A", str(assets_dir)
     ]
     subprocess.run(cmd_link, check=True)
 
-    print("Step 3: Embedding multi-ABI native libraries into unaligned APK...")
-    with zipfile.ZipFile(unaligned_apk, "a", compression=zipfile.ZIP_DEFLATED) as zf:
-        for root, _, files in os.walk(lib_dir):
-            for f in files:
-                full_path = pathlib.Path(root) / f
-                arc_name = full_path.relative_to(build_dir).as_posix()
-                zf.write(full_path, arc_name)
-                print(f"  Added {arc_name}")
+    print("Step 3: Creating clean unified unaligned APK with native libraries...")
+    clean_unaligned = build_dir / "clean_unaligned.apk"
+    with zipfile.ZipFile(unaligned_res_apk, "r") as zin:
+        with zipfile.ZipFile(clean_unaligned, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                zout.writestr(item, zin.read(item.filename))
+            for root, _, files in os.walk(lib_dir):
+                for f in files:
+                    full_path = pathlib.Path(root) / f
+                    arc_name = full_path.relative_to(build_dir).as_posix()
+                    zout.write(full_path, arc_name)
+                    print(f"  Added {arc_name}")
 
     print("Step 4: Aligning APK with zipalign...")
     aligned_apk = build_dir / "aligned.apk"
-    cmd_align = [str(zipalign), "-p", "-f", "4", str(unaligned_apk), str(aligned_apk)]
+    cmd_align = [str(zipalign), "-p", "-f", "4", str(clean_unaligned), str(aligned_apk)]
     subprocess.run(cmd_align, check=True)
 
     print("Step 5: Signing APK...")
@@ -179,6 +180,9 @@ def build_and_deploy():
     print(f"\n[SUCCESS] Universal Android APK built successfully: {final_apk}")
     print(f"File size: {final_apk.stat().st_size:,} bytes")
 
+    # Copy to project root
+    shutil.copy2(final_apk, "FartTogether_v8.2.0.apk")
+
     # Step 7: Test install and run on connected phone
     if adb.exists():
         print("\nStep 7: Checking connected Android devices via ADB...")
@@ -186,8 +190,10 @@ def build_and_deploy():
         print(r_dev.stdout)
         
         if "device\n" in r_dev.stdout or "\tdevice" in r_dev.stdout:
+            print("Uninstalling previous version to ensure clean install...")
+            subprocess.run([str(adb), "uninstall", "com.gamesmrkt.farttogether"], capture_output=True)
+            
             print("Installing APK directly onto connected phone...")
-            # Clear logcat first
             subprocess.run([str(adb), "logcat", "-c"])
             
             res_install = subprocess.run([str(adb), "install", "-r", str(final_apk)], capture_output=True, text=True)
@@ -201,7 +207,7 @@ def build_and_deploy():
             
             time.sleep(3)
             print("Retrieving logcat output from app...")
-            res_logs = subprocess.run([str(adb), "logcat", "-d", "-s", "raylib,AndroidRuntime,DEBUG,CustomEngineNative"], capture_output=True, text=True)
+            res_logs = subprocess.run([str(adb), "logcat", "-d", "-s", "raylib,AndroidRuntime,DEBUG,CustomEngineNative,ActivityManager"], capture_output=True, text=True)
             print("=== App Logcat Output ===")
             print(res_logs.stdout[-2500:] if res_logs.stdout else "No specific logs emitted")
             

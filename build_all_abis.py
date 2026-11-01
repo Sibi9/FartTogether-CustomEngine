@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import pathlib
 
@@ -172,6 +173,7 @@ cflags_common = [
 
 ldflags_common = [
     "-shared",
+    "-static-libstdc++",
     "-Wl,-soname,libmain.so",
     "-Wl,--build-id",
     "-Wl,-z,noexecstack",
@@ -239,5 +241,16 @@ for abi_name, cc_name, cxx_name in abis:
         print(f"Error linking {abi_name} libmain.so:", res.stderr)
         exit(1)
     print(f"[{abi_name}] SUCCESS! libmain.so size: {out_so.stat().st_size:,} bytes")
+
+    # Also copy libc++_shared.so as companion library
+    libcxx_map = {
+        "arm64-v8a": "aarch64-linux-android",
+        "armeabi-v7a": "arm-linux-androideabi",
+        "x86_64": "x86_64-linux-android"
+    }
+    libcxx_src = llvm_bin.parent / "sysroot" / "usr" / "lib" / libcxx_map[abi_name] / "libc++_shared.so"
+    if libcxx_src.exists():
+        shutil.copy2(libcxx_src, abi_dir / "libc++_shared.so")
+        print(f"[{abi_name}] Copied libc++_shared.so ({libcxx_src.stat().st_size:,} bytes)")
 
 print("\nALL ABIs BUILT SUCCESSFULLY!")
