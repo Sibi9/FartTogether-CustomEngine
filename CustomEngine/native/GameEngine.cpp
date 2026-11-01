@@ -37,7 +37,7 @@
 #include "Codepoints.h"
 
 // Rule: Game version must be incremented on every update!
-static const char* GAME_VERSION_TAG = "v8.3.1";
+static const char* GAME_VERSION_TAG = "v8.4.0";
 static int s_camTouchId = -1;
 GameLanguage gCurrentLanguage = LANG_AR; // Default Arabic as requested
 static bool gShowInviteModal = false;
@@ -3292,220 +3292,358 @@ int main(int argc, char** argv) {
             SaveGameSettingsJSON("game_settings.json");
         }
 
-        // LAN Co-op 60Hz Synchronization (Plan v8.3.0 Task 4)
-        static uint32_t netSeqHost = 0;
-        static uint32_t netSeqClient = 0;
-        if (LanGetRole() == LAN_HOST) {
-            singlePirateMode = false;
-            LanInputPacket inPkt;
-            while (LanHostPollInput(inPkt)) {
-                p2NetRimMove = inPkt.rimMove;
-                if (inPkt.gasDown)     p2InputDown = true;
-                if (inPkt.gasReleased) p2InputReleased = true;
-                if (inPkt.suicideReq && !raft.isDestroyed) TriggerBoatDeath(DEATH_SUICIDE);
-            }
-            LanStatePacket sp = { 0 };
-            sp.magic = 0x46415254; sp.type = LAN_PKT_STATE; sp.seq = ++netSeqHost;
-            sp.raftX = raft.position.x; sp.raftY = raft.position.y; sp.raftZ = raft.position.z;
-            sp.velX  = raft.velocity.x; sp.velY  = raft.velocity.y; sp.velZ  = raft.velocity.z;
-            sp.rotY  = raft.rotationY;  sp.pitch = raft.pitch;      sp.roll  = raft.roll;
-            sp.p1RimAngle = p1RimAngle; sp.p2RimAngle = p2RimAngle;
-            sp.p1Gas = gasP1.pressTimer; sp.p2Gas = gasP2.pressTimer;
-            sp.p1Redness = gasP1.redness; sp.p2Redness = gasP2.redness;
-            sp.p1Swell = gasP1.boneScale - 1.0f; sp.p2Swell = gasP2.boneScale - 1.0f;
-            sp.p1Eye = gasP1.isPressing ? Clamp(gasP1.pressTimer / 0.45f, 0.0f, 1.0f) : 0.0f; sp.p2Eye = gasP2.isPressing ? Clamp(gasP2.pressTimer / 0.45f, 0.0f, 1.0f) : 0.0f;
-            sp.raceTimer = raceTimer; sp.totalDeaths = raft.deaths; sp.currentCP = raft.currentCP;
-            sp.isDestroyed = raft.isDestroyed ? 1 : 0;
-            LanHostBroadcastState(sp);
-        } else if (LanGetRole() == LAN_CLIENT) {
-            singlePirateMode = false;
-            LanInputPacket inPkt = { 0 };
-            inPkt.magic = 0x46415254; inPkt.type = LAN_PKT_INPUT; inPkt.seq = ++netSeqClient;
-            inPkt.rimMove = (touchSteerRight ? 1.0f : 0.0f) - (touchSteerLeft ? 1.0f : 0.0f);
-            if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) inPkt.rimMove += 1.0f;
-            if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A))  inPkt.rimMove -= 1.0f;
-            inPkt.gasDown = (touchGas || IsKeyDown(KEY_SPACE) || IsKeyDown(KEY_W)) ? 1 : 0;
-            inPkt.gasReleased = (p1InputReleased) ? 1 : 0;
-            inPkt.suicideReq = IsKeyPressed(KEY_R) ? 1 : 0;
-            LanClientSendInput(inPkt);
+                // =====================================================================
+        // AAA LAN Co-op Synchronization & Dual-Pirate Input Routing (v8.4.0)
+        // User Rim Rule: 1 Player = 360°, 2 Players = 1/2 each, 3 = 1/3, 4 = 1/4
+        // =====================================================================
+        static uint32_t netSeqHost             = 0;
+        static uint32_t netSeqClient           = 0;
+        static uint16_t localClientTapSeq      = 0;
+        static uint16_t localClientSuicideSeq  = 0;
+        static uint16_t hostLastExecClientTap  = 0;
+        static uint16_t hostLastExecSuicide    = 0;
+        static uint16_t hostP1TapSeq           = 0;
+        static uint16_t clientLastSeenP1Tap    = 0;
+        static uint16_t clientLastSeenP2Tap    = 0;
+        static LanInputPacket gLatchedClientIn = { 0 };
+        static float    gClientInputHoldTimer  = 0.0f;
+        static bool     s_prevLocalGasDown     = false;
 
-            LanStatePacket sp;
-            if (LanClientPollState(sp)) {
-                raft.position = Vector3Lerp(raft.position, Vector3{ sp.raftX, sp.raftY, sp.raftZ }, 0.5f);
-                raft.velocity = Vector3{ sp.velX, sp.velY, sp.velZ };
-                raft.rotationY = sp.rotY; raft.pitch = sp.pitch; raft.roll = sp.roll;
-                p1RimAngle = sp.p1RimAngle; p2RimAngle = sp.p2RimAngle;
-                gasP1.pressTimer = sp.p1Gas; gasP2.pressTimer = sp.p2Gas;
-                gasP1.redness = sp.p1Redness; gasP2.redness = sp.p2Redness;
-                gasP1.boneScale = 1.0f + sp.p1Swell; gasP2.boneScale = 1.0f + sp.p2Swell;
-                // eye synced
-                raceTimer = sp.raceTimer; raft.deaths = sp.totalDeaths; raft.currentCP = sp.currentCP;
-                if (sp.isDestroyed && !raft.isDestroyed) {
-                    TriggerBoatDeath(DEATH_SUICIDE);
-                } else if (!sp.isDestroyed && raft.isDestroyed) {
-                    raft.isDestroyed = false;
+        auto ApplyPirateRimMovement = [](float& angle, float moveInput, float dtStep, int playerIndex, int totalPlayers) {
+            if (totalPlayers <= 1) {
+                // 1 Player: 360 degrees full rotation around rim
+                angle += moveInput * 2.60f * dtStep;
+                while (angle >  PI) angle -= 2.0f * PI;
+                while (angle < -PI) angle += 2.0f * PI;
+                return;
+            }
+            angle += moveInput * 2.50f * dtStep;
+            if (totalPlayers == 2) {
+                // 2 Players: Half boat each (P1 left [-3.10f, -0.05f], P2 right [0.05f, 3.10f])
+                if (playerIndex == 0) {
+                    angle = Clamp(angle, -3.10f, -0.05f);
+                } else {
+                    angle = Clamp(angle,  0.05f,  3.10f);
+                }
+            } else if (totalPlayers == 3) {
+                // 3 Players: Third of boat each
+                if (playerIndex == 0) {
+                    angle = Clamp(angle, -3.10f, -1.08f);
+                } else if (playerIndex == 1) {
+                    angle = Clamp(angle, -1.02f,  1.02f);
+                } else {
+                    angle = Clamp(angle,  1.08f,  3.10f);
+                }
+            } else if (totalPlayers >= 4) {
+                // 4 Players: Quarter of boat each
+                if (playerIndex == 0) {
+                    angle = Clamp(angle, -3.10f, -1.60f);
+                } else if (playerIndex == 1) {
+                    angle = Clamp(angle, -1.54f, -0.05f);
+                } else if (playerIndex == 2) {
+                    angle = Clamp(angle,  0.05f,  1.54f);
+                } else {
+                    angle = Clamp(angle,  1.60f,  3.10f);
                 }
             }
-        }
+        };
 
-        // P1 Controls: A/D (or Gamepad 0 Left Stick) slides left pirate along rim, W/SPACE (or Gamepad 0 South Face Button) unleashes gas
-        if (!raft.isDestroyed) {
-            float rimMove1 = 0.0f;
-            if (IsKeyDown(KEY_A)) rimMove1 -= 1.0f;
-            if (IsKeyDown(KEY_D)) rimMove1 += 1.0f;
-            if (touchSteerLeft)   rimMove1 -= 1.0f;
-            if (touchSteerRight)  rimMove1 += 1.0f;
-            if (IsGamepadAvailable(0)) {
-                float gpAxis = GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_X);
-                if (fabsf(gpAxis) > 0.15f) rimMove1 += gpAxis;
-            }
-            if (singlePirateMode) {
-                // Free 360 degree rotation around the boat rim in Solo Mode!
-                p1RimAngle += Clamp(rimMove1, -1.0f, 1.0f) * 2.60f * dt;
-                while (p1RimAngle >  PI) p1RimAngle -= 2.0f * PI;
-                while (p1RimAngle < -PI) p1RimAngle += 2.0f * PI;
-            } else {
-                p1RimAngle += Clamp(rimMove1, -1.0f, 1.0f) * 2.44f * dt;
-                p1RimAngle = Clamp(p1RimAngle, -3.10f, -0.15f);
-            }
+        int activeTotalPlayers = (LanGetRole() == LAN_OFFLINE) ? 1 : gConnectedPlayers;
+        if (activeTotalPlayers < 1) activeTotalPlayers = 1;
 
-            bool gp1Down = IsGamepadAvailable(0) && (IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) || GetGamepadAxisMovement(0, GAMEPAD_AXIS_RIGHT_TRIGGER) > 0.3f);
-            bool gp1Rel  = IsGamepadAvailable(0) && IsGamepadButtonReleased(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
-            p1InputDown     = IsKeyDown(KEY_W) || IsKeyDown(KEY_SPACE) || gp1Down || touchGas;
-            p1InputReleased = IsKeyReleased(KEY_W) || IsKeyReleased(KEY_SPACE) || gp1Rel || (touchGas == false && !IsKeyDown(KEY_W) && !IsKeyDown(KEY_SPACE) && !gp1Down);
+        // 1. Read Local Player Unified Input (Keyboard + Touch HUD + Gamepad)
+        float localRimMove = 0.0f;
+        if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT)  || touchSteerLeft)  localRimMove -= 1.0f;
+        if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT) || touchSteerRight) localRimMove += 1.0f;
+        if (IsGamepadAvailable(0)) {
+            float gpAxis = GetGamepadAxisMovement(0, GAMEPAD_AXIS_LEFT_X);
+            if (fabsf(gpAxis) > 0.15f) localRimMove += gpAxis;
         }
+        localRimMove = Clamp(localRimMove, -1.0f, 1.0f);
+
+        bool gp0Down = IsGamepadAvailable(0) && (IsGamepadButtonDown(0, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) || GetGamepadAxisMovement(0, GAMEPAD_AXIS_RIGHT_TRIGGER) > 0.3f);
+        bool localGasDown = (!raft.isDestroyed) && (IsKeyDown(KEY_W) || IsKeyDown(KEY_SPACE) || IsKeyDown(KEY_UP) || gp0Down || touchGas);
 
         // Automated sequence for test screenshot
         if (testScreenshotMode) {
-            if (testFrameCount >= 20 && testFrameCount < 52) {
-                p1InputDown = true;
-                p1InputReleased = false;
-            } else if (testFrameCount == 52) {
-                p1InputDown = false;
-                p1InputReleased = true;
-            }
+            if (testFrameCount >= 20 && testFrameCount < 52) localGasDown = true;
+            else if (testFrameCount == 52) localGasDown = false;
         }
 
-        // Tap Burst Detection for P1 (Gas shoots OUTWARD from pirate butt, pushes boat INWARD)
+        // True edge detection for Gas Release (Works identically on PC Keyboard & Mobile Touch!)
+        bool localGasReleased = (s_prevLocalGasDown && !localGasDown);
+        s_prevLocalGasDown = localGasDown;
+
         float rimRadius = 0.94f;
-        Vector3 p1OutwardLocal = Vector3{ sinf(p1RimAngle), 0.0f, cosf(p1RimAngle) };
-        Vector3 p1ThrustLocal  = Vector3Scale(p1OutwardLocal, -1.0f);
-        Matrix boatRotM        = MatrixRotateY(raft.rotationY);
-        Vector3 p1ThrustWorld  = Vector3Transform(p1ThrustLocal, boatRotM);
-        Vector3 p1OutwardWorld = Vector3Transform(p1OutwardLocal, boatRotM);
-        Vector3 p1PosWorld     = Vector3Add(raft.position, Vector3Transform(Vector3Scale(p1OutwardLocal, rimRadius), boatRotM));
-        p1PosWorld.y += 0.55f;
+        Matrix boatRotM = MatrixRotateY(raft.rotationY);
 
-        if (p1InputReleased && gasP1.pressTimer <= GAS_TAP_THRESHOLD_SECONDS && gasP1.pressTimer > 0.01f && !gasP1.gasDepleted && !raft.isDestroyed) {
-            if (gasP1.gasEnergy >= GAS_TAP_COST) {
-                gasP1.gasEnergy -= GAS_TAP_COST;
-                float tapDt    = Clamp(gasP1.pressTimer, 0.06f, 0.10f);
-                float tapAccel = (gPhysCfg.tapBurstForce / BOAT_MASS) * tapDt;
-                raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p1ThrustWorld, tapAccel));
-                float steerTq  = (p1OutwardLocal.x * p1ThrustLocal.z - p1OutwardLocal.z * p1ThrustLocal.x);
-                raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * tapDt;
-                EmitFartBurst(p1PosWorld, p1OutwardWorld, 0.4f);
-                PlaySound(sndTap[rand() % 3]);
-            }
-        }
+        if (LanGetRole() == LAN_CLIENT) {
+            // -----------------------------------------------------------------
+            // CLIENT MODE: Local Player controls PIRATE 2 (p2RimAngle, gasP2)
+            // -----------------------------------------------------------------
+            singlePirateMode = false;
 
-        gasP1.Update(dt, p1InputDown, runTime);
-
-        // Sustained Thrust Application for P1
-        if (gasP1.isSustained && !raft.isDestroyed) {
-            float curForce = gPhysCfg.sustainedMinForce + (gPhysCfg.sustainedMaxForce - gPhysCfg.sustainedMinForce) * gasP1.sustainedCharge;
-            float accel    = (curForce / BOAT_MASS) * dt;
-            raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p1ThrustWorld, accel));
-            float steerTq  = (p1OutwardLocal.x * p1ThrustLocal.z - p1OutwardLocal.z * p1ThrustLocal.x);
-            raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * dt;
-            if (rand() % 4 == 0) {
-                EmitFartBurst(p1PosWorld, p1OutwardWorld, gasP1.sustainedCharge);
-            }
-            if (!IsSoundPlaying(sndHold[0]) && !IsSoundPlaying(sndHold[1])) {
-                PlaySound(sndHold[rand() % 2]);
-            }
-        } else {
-            if (IsSoundPlaying(sndHold[0])) StopSound(sndHold[0]);
-            if (IsSoundPlaying(sndHold[1])) StopSound(sndHold[1]);
-        }
-
-        // Player 2 Independent Controls (Active only in Multiplayer LAN!)
-        if (!singlePirateMode) {
-        if (!raft.isDestroyed) {
-            float p2RimMove = 0.0f;
-            if (IsKeyDown(KEY_LEFT))  p2RimMove -= 1.0f;
-            if (IsKeyDown(KEY_RIGHT)) p2RimMove += 1.0f;
-            if (IsGamepadAvailable(1)) {
-                float gp2Axis = GetGamepadAxisMovement(1, GAMEPAD_AXIS_LEFT_X);
-                if (fabsf(gp2Axis) > 0.15f) p2RimMove += gp2Axis;
-            }
-            if (p2NetRimMove != 0.0f) p2RimMove += p2NetRimMove;
-            p2RimAngle += Clamp(p2RimMove, -1.0f, 1.0f) * 2.44f * dt;
-            p2RimAngle = Clamp(p2RimAngle, 0.15f, 3.10f);
-
-            bool mouseSafe = (mousePos.y > 55.0f && mousePos.y < (GetScreenHeight() - 55.0f));
-            bool gp2Down = IsGamepadAvailable(1) && (IsGamepadButtonDown(1, GAMEPAD_BUTTON_RIGHT_FACE_DOWN) || GetGamepadAxisMovement(1, GAMEPAD_AXIS_RIGHT_TRIGGER) > 0.3f);
-            bool gp2Rel  = IsGamepadAvailable(1) && IsGamepadButtonReleased(1, GAMEPAD_BUTTON_RIGHT_FACE_DOWN);
-
-            p2InputDown     = (mouseSafe && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) || IsKeyDown(KEY_UP) || IsKeyDown(KEY_RIGHT_CONTROL) || gp2Down;
-            p2InputReleased = (mouseSafe && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) || IsKeyReleased(KEY_UP) || IsKeyReleased(KEY_RIGHT_CONTROL) || gp2Rel;
-        }
-
-        if (testScreenshotMode) {
-            if (testFrameCount >= 20 && testFrameCount < 52) {
-                p2InputDown = true;
-                p2InputReleased = false;
-            } else if (testFrameCount == 52) {
-                p2InputDown = false;
-                p2InputReleased = true;
-            }
-        }
-
-        Vector3 p2OutwardLocal = Vector3{ sinf(p2RimAngle), 0.0f, cosf(p2RimAngle) };
-        Vector3 p2ThrustLocal  = Vector3Scale(p2OutwardLocal, -1.0f);
-        Vector3 p2ThrustWorld  = Vector3Transform(p2ThrustLocal, boatRotM);
-        Vector3 p2OutwardWorld = Vector3Transform(p2OutwardLocal, boatRotM);
-        Vector3 p2PosWorld     = Vector3Add(raft.position, Vector3Transform(Vector3Scale(p2OutwardLocal, rimRadius), boatRotM));
-        p2PosWorld.y += 0.55f;
-
-        // Tap Burst Detection for P2 (Previously missing!)
-        if (p2InputReleased && gasP2.pressTimer <= GAS_TAP_THRESHOLD_SECONDS && gasP2.pressTimer > 0.01f && !gasP2.gasDepleted && !raft.isDestroyed) {
-            if (gasP2.gasEnergy >= GAS_TAP_COST) {
-                gasP2.gasEnergy -= GAS_TAP_COST;
-                float tapDt    = Clamp(gasP2.pressTimer, 0.06f, 0.10f);
-                float tapAccel = (gPhysCfg.tapBurstForce / BOAT_MASS) * tapDt;
-                raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p2ThrustWorld, tapAccel));
-                float steerTq  = (p2OutwardLocal.x * p2ThrustLocal.z - p2OutwardLocal.z * p2ThrustLocal.x);
-                raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * tapDt;
-                EmitFartBurst(p2PosWorld, p2OutwardWorld, 0.4f);
-                PlaySound(sndTap[rand() % 3]);
-            }
-        }
-
-        gasP2.Update(dt, p2InputDown, runTime);
-
-        // Sustained Thrust Application for P2
-        if (gasP2.isSustained && !raft.isDestroyed) {
-
-            float curForce = GAS_MIN_FORCE + (GAS_NORMAL_FORCE - GAS_MIN_FORCE) * gasP2.sustainedCharge;
-
-            float accel = (curForce / BOAT_MASS) * dt * 0.85f;
-
-            raft.velocity = Vector3Add(raft.velocity, Vector3Scale(p2ThrustWorld, accel));
-
-            float steerTq = (p2OutwardLocal.x * p2ThrustLocal.z - p2OutwardLocal.z * p2ThrustLocal.x);
-
-            raft.angularVelocityY += steerTq * (BOAT_STEER_TORQUE / BOAT_MASS) * (curForce / GAS_NORMAL_FORCE) * dt * 22.0f;
-
-            if (rand() % 4 == 0) {
-
-                EmitFartBurst(p2PosWorld, p2OutwardWorld, gasP2.sustainedCharge);
-
+            // Client-Side Prediction for Pirate 2 rim rotation with sector bounds
+            if (!raft.isDestroyed) {
+                ApplyPirateRimMovement(p2RimAngle, localRimMove, dt, 1, activeTotalPlayers);
             }
 
-        }
+            Vector3 p2OutwardLocal = Vector3{ sinf(p2RimAngle), 0.0f, cosf(p2RimAngle) };
+            Vector3 p2ThrustLocal  = Vector3Scale(p2OutwardLocal, -1.0f);
+            Vector3 p2ThrustWorld  = Vector3Transform(p2ThrustLocal, boatRotM);
+            Vector3 p2OutwardWorld = Vector3Transform(p2OutwardLocal, boatRotM);
+            Vector3 p2PosWorld     = Vector3Add(raft.position, Vector3Transform(Vector3Scale(p2OutwardLocal, rimRadius), boatRotM));
+            p2PosWorld.y += 0.55f;
 
+            // Detect Client Tap Burst BEFORE gasP2.Update resets pressTimer!
+            if (localGasReleased && gasP2.pressTimer <= GAS_TAP_THRESHOLD_SECONDS && gasP2.pressTimer > 0.01f && !gasP2.gasDepleted && !raft.isDestroyed) {
+                if (gasP2.gasEnergy >= GAS_TAP_COST) {
+                    gasP2.gasEnergy -= GAS_TAP_COST;
+                    localClientTapSeq++;
+                    // Client-Side Immediate Impulse Prediction
+                    float tapDt    = Clamp(gasP2.pressTimer, 0.06f, 0.10f);
+                    float tapAccel = (gPhysCfg.tapBurstForce / BOAT_MASS) * tapDt;
+                    raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p2ThrustWorld, tapAccel));
+                    float steerTq  = (p2OutwardLocal.x * p2ThrustLocal.z - p2OutwardLocal.z * p2ThrustLocal.x);
+                    raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * tapDt;
+                    EmitFartBurst(p2PosWorld, p2OutwardWorld, 0.4f);
+                    PlaySound(sndTap[rand() % 3]);
                 }
+            }
+
+            gasP2.Update(dt, localGasDown, runTime);
+
+            // Client-Side Immediate Sustained Thrust Prediction for Pirate 2
+            if (gasP2.isSustained && !raft.isDestroyed) {
+                float curForce = gPhysCfg.sustainedMinForce + (gPhysCfg.sustainedMaxForce - gPhysCfg.sustainedMinForce) * gasP2.sustainedCharge;
+                float accel    = (curForce / BOAT_MASS) * dt;
+                raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p2ThrustWorld, accel));
+                float steerTq  = (p2OutwardLocal.x * p2ThrustLocal.z - p2OutwardLocal.z * p2ThrustLocal.x);
+                raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * dt;
+                if (rand() % 4 == 0) {
+                    EmitFartBurst(p2PosWorld, p2OutwardWorld, gasP2.sustainedCharge);
+                }
+            }
+
+            if (IsKeyPressed(KEY_R)) localClientSuicideSeq++;
+
+            // Send Authoritative Client Input Packet (with Monotonic Event Counters!) to Host
+            LanInputPacket inPkt{};
+            inPkt.magic          = 0x46415254;
+            inPkt.type           = LAN_PKT_INPUT;
+            inPkt.seq            = ++netSeqClient;
+            inPkt.rimMove        = localRimMove;
+            inPkt.clientRimAngle = p2RimAngle;
+            inPkt.gasDown        = localGasDown ? 1 : 0;
+            inPkt.gasReleased    = localGasReleased ? 1 : 0;
+            inPkt.tapBurstSeq    = localClientTapSeq;
+            inPkt.suicideSeq     = localClientSuicideSeq;
+            LanClientSendInput(inPkt);
+
+            // Poll Authoritative State from Host & Reconcile Smoothly
+            LanStatePacket sp{};
+            if (LanClientPollState(sp)) {
+                Vector3 authPos = Vector3{ sp.raftX, sp.raftY, sp.raftZ };
+                float posErr = Vector3Distance(raft.position, authPos);
+                if (posErr > 4.5f) {
+                    raft.position = authPos;
+                } else {
+                    raft.position = Vector3Lerp(raft.position, authPos, 0.38f);
+                }
+                raft.velocity = Vector3Lerp(raft.velocity, Vector3{ sp.velX, sp.velY, sp.velZ }, 0.55f);
+
+                // Shortest-arc angular reconciliation
+                float rotDiff = sp.rotY - raft.rotationY;
+                while (rotDiff >  PI) rotDiff -= 2.0f * PI;
+                while (rotDiff < -PI) rotDiff += 2.0f * PI;
+                raft.rotationY += rotDiff * 0.45f;
+                raft.angularVelocityY = sp.angVelY;
+                raft.pitch = sp.pitch;
+                raft.roll  = sp.roll;
+
+                // Replicate Host's Pirate 1 State & VFX
+                p1RimAngle             = sp.p1RimAngle;
+                gasP1.gasEnergy        = sp.p1Energy;
+                gasP1.sustainedCharge  = sp.p1Charge;
+                gasP1.isSustained      = (sp.p1Sustained != 0);
+                gasP1.isPressing       = (sp.p1Sustained != 0 || sp.p1Eye > 0.05f);
+                gasP1.gasDepleted      = (sp.p1Depleted != 0);
+                gasP1.redness          = sp.p1Redness;
+                gasP1.boneScale        = 1.0f + sp.p1Swell;
+
+                // Reconcile Pirate 2 energy from Host
+                gasP2.gasEnergy        = sp.p2Energy;
+                gasP2.gasDepleted      = (sp.p2Depleted != 0);
+
+                // Trigger Host P1 Tap Burst VFX/Sound on Client when hostP1TapSeq increments
+                if (sp.p1TapSeq != clientLastSeenP1Tap) {
+                    clientLastSeenP1Tap = sp.p1TapSeq;
+                    Vector3 p1OutL = Vector3{ sinf(p1RimAngle), 0.0f, cosf(p1RimAngle) };
+                    Vector3 p1OutW = Vector3Transform(p1OutL, boatRotM);
+                    Vector3 p1PosW = Vector3Add(raft.position, Vector3Transform(Vector3Scale(p1OutL, rimRadius), boatRotM));
+                    p1PosW.y += 0.55f;
+                    EmitFartBurst(p1PosW, p1OutW, 0.4f);
+                    PlaySound(sndTap[rand() % 3]);
+                }
+
+                if (gasP1.isSustained && !raft.isDestroyed && (rand() % 4 == 0)) {
+                    Vector3 p1OutL = Vector3{ sinf(p1RimAngle), 0.0f, cosf(p1RimAngle) };
+                    Vector3 p1OutW = Vector3Transform(p1OutL, boatRotM);
+                    Vector3 p1PosW = Vector3Add(raft.position, Vector3Transform(Vector3Scale(p1OutL, rimRadius), boatRotM));
+                    p1PosW.y += 0.55f;
+                    EmitFartBurst(p1PosW, p1OutW, gasP1.sustainedCharge);
+                }
+
+                raceTimer      = sp.raceTimer;
+                totalDeaths    = sp.totalDeaths;
+                raft.deaths    = sp.totalDeaths;
+                raft.currentCP = sp.currentCP;
+                if (sp.isDestroyed && !raft.isDestroyed) {
+                    TriggerBoatDeath(DEATH_OBSTACLE);
+                } else if (!sp.isDestroyed && raft.isDestroyed) {
+                    raft.isDestroyed = false;
+                    ragdollA.active  = false;
+                    ragdollB.active  = false;
+                }
+            }
+
+            // Play sustained hold sound if EITHER Pirate 1 or Pirate 2 is holding gas!
+            if ((gasP1.isSustained || gasP2.isSustained) && !raft.isDestroyed) {
+                if (!IsSoundPlaying(sndHold[0]) && !IsSoundPlaying(sndHold[1])) {
+                    PlaySound(sndHold[rand() % 2]);
+                }
+            } else {
+                if (IsSoundPlaying(sndHold[0])) StopSound(sndHold[0]);
+                if (IsSoundPlaying(sndHold[1])) StopSound(sndHold[1]);
+            }
+
+        } else {
+            // -----------------------------------------------------------------
+            // HOST OR SOLO MODE:
+            // Local Player controls PIRATE 1 (p1RimAngle, gasP1).
+            // In LAN_HOST mode, Remote Client controls PIRATE 2 (p2RimAngle, gasP2)!
+            // -----------------------------------------------------------------
+            singlePirateMode = (LanGetRole() == LAN_OFFLINE);
+
+            if (!raft.isDestroyed) {
+                ApplyPirateRimMovement(p1RimAngle, localRimMove, dt, 0, activeTotalPlayers);
+            }
+
+            Vector3 p1OutwardLocal = Vector3{ sinf(p1RimAngle), 0.0f, cosf(p1RimAngle) };
+            Vector3 p1ThrustLocal  = Vector3Scale(p1OutwardLocal, -1.0f);
+            Vector3 p1ThrustWorld  = Vector3Transform(p1ThrustLocal, boatRotM);
+            Vector3 p1OutwardWorld = Vector3Transform(p1OutwardLocal, boatRotM);
+            Vector3 p1PosWorld     = Vector3Add(raft.position, Vector3Transform(Vector3Scale(p1OutwardLocal, rimRadius), boatRotM));
+            p1PosWorld.y += 0.55f;
+
+            if (localGasReleased && gasP1.pressTimer <= GAS_TAP_THRESHOLD_SECONDS && gasP1.pressTimer > 0.01f && !gasP1.gasDepleted && !raft.isDestroyed) {
+                if (gasP1.gasEnergy >= GAS_TAP_COST) {
+                    gasP1.gasEnergy -= GAS_TAP_COST;
+                    hostP1TapSeq++;
+                    float tapDt    = Clamp(gasP1.pressTimer, 0.06f, 0.10f);
+                    float tapAccel = (gPhysCfg.tapBurstForce / BOAT_MASS) * tapDt;
+                    raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p1ThrustWorld, tapAccel));
+                    float steerTq  = (p1OutwardLocal.x * p1ThrustLocal.z - p1OutwardLocal.z * p1ThrustLocal.x);
+                    raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * tapDt;
+                    EmitFartBurst(p1PosWorld, p1OutwardWorld, 0.4f);
+                    PlaySound(sndTap[rand() % 3]);
+                }
+            }
+
+            gasP1.Update(dt, localGasDown, runTime);
+
+            if (gasP1.isSustained && !raft.isDestroyed) {
+                float curForce = gPhysCfg.sustainedMinForce + (gPhysCfg.sustainedMaxForce - gPhysCfg.sustainedMinForce) * gasP1.sustainedCharge;
+                float accel    = (curForce / BOAT_MASS) * dt;
+                raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p1ThrustWorld, accel));
+                float steerTq  = (p1OutwardLocal.x * p1ThrustLocal.z - p1OutwardLocal.z * p1ThrustLocal.x);
+                raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * dt;
+                if (rand() % 4 == 0) {
+                    EmitFartBurst(p1PosWorld, p1OutwardWorld, gasP1.sustainedCharge);
+                }
+            }
+
+            // Process Remote Client (Pirate 2) in LAN_HOST Mode!
+            if (LanGetRole() == LAN_HOST) {
+                LanInputPacket newClientIn{};
+                if (LanHostPollInput(newClientIn)) {
+                    gLatchedClientIn      = newClientIn;
+                    gClientInputHoldTimer = 0.18f; // Hold latched input for 180ms across Wi-Fi frame gaps!
+
+                    // Sync Client's exact predicted rim angle smoothly
+                    float angDiff = newClientIn.clientRimAngle - p2RimAngle;
+                    while (angDiff >  PI) angDiff -= 2.0f * PI;
+                    while (angDiff < -PI) angDiff += 2.0f * PI;
+                    p2RimAngle += angDiff * 0.65f;
+                    ApplyPirateRimMovement(p2RimAngle, 0.0f, dt, 1, activeTotalPlayers);
+                } else {
+                    if (gClientInputHoldTimer > 0.0f) {
+                        gClientInputHoldTimer -= dt;
+                    } else {
+                        gLatchedClientIn.rimMove = 0.0f;
+                        gLatchedClientIn.gasDown = 0;
+                    }
+                }
+
+                if (!raft.isDestroyed) {
+                    ApplyPirateRimMovement(p2RimAngle, Clamp(gLatchedClientIn.rimMove, -1.0f, 1.0f), dt, 1, activeTotalPlayers);
+                }
+
+                Vector3 p2OutwardLocal = Vector3{ sinf(p2RimAngle), 0.0f, cosf(p2RimAngle) };
+                Vector3 p2ThrustLocal  = Vector3Scale(p2OutwardLocal, -1.0f);
+                Vector3 p2ThrustWorld  = Vector3Transform(p2ThrustLocal, boatRotM);
+                Vector3 p2OutwardWorld = Vector3Transform(p2OutwardLocal, boatRotM);
+                Vector3 p2PosWorld     = Vector3Add(raft.position, Vector3Transform(Vector3Scale(p2OutwardLocal, rimRadius), boatRotM));
+                p2PosWorld.y += 0.55f;
+
+                // Execute Reliable Client Tap Burst when tapBurstSeq increments!
+                if (gLatchedClientIn.tapBurstSeq != hostLastExecClientTap && !raft.isDestroyed) {
+                    hostLastExecClientTap = gLatchedClientIn.tapBurstSeq;
+                    if (gasP2.gasEnergy >= GAS_TAP_COST) {
+                        gasP2.gasEnergy -= GAS_TAP_COST;
+                    }
+                    float tapDt    = 0.085f;
+                    float tapAccel = (gPhysCfg.tapBurstForce / BOAT_MASS) * tapDt;
+                    raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p2ThrustWorld, tapAccel));
+                    float steerTq  = (p2OutwardLocal.x * p2ThrustLocal.z - p2OutwardLocal.z * p2ThrustLocal.x);
+                    raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * tapDt;
+                    EmitFartBurst(p2PosWorld, p2OutwardWorld, 0.4f);
+                    PlaySound(sndTap[rand() % 3]);
+                }
+
+                // Execute Client Suicide Request if suicideSeq incremented
+                if (gLatchedClientIn.suicideSeq != hostLastExecSuicide) {
+                    hostLastExecSuicide = gLatchedClientIn.suicideSeq;
+                    if (!raft.isDestroyed) TriggerBoatDeath(DEATH_SUICIDE);
+                }
+
+                bool clientGasDown = (gLatchedClientIn.gasDown != 0) && !raft.isDestroyed;
+                gasP2.Update(dt, clientGasDown, runTime);
+
+                // Apply Client Sustained Thrust to Boat Physics on Host!
+                if (gasP2.isSustained && !raft.isDestroyed) {
+                    float curForce = gPhysCfg.sustainedMinForce + (gPhysCfg.sustainedMaxForce - gPhysCfg.sustainedMinForce) * gasP2.sustainedCharge;
+                    float accel    = (curForce / BOAT_MASS) * dt;
+                    raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p2ThrustWorld, accel));
+                    float steerTq  = (p2OutwardLocal.x * p2ThrustLocal.z - p2OutwardLocal.z * p2ThrustLocal.x);
+                    raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * dt;
+                    if (rand() % 4 == 0) {
+                        EmitFartBurst(p2PosWorld, p2OutwardWorld, gasP2.sustainedCharge);
+                    }
+                }
+            }
+
+            // Play sustained hold sound if EITHER Pirate 1 or Pirate 2 is holding gas!
+            bool anySustained = gasP1.isSustained || (!singlePirateMode && gasP2.isSustained);
+            if (anySustained && !raft.isDestroyed) {
+                if (!IsSoundPlaying(sndHold[0]) && !IsSoundPlaying(sndHold[1])) {
+                    PlaySound(sndHold[rand() % 2]);
+                }
+            } else {
+                if (IsSoundPlaying(sndHold[0])) StopSound(sndHold[0]);
+                if (IsSoundPlaying(sndHold[1])) StopSound(sndHold[1]);
+            }
+        }
 
 // "FART TOGETHER" Co-op Sync Boost!
 
@@ -3639,6 +3777,48 @@ int main(int argc, char** argv) {
         raft.pitch = Lerp(raft.pitch, 0.0f, 10.0f * dt);
         raft.roll  = Lerp(raft.roll, Clamp(raft.angularVelocityY * 0.025f, -0.08f, 0.08f), 10.0f * dt);
         raft.speed = horizSpeed;
+
+        // Broadcast authoritative state from Host (Plan v8.4.0)
+        if (LanGetRole() == LAN_HOST) {
+            LanStatePacket sp{};
+            sp.magic       = 0x46415254;
+            sp.type        = LAN_PKT_STATE;
+            sp.seq         = ++netSeqHost;
+            sp.raftX       = raft.position.x;
+            sp.raftY       = raft.position.y;
+            sp.raftZ       = raft.position.z;
+            sp.velX        = raft.velocity.x;
+            sp.velY        = raft.velocity.y;
+            sp.velZ        = raft.velocity.z;
+            sp.rotY        = raft.rotationY;
+            sp.angVelY     = raft.angularVelocityY;
+            sp.pitch       = raft.pitch;
+            sp.roll        = raft.roll;
+            sp.p1RimAngle  = p1RimAngle;
+            sp.p2RimAngle  = p2RimAngle;
+            sp.p1Energy    = gasP1.gasEnergy;
+            sp.p2Energy    = gasP2.gasEnergy;
+            sp.p1Charge    = gasP1.sustainedCharge;
+            sp.p2Charge    = gasP2.sustainedCharge;
+            sp.p1Redness   = gasP1.redness;
+            sp.p2Redness   = gasP2.redness;
+            sp.p1Swell     = gasP1.boneScale - 1.0f;
+            sp.p2Swell     = gasP2.boneScale - 1.0f;
+            sp.p1Eye       = gasP1.isPressing ? Clamp(gasP1.pressTimer / 0.45f, 0.0f, 1.0f) : 0.0f;
+            sp.p2Eye       = gasP2.isPressing ? Clamp(gasP2.pressTimer / 0.45f, 0.0f, 1.0f) : 0.0f;
+            sp.p1Sustained = gasP1.isSustained ? 1 : 0;
+            sp.p2Sustained = gasP2.isSustained ? 1 : 0;
+            sp.p1Depleted  = gasP1.gasDepleted ? 1 : 0;
+            sp.p2Depleted  = gasP2.gasDepleted ? 1 : 0;
+            sp.p1TapSeq    = hostP1TapSeq;
+            sp.p2TapSeq    = hostLastExecClientTap;
+            sp.raceTimer   = raceTimer;
+            sp.totalDeaths = raft.deaths;
+            sp.currentCP   = raft.currentCP;
+            sp.isDestroyed = raft.isDestroyed ? 1 : 0;
+            LanHostBroadcastState(sp);
+        }
+
 
         // 5. Check Custom Collision Shapes (12 types) & Obstacles
         const float COLLISION_ACTIVE_RADIUS_SQ = 15.0f * 15.0f; // Proximity-Gated Collision (15m radius)
@@ -5967,7 +6147,8 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             Rectangle rdyRec = { rdyX, rdyY, rdyW, rdyH };
             bool hovRdy = CheckCollisionPointRec(mousePos, rdyRec);
 
-            Color rdyBg = gHostReady ? Color{ 34, 197, 94, 255 } : (hovRdy ? Color{ 255, 60, 135, 255 } : Color{ 238, 52, 132, 255 });
+            bool localIsReady = (LanGetRole() == LAN_CLIENT) ? gClientReady : gHostReady;
+            Color rdyBg = localIsReady ? Color{ 34, 197, 94, 255 } : (hovRdy ? Color{ 255, 60, 135, 255 } : Color{ 238, 52, 132, 255 });
             DrawSlantedRect(rdyRec.x, rdyRec.y, rdyRec.width, rdyRec.height, 14.0f, rdyBg);
             DrawSlantedRectLines(rdyRec.x, rdyRec.y, rdyRec.width, rdyRec.height, 14.0f, 2.0f, WHITE);
 
@@ -5976,7 +6157,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                                Rectangle{ rdyRec.x + 22.0f, rdyRec.y + 12.0f, 48.0f, 32.0f }, Vector2{0,0}, 0.0f, WHITE);
             }
 
-            const char* rdyLabel = gHostReady ? LocText(STR_NOT_READY_BTN) : LocText(STR_READY_BTN);
+            const char* rdyLabel = localIsReady ? LocText(STR_NOT_READY_BTN) : LocText(STR_READY_BTN);
             DrawTextEx(fontUIBold, rdyLabel, Vector2{ rdyRec.x + 85.0f, rdyRec.y + 15.0f }, 22, 0.5f, WHITE);
 
             if ((hovRdy && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_ENTER)) {

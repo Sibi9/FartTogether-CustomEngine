@@ -27,52 +27,57 @@ enum LanPacketType : uint8_t {
 struct LanBeaconPacketV830 {
     uint32_t magic;        // 0x46415254 ("FART")
     uint8_t  type;         // LAN_PKT_BEACON
-    char     roomCode[8];  // e.g. "A80119"
-    char     roomName[32]; // e.g. "Pirate Room #A80119"
-    uint16_t hostPort;     // 7777
-    uint8_t  playerCount;  // 1..4
-    uint8_t  maxPlayers;   // 4
-    uint8_t  hostColor;    // 0..3
-    uint8_t  inGame;       // 0 = In Lobby, 1 = Racing
+    char     roomCode[8];
+    char     roomName[32];
+    uint16_t hostPort;
+    uint8_t  playerCount;
+    uint8_t  maxPlayers;
+    uint8_t  hostColor;
+    uint8_t  inGame;
 };
 
 struct LanBeaconPacket {
     uint32_t magic;        // 0x46415254 ("FART")
     uint8_t  type;         // LAN_PKT_BEACON
-    char     roomCode[8];  // e.g. "A80119"
-    char     roomName[32]; // e.g. "Pirate Room #A80119"
-    char     hostName[32]; // Host player name
-    uint16_t hostPort;     // 7777
-    uint8_t  playerCount;  // 1..4
-    uint8_t  maxPlayers;   // 4
-    uint8_t  hostColor;    // 0..3
-    uint8_t  inGame;       // 0 = In Lobby, 1 = Racing
+    char     roomCode[8];
+    char     roomName[32];
+    char     hostName[32];
+    uint16_t hostPort;
+    uint8_t  playerCount;
+    uint8_t  maxPlayers;
+    uint8_t  hostColor;
+    uint8_t  inGame;
 };
 
 struct LanLobbyPacket {
-    uint32_t magic;
+    uint32_t magic;        // 0x46415254
     uint8_t  type;         // LAN_PKT_JOIN, LAN_PKT_ACCEPT, LAN_PKT_LOBBY, LAN_PKT_START
     char     roomCode[8];
     char     playerName[32];
     uint8_t  hostColor;
     uint8_t  clientColor;
+    uint8_t  hostReady;
     uint8_t  clientReady;
     uint8_t  gameMode;
     uint8_t  playerCount;
 };
 
 struct LanStatePacket {
-    uint32_t magic; // 0x46415254
-    uint8_t  type;  // LAN_PKT_STATE
+    uint32_t magic;        // 0x46415254
+    uint8_t  type;         // LAN_PKT_STATE
     uint32_t seq;
     float    raftX, raftY, raftZ;
     float    velX, velY, velZ;
-    float    rotY, pitch, roll;
+    float    rotY, angVelY, pitch, roll;
     float    p1RimAngle, p2RimAngle;
-    float    p1Gas, p2Gas;
+    float    p1Energy, p2Energy;
+    float    p1Charge, p2Charge;
     float    p1Redness, p2Redness;
     float    p1Swell, p2Swell;
     float    p1Eye, p2Eye;
+    uint8_t  p1Sustained, p2Sustained;
+    uint8_t  p1Depleted, p2Depleted;
+    uint16_t p1TapSeq, p2TapSeq;
     float    raceTimer;
     int32_t  totalDeaths;
     int32_t  currentCP;
@@ -80,13 +85,15 @@ struct LanStatePacket {
 };
 
 struct LanInputPacket {
-    uint32_t magic; // 0x46415254
-    uint8_t  type;  // LAN_PKT_INPUT
+    uint32_t magic;        // 0x46415254
+    uint8_t  type;         // LAN_PKT_INPUT
     uint32_t seq;
-    float    rimMove;
-    uint8_t  gasDown;
-    uint8_t  gasReleased;
-    uint8_t  suicideReq;
+    float    rimMove;      // -1.0 .. +1.0
+    float    clientRimAngle;
+    uint8_t  gasDown;      // 1 while holding gas
+    uint8_t  gasReleased;  // 1 on release edge
+    uint16_t tapBurstSeq;  // Monotonic counter incremented on every quick tap burst!
+    uint16_t suicideSeq;   // Monotonic counter incremented on suicide press!
 };
 #pragma pack(pop)
 
@@ -132,7 +139,6 @@ bool LanClientPollState(LanStatePacket& outState);
 bool LanIsMatchStarted();
 void LanSetMatchStarted(bool started);
 
-// Player Names & Lobby Sync
 extern char gLocalPlayerName[32];
 extern char gRemotePlayerName[32];
 void LanSetLocalPlayerName(const char* name);

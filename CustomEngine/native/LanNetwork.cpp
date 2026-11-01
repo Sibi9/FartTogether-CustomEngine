@@ -21,7 +21,9 @@ typedef int SOCKET;
 #define BOOL int
 #define TRUE 1
 #define FALSE 0
+#ifndef strncpy_s
 #define strncpy_s(dst, src, count) do { strncpy((dst), (src), (count)); (dst)[(count)-1] = '\0'; } while(0)
+#endif
 #endif
 
 #include <stdio.h>
@@ -29,26 +31,27 @@ typedef int SOCKET;
 #include <stdlib.h>
 #include "LanNetwork.h"
 
-static SOCKET   gGameSock      = INVALID_SOCKET;
-static SOCKET   gDiscoverySock = INVALID_SOCKET;
-static LanRole  gLanRole       = LAN_OFFLINE;
-static bool     gWsaReady      = false;
-static bool     gPeerConnected = false;
-static bool     gLanMatchStart = false;
-static sockaddr_in gPeerAddr   = { 0 };
-static uint32_t gPacketSeq     = 0;
-static float    gBeaconTimer   = 0.0f;
-static float    gProbeTimer    = 0.0f;
+static SOCKET   gGameSock         = INVALID_SOCKET;
+static SOCKET   gDiscoverySock    = INVALID_SOCKET;
+static LanRole  gLanRole          = LAN_OFFLINE;
+static bool     gWsaReady         = false;
+static bool     gPeerConnected    = false;
+static bool     gLanMatchStart    = false;
+static sockaddr_in gPeerAddr      = { 0 };
+static uint32_t gLastRecvInputSeq = 0;
+static uint32_t gLastRecvStateSeq = 0;
+static float    gBeaconTimer      = 0.0f;
+static float    gProbeTimer       = 0.0f;
 static char     gCurrentRoomCode[8] = "A80119";
-static uint8_t  gHostCharColor   = 0;
-static uint8_t  gClientCharColor = 1;
-static char     gStatusText[128] = "LAN Offline";
+static uint8_t  gHostCharColor    = 0;
+static uint8_t  gClientCharColor  = 1;
+static char     gStatusText[128]  = "LAN Offline";
 
 char gLocalPlayerName[32]  = "Captain 1";
 char gRemotePlayerName[32] = "Captain 2";
 
-bool gHostReady = false;
-bool gClientReady = false;
+bool gHostReady        = false;
+bool gClientReady      = false;
 int  gConnectedPlayers = 1;
 bool gSoloPracticeMode = false;
 
@@ -59,7 +62,7 @@ void LanSetLocalPlayerName(const char* name) {
         strncpy_s(gLocalPlayerName, name, sizeof(gLocalPlayerName) - 1);
     }
 }
-const char* LanGetLocalPlayerName() { return gLocalPlayerName; }
+const char* LanGetLocalPlayerName()  { return gLocalPlayerName; }
 const char* LanGetRemotePlayerName() { return gRemotePlayerName; }
 
 void LanEnsureWsa() {
@@ -84,9 +87,11 @@ void LanShutdown() {
         closesocket(gDiscoverySock);
         gDiscoverySock = INVALID_SOCKET;
     }
-    gLanRole = LAN_OFFLINE;
-    gPeerConnected = false;
-    gLanMatchStart = false;
+    gLanRole          = LAN_OFFLINE;
+    gPeerConnected    = false;
+    gLanMatchStart    = false;
+    gLastRecvInputSeq = 0;
+    gLastRecvStateSeq = 0;
     gDiscoveredRooms.clear();
     snprintf(gStatusText, sizeof(gStatusText), "LAN Offline");
 }
@@ -105,20 +110,37 @@ static void SetUdpConnReset(SOCKET s) {
 static void SetUdpConnReset(SOCKET s) { (void)s; }
 #endif
 
+// AAA Low-Latency QoS & Buffer Configuration for Wi-Fi LAN
+static void ConfigureLowLatencySocket(SOCKET s) {
+    if (s == INVALID_SOCKET) return;
+    SetUdpConnReset(s);
+    u_long nonBlocking = 1;
+    ioctlsocket(s, FIONBIO, &nonBlocking);
+    BOOL reuse = TRUE;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
+    BOOL bcast = TRUE;
+    setsockopt(s, SOL_SOCKET, SO_BROADCAST, (const char*)&bcast, sizeof(bcast));
+    int bufSz = 65536;
+    setsockopt(s, SOL_SOCKET, SO_RCVBUF, (const char*)&bufSz, sizeof(bufSz));
+    setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char*)&bufSz, sizeof(bufSz));
+#ifdef IP_TOS
+    int tos = 0x10; // IPTOS_LOWDELAY (WMM Priority on Wi-Fi routers)
+    setsockopt(s, IPPROTO_IP, IP_TOS, (const char*)&tos, sizeof(tos));
+#endif
+}
+
 static uint32_t LanGetLocalIPv4() {
     LanEnsureWsa();
-    const char* testTargets[] = { "192.168.1.1", "192.168.0.1", "10.0.0.1", "8.8.8.8", "1.1.1.1" };
+    const char* testTargets[] = { "192.168.1.1", "192.168.0.1", "192.168.43.1", "10.0.0.1", "8.8.8.8", "1.1.1.1" };
     for (const char* tgt : testTargets) {
         SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
         if (s == INVALID_SOCKET) continue;
-        sockaddr_in target;
-        memset(&target, 0, sizeof(target));
+        sockaddr_in target{};
         target.sin_family = AF_INET;
         target.sin_port = htons(53);
         target.sin_addr.s_addr = inet_addr(tgt);
         connect(s, (sockaddr*)&target, sizeof(target));
-        sockaddr_in local;
-        memset(&local, 0, sizeof(local));
+        sockaddr_in local{};
         socklen_t len = sizeof(local);
         getsockname(s, (sockaddr*)&local, &len);
         closesocket(s);
@@ -155,17 +177,9 @@ bool LanStartDiscoveryListener(uint16_t discoveryPort) {
     if (gDiscoverySock != INVALID_SOCKET) return true;
     gDiscoverySock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (gDiscoverySock == INVALID_SOCKET) return false;
+    ConfigureLowLatencySocket(gDiscoverySock);
 
-    SetUdpConnReset(gDiscoverySock);
-
-    u_long nonBlocking = 1;
-    ioctlsocket(gDiscoverySock, FIONBIO, &nonBlocking);
-    BOOL reuse = TRUE;
-    setsockopt(gDiscoverySock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
-    BOOL bcast = TRUE;
-    setsockopt(gDiscoverySock, SOL_SOCKET, SO_BROADCAST, (const char*)&bcast, sizeof(bcast));
-
-    sockaddr_in bindAddr = { 0 };
+    sockaddr_in bindAddr{};
     bindAddr.sin_family = AF_INET;
     bindAddr.sin_port   = htons(discoveryPort);
     bindAddr.sin_addr.s_addr = INADDR_ANY;
@@ -184,17 +198,9 @@ bool LanInitHost(uint16_t gamePort, const char* roomCode) {
 
     gGameSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (gGameSock == INVALID_SOCKET) return false;
+    ConfigureLowLatencySocket(gGameSock);
 
-    SetUdpConnReset(gGameSock);
-
-    u_long nonBlocking = 1;
-    ioctlsocket(gGameSock, FIONBIO, &nonBlocking);
-    BOOL bcast = TRUE;
-    setsockopt(gGameSock, SOL_SOCKET, SO_BROADCAST, (const char*)&bcast, sizeof(bcast));
-    BOOL reuse = TRUE;
-    setsockopt(gGameSock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
-
-    sockaddr_in addr = { 0 };
+    sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port   = htons(gamePort);
     addr.sin_addr.s_addr = INADDR_ANY;
@@ -204,15 +210,16 @@ bool LanInitHost(uint16_t gamePort, const char* roomCode) {
         return false;
     }
 
-    // Also open discovery listener on 7778 for Host
     LanStartDiscoveryListener(7778);
 
-    gLanRole = LAN_HOST;
-    gPeerConnected = false;
-    gLanMatchStart = false;
-    gHostReady = false;
-    gClientReady = false;
+    gLanRole          = LAN_HOST;
+    gPeerConnected    = false;
+    gLanMatchStart    = false;
+    gHostReady        = false;
+    gClientReady      = false;
     gConnectedPlayers = 1;
+    gLastRecvInputSeq = 0;
+    gLastRecvStateSeq = 0;
     snprintf(gStatusText, sizeof(gStatusText), "Hosting Room #%s (Port %d)", gCurrentRoomCode, gamePort);
     return true;
 }
@@ -243,15 +250,9 @@ bool LanJoinRoom(const char* hostIp, uint16_t hostPort, const char* roomCode) {
 
     gGameSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (gGameSock == INVALID_SOCKET) return false;
+    ConfigureLowLatencySocket(gGameSock);
 
-    SetUdpConnReset(gGameSock);
-
-    u_long nonBlocking = 1;
-    ioctlsocket(gGameSock, FIONBIO, &nonBlocking);
-    BOOL bcast = TRUE;
-    setsockopt(gGameSock, SOL_SOCKET, SO_BROADCAST, (const char*)&bcast, sizeof(bcast));
-
-    sockaddr_in localAddr = { 0 };
+    sockaddr_in localAddr{};
     localAddr.sin_family = AF_INET;
     localAddr.sin_port   = htons(0);
     localAddr.sin_addr.s_addr = INADDR_ANY;
@@ -262,37 +263,41 @@ bool LanJoinRoom(const char* hostIp, uint16_t hostPort, const char* roomCode) {
     gPeerAddr.sin_port   = htons(hostPort);
     gPeerAddr.sin_addr.s_addr = inet_addr(resolvedIp);
 
-    gLanRole = LAN_CLIENT;
-    gPeerConnected = false;
-    gLanMatchStart = false;
-    gHostReady = false;
-    gClientReady = false;
+    gLanRole          = LAN_CLIENT;
+    gPeerConnected    = false;
+    gLanMatchStart    = false;
+    gHostReady        = false;
+    gClientReady      = false;
+    gLastRecvInputSeq = 0;
+    gLastRecvStateSeq = 0;
     snprintf(gStatusText, sizeof(gStatusText), "Joining %s:%d...", resolvedIp, hostPort);
 
-    LanLobbyPacket joinPkt = { 0 };
+    LanLobbyPacket joinPkt{};
     joinPkt.magic = 0x46415254;
     joinPkt.type  = LAN_PKT_JOIN;
     strncpy_s(joinPkt.roomCode, gCurrentRoomCode, 7);
     strncpy_s(joinPkt.playerName, gLocalPlayerName, sizeof(joinPkt.playerName) - 1);
     joinPkt.clientColor = gClientCharColor;
+    joinPkt.clientReady = 0;
     sendto(gGameSock, (const char*)&joinPkt, sizeof(joinPkt), 0, (sockaddr*)&gPeerAddr, sizeof(gPeerAddr));
     return true;
 }
 
-uint8_t LanGetHostColor() { return gHostCharColor; }
+uint8_t LanGetHostColor()   { return gHostCharColor; }
 uint8_t LanGetClientColor() { return gClientCharColor; }
-void LanSetHostColor(uint8_t color) { gHostCharColor = color; }
+void LanSetHostColor(uint8_t color)   { gHostCharColor = color; }
 void LanSetClientColor(uint8_t color) { gClientCharColor = color; }
 
 void LanSendStartSignal() {
     if (gLanRole == LAN_HOST && gGameSock != INVALID_SOCKET && gPeerConnected) {
-        LanLobbyPacket startPkt = { 0 };
+        LanLobbyPacket startPkt{};
         startPkt.magic       = 0x46415254;
         startPkt.type        = LAN_PKT_START;
         strncpy_s(startPkt.roomCode, gCurrentRoomCode, 7);
         strncpy_s(startPkt.playerName, gLocalPlayerName, sizeof(startPkt.playerName) - 1);
         startPkt.hostColor   = gHostCharColor;
         startPkt.clientColor = gClientCharColor;
+        startPkt.hostReady   = 1;
         startPkt.clientReady = 1;
         startPkt.playerCount = 2;
         for (int b = 0; b < 6; b++) {
@@ -302,17 +307,17 @@ void LanSendStartSignal() {
 }
 
 void LanClientSendLobbyUpdate(bool ready, uint8_t color) {
-    gClientReady = ready;
+    gClientReady     = ready;
     gClientCharColor = color;
     if (gLanRole == LAN_CLIENT && gGameSock != INVALID_SOCKET) {
-        LanLobbyPacket lp = { 0 };
+        LanLobbyPacket lp{};
         lp.magic       = 0x46415254;
         lp.type        = gPeerConnected ? LAN_PKT_LOBBY : LAN_PKT_JOIN;
         strncpy_s(lp.roomCode, gCurrentRoomCode, 7);
         strncpy_s(lp.playerName, gLocalPlayerName, sizeof(lp.playerName) - 1);
         lp.clientColor = color;
         lp.clientReady = ready ? 1 : 0;
-        lp.playerCount = gConnectedPlayers;
+        lp.playerCount = (uint8_t)gConnectedPlayers;
         sendto(gGameSock, (const char*)&lp, sizeof(lp), 0, (sockaddr*)&gPeerAddr, sizeof(gPeerAddr));
     }
 }
@@ -321,12 +326,12 @@ void LanUpdateDiscoveryAndLobby(float dt) {
     uint32_t myIp = LanGetLocalIPv4();
     uint32_t subnetBcast = (myIp & 0xFFFFFF00) | 0x000000FF;
 
-    // 1. Host broadcasting beacons every 0.25s
+    // 1. Host broadcasting beacons & lobby state every 0.20s
     if (gLanRole == LAN_HOST && gGameSock != INVALID_SOCKET) {
         gBeaconTimer += dt;
-        if (gBeaconTimer >= 0.25f) {
+        if (gBeaconTimer >= 0.20f) {
             gBeaconTimer = 0.0f;
-            LanBeaconPacket b = { 0 };
+            LanBeaconPacket b{};
             b.magic = 0x46415254;
             b.type  = LAN_PKT_BEACON;
             strncpy_s(b.roomCode, gCurrentRoomCode, 7);
@@ -338,17 +343,14 @@ void LanUpdateDiscoveryAndLobby(float dt) {
             b.hostColor   = gHostCharColor;
             b.inGame      = gLanMatchStart ? 1 : 0;
 
-            // Global broadcast 255.255.255.255 to 7778 and 7777
-            sockaddr_in bcastAddr = { 0 };
+            sockaddr_in bcastAddr{};
             bcastAddr.sin_family = AF_INET;
             bcastAddr.sin_port   = htons(7778);
             bcastAddr.sin_addr.s_addr = INADDR_BROADCAST;
             sendto(gGameSock, (const char*)&b, sizeof(b), 0, (sockaddr*)&bcastAddr, sizeof(bcastAddr));
-
             bcastAddr.sin_port = htons(7777);
             sendto(gGameSock, (const char*)&b, sizeof(b), 0, (sockaddr*)&bcastAddr, sizeof(bcastAddr));
 
-            // Subnet-directed broadcast x.x.x.255 to 7778 and 7777
             sockaddr_in subAddr = bcastAddr;
             subAddr.sin_addr.s_addr = htonl(subnetBcast);
             subAddr.sin_port = htons(7778);
@@ -356,20 +358,20 @@ void LanUpdateDiscoveryAndLobby(float dt) {
             subAddr.sin_port = htons(7777);
             sendto(gGameSock, (const char*)&b, sizeof(b), 0, (sockaddr*)&subAddr, sizeof(subAddr));
 
-            // Loopback 127.0.0.1:7778
             sockaddr_in loopAddr = bcastAddr;
             loopAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
             loopAddr.sin_port = htons(7778);
             sendto(gGameSock, (const char*)&b, sizeof(b), 0, (sockaddr*)&loopAddr, sizeof(loopAddr));
 
             if (gPeerConnected) {
-                LanLobbyPacket lp = { 0 };
+                LanLobbyPacket lp{};
                 lp.magic       = 0x46415254;
                 lp.type        = gLanMatchStart ? LAN_PKT_START : LAN_PKT_LOBBY;
                 strncpy_s(lp.roomCode, gCurrentRoomCode, 7);
                 strncpy_s(lp.playerName, gLocalPlayerName, sizeof(lp.playerName) - 1);
                 lp.hostColor   = gHostCharColor;
                 lp.clientColor = gClientCharColor;
+                lp.hostReady   = gHostReady ? 1 : 0;
                 lp.clientReady = gClientReady ? 1 : 0;
                 lp.playerCount = 2;
                 sendto(gGameSock, (const char*)&lp, sizeof(lp), 0, (sockaddr*)&gPeerAddr, sizeof(gPeerAddr));
@@ -377,45 +379,42 @@ void LanUpdateDiscoveryAndLobby(float dt) {
         }
     }
 
-    // 2. Client sending periodic heartbeat / retry join in lobby every 0.25s
-    if (gLanRole == LAN_CLIENT && gGameSock != INVALID_SOCKET) {
+    // 2. Client sending periodic lobby heartbeat every 0.20s
+    if (gLanRole == LAN_CLIENT && gGameSock != INVALID_SOCKET && !gLanMatchStart) {
         static float clientSyncTimer = 0.0f;
         clientSyncTimer += dt;
-        if (clientSyncTimer >= 0.25f || !gPeerConnected) {
+        if (clientSyncTimer >= 0.20f || !gPeerConnected) {
             clientSyncTimer = 0.0f;
-            LanLobbyPacket lp = { 0 };
+            LanLobbyPacket lp{};
             lp.magic       = 0x46415254;
             lp.type        = gPeerConnected ? LAN_PKT_LOBBY : LAN_PKT_JOIN;
             strncpy_s(lp.roomCode, gCurrentRoomCode, 7);
             strncpy_s(lp.playerName, gLocalPlayerName, sizeof(lp.playerName) - 1);
             lp.clientColor = gClientCharColor;
             lp.clientReady = gClientReady ? 1 : 0;
-            lp.playerCount = gConnectedPlayers;
+            lp.playerCount = (uint8_t)gConnectedPlayers;
             sendto(gGameSock, (const char*)&lp, sizeof(lp), 0, (sockaddr*)&gPeerAddr, sizeof(gPeerAddr));
         }
     }
 
-    // 3. Client sending active discovery probe requests every 0.5s when discovering
+    // 3. Offline discovery probe requests every 0.50s (Broadcast + Subnet Sweep for Wi-Fi reliability)
     if (gLanRole == LAN_OFFLINE && gDiscoverySock != INVALID_SOCKET) {
         gProbeTimer += dt;
-        if (gProbeTimer >= 0.5f) {
+        if (gProbeTimer >= 0.50f) {
             gProbeTimer = 0.0f;
-            LanBeaconPacket probe = { 0 };
+            LanBeaconPacket probe{};
             probe.magic = 0x46415254;
             probe.type  = LAN_PKT_DISCOVER_REQ;
             strncpy_s(probe.hostName, gLocalPlayerName, sizeof(probe.hostName) - 1);
 
-            // Broadcast to 7777 and 7778
-            sockaddr_in bcastAddr = { 0 };
+            sockaddr_in bcastAddr{};
             bcastAddr.sin_family = AF_INET;
             bcastAddr.sin_port   = htons(7778);
             bcastAddr.sin_addr.s_addr = INADDR_BROADCAST;
             sendto(gDiscoverySock, (const char*)&probe, sizeof(probe), 0, (sockaddr*)&bcastAddr, sizeof(bcastAddr));
-
             bcastAddr.sin_port = htons(7777);
             sendto(gDiscoverySock, (const char*)&probe, sizeof(probe), 0, (sockaddr*)&bcastAddr, sizeof(bcastAddr));
 
-            // Subnet-directed broadcast to 7777 and 7778
             sockaddr_in subAddr = bcastAddr;
             subAddr.sin_addr.s_addr = htonl(subnetBcast);
             subAddr.sin_port = htons(7778);
@@ -428,7 +427,7 @@ void LanUpdateDiscoveryAndLobby(float dt) {
             for (uint32_t i = 1; i <= 254; i++) {
                 uint32_t targetIp = baseSubnet | i;
                 if (targetIp == myIp) continue;
-                sockaddr_in sweepAddr = { 0 };
+                sockaddr_in sweepAddr{};
                 sweepAddr.sin_family = AF_INET;
                 sweepAddr.sin_addr.s_addr = htonl(targetIp);
                 sweepAddr.sin_port = htons(7777);
@@ -439,10 +438,10 @@ void LanUpdateDiscoveryAndLobby(float dt) {
         }
     }
 
-    // 4. Discovery room cleanup
+    // 4. Expire stale discovered rooms
     for (int i = (int)gDiscoveredRooms.size() - 1; i >= 0; i--) {
         gDiscoveredRooms[i].lastSeenTimer += dt;
-        if (gDiscoveredRooms[i].lastSeenTimer > 3.0f) {
+        if (gDiscoveredRooms[i].lastSeenTimer > 3.5f) {
             gDiscoveredRooms.erase(gDiscoveredRooms.begin() + i);
         }
     }
@@ -450,22 +449,19 @@ void LanUpdateDiscoveryAndLobby(float dt) {
     // 5. Poll Discovery Socket (UDP 7778)
     if (gDiscoverySock != INVALID_SOCKET) {
         char buf[512];
-        sockaddr_in from = { 0 };
+        sockaddr_in from{};
         socklen_t fromLen = sizeof(from);
         while (true) {
             fromLen = sizeof(from);
             int n = recvfrom(gDiscoverySock, buf, sizeof(buf), 0, (sockaddr*)&from, &fromLen);
-            if (n <= 0) break;
-            if (n < 5) continue;
-
+            if (n < 5) break;
             uint32_t magic = 0;
             memcpy(&magic, buf, 4);
             if (magic != 0x46415254) continue;
             uint8_t type = (uint8_t)buf[4];
 
             if (type == LAN_PKT_DISCOVER_REQ && gLanRole == LAN_HOST) {
-                // Host replies directly via unicast to requester
-                LanBeaconPacket reply = { 0 };
+                LanBeaconPacket reply{};
                 reply.magic = 0x46415254;
                 reply.type  = LAN_PKT_BEACON;
                 strncpy_s(reply.roomCode, gCurrentRoomCode, 7);
@@ -541,25 +537,22 @@ void LanUpdateDiscoveryAndLobby(float dt) {
         }
     }
 
-    // 6. Lobby packets & Discovery on Game Socket (UDP 7777)
+    // 6. Poll Lobby packets on Game Socket (UDP 7777)
     if (gGameSock != INVALID_SOCKET) {
         char buf[512];
-        sockaddr_in from = { 0 };
+        sockaddr_in from{};
         socklen_t fromLen = sizeof(from);
         while (true) {
             fromLen = sizeof(from);
             int n = recvfrom(gGameSock, buf, sizeof(buf), 0, (sockaddr*)&from, &fromLen);
-            if (n <= 0) break;
-            if (n < 5) continue;
-
+            if (n < 5) break;
             uint32_t magic = 0;
             memcpy(&magic, buf, 4);
             if (magic != 0x46415254) continue;
             uint8_t type = (uint8_t)buf[4];
 
-            // 6a. Check if it's a discovery probe on 7777
             if (type == LAN_PKT_DISCOVER_REQ && gLanRole == LAN_HOST) {
-                LanBeaconPacket reply = { 0 };
+                LanBeaconPacket reply{};
                 reply.magic = 0x46415254;
                 reply.type  = LAN_PKT_BEACON;
                 strncpy_s(reply.roomCode, gCurrentRoomCode, 7);
@@ -574,7 +567,7 @@ void LanUpdateDiscoveryAndLobby(float dt) {
                 continue;
             }
 
-            // 6b. Check if it's a beacon received on 7777 in offline discovery mode
+            // Beacon received on 7777 in offline discovery
             if (type == LAN_PKT_BEACON && gLanRole == LAN_OFFLINE) {
                 char ipStr[64] = "127.0.0.1";
                 const char* ntoaRes = inet_ntoa(from.sin_addr);
@@ -635,41 +628,44 @@ void LanUpdateDiscoveryAndLobby(float dt) {
                 continue;
             }
 
-            // 6c. Lobby packets (Join, Accept, Lobby state, Start)
-            if (n >= 45 && !gLanMatchStart) {
+            if (n >= (int)sizeof(LanLobbyPacket) && !gLanMatchStart) {
                 const LanLobbyPacket* lp = (const LanLobbyPacket*)buf;
                 if (gLanRole == LAN_HOST && (lp->type == LAN_PKT_JOIN || lp->type == LAN_PKT_LOBBY)) {
-                    gPeerAddr = from;
-                    gPeerConnected = true;
+                    gPeerAddr        = from;
+                    gPeerConnected   = true;
                     gClientCharColor = lp->clientColor;
-                    gClientReady = (lp->clientReady != 0);
+                    gClientReady     = (lp->clientReady != 0);
                     gConnectedPlayers = 2;
                     if (strlen(lp->playerName) > 0) {
                         strncpy_s(gRemotePlayerName, lp->playerName, sizeof(gRemotePlayerName) - 1);
                     }
 
-                    LanLobbyPacket acceptPkt = { 0 };
+                    LanLobbyPacket acceptPkt{};
                     acceptPkt.magic       = 0x46415254;
                     acceptPkt.type        = LAN_PKT_ACCEPT;
                     strncpy_s(acceptPkt.roomCode, gCurrentRoomCode, 7);
                     strncpy_s(acceptPkt.playerName, gLocalPlayerName, sizeof(acceptPkt.playerName) - 1);
                     acceptPkt.hostColor   = gHostCharColor;
                     acceptPkt.clientColor = gClientCharColor;
+                    acceptPkt.hostReady   = gHostReady ? 1 : 0;
                     acceptPkt.clientReady = gClientReady ? 1 : 0;
                     acceptPkt.playerCount = 2;
                     sendto(gGameSock, (const char*)&acceptPkt, sizeof(acceptPkt), 0, (sockaddr*)&gPeerAddr, sizeof(gPeerAddr));
                     snprintf(gStatusText, sizeof(gStatusText), "%s joined! (Room #%s)", gRemotePlayerName, gCurrentRoomCode);
                 } else if (gLanRole == LAN_CLIENT) {
                     if (lp->type == LAN_PKT_ACCEPT || lp->type == LAN_PKT_LOBBY) {
-                        gPeerConnected = true;
-                        gHostCharColor = lp->hostColor;
+                        gPeerConnected    = true;
+                        gHostCharColor    = lp->hostColor;
+                        gHostReady        = (lp->hostReady != 0);
                         gConnectedPlayers = lp->playerCount;
                         if (strlen(lp->playerName) > 0) {
                             strncpy_s(gRemotePlayerName, lp->playerName, sizeof(gRemotePlayerName) - 1);
                         }
                         snprintf(gStatusText, sizeof(gStatusText), "Connected to %s (#%s)", gRemotePlayerName, gCurrentRoomCode);
                     } else if (lp->type == LAN_PKT_START) {
-                        gLanMatchStart = true;
+                        gPeerConnected    = true;
+                        gConnectedPlayers = 2;
+                        gLanMatchStart    = true;
                         snprintf(gStatusText, sizeof(gStatusText), "Race Started!");
                     }
                 }
@@ -686,19 +682,42 @@ std::vector<DiscoveredLanRoom>& LanGetDiscoveredRooms() { return gDiscoveredRoom
 bool LanIsMatchStarted() { return gLanMatchStart; }
 void LanSetMatchStarted(bool started) { gLanMatchStart = started; }
 
+// AAA Sequence-Filtered & Edge-Preserving Input Polling on Host
 bool LanHostPollInput(LanInputPacket& outInput) {
     if (gLanRole != LAN_HOST || gGameSock == INVALID_SOCKET) return false;
     bool got = false;
-    sockaddr_in from = { 0 };
+    sockaddr_in from{};
     socklen_t fromLen = sizeof(from);
-    LanInputPacket pkt;
-    while (recvfrom(gGameSock, (char*)&pkt, sizeof(pkt), 0, (sockaddr*)&from, &fromLen) == sizeof(LanInputPacket)) {
-        if (pkt.magic == 0x46415254 && pkt.type == LAN_PKT_INPUT) {
-            gPeerAddr = from;
-            gPeerConnected = true;
-            outInput = pkt;
-            got = true;
+    char buf[512];
+    uint8_t accumGasReleased = 0;
+    uint16_t maxTapSeq = 0;
+    uint16_t maxSuicideSeq = 0;
+
+    while (true) {
+        fromLen = sizeof(from);
+        int n = recvfrom(gGameSock, buf, sizeof(buf), 0, (sockaddr*)&from, &fromLen);
+        if (n <= 0) break;
+        if (n == (int)sizeof(LanInputPacket)) {
+            const LanInputPacket* pkt = (const LanInputPacket*)buf;
+            if (pkt->magic == 0x46415254 && pkt->type == LAN_PKT_INPUT) {
+                gPeerAddr = from;
+                gPeerConnected = true;
+                if (pkt->gasReleased) accumGasReleased = 1;
+                if (pkt->tapBurstSeq > maxTapSeq) maxTapSeq = pkt->tapBurstSeq;
+                if (pkt->suicideSeq > maxSuicideSeq) maxSuicideSeq = pkt->suicideSeq;
+
+                if (pkt->seq >= gLastRecvInputSeq || (gLastRecvInputSeq - pkt->seq) > 10000) {
+                    gLastRecvInputSeq = pkt->seq;
+                    outInput = *pkt;
+                    got = true;
+                }
+            }
         }
+    }
+    if (got) {
+        if (accumGasReleased) outInput.gasReleased = 1;
+        if (maxTapSeq > outInput.tapBurstSeq) outInput.tapBurstSeq = maxTapSeq;
+        if (maxSuicideSeq > outInput.suicideSeq) outInput.suicideSeq = maxSuicideSeq;
     }
     return got;
 }
@@ -712,23 +731,32 @@ void LanHostBroadcastState(const LanStatePacket& state) {
 
 void LanClientSendInput(const LanInputPacket& input) {
     if (gLanRole != LAN_CLIENT || gGameSock == INVALID_SOCKET) return;
-    if (gPeerConnected) {
-        sendto(gGameSock, (const char*)&input, sizeof(input), 0, (sockaddr*)&gPeerAddr, sizeof(gPeerAddr));
-    }
+    sendto(gGameSock, (const char*)&input, sizeof(input), 0, (sockaddr*)&gPeerAddr, sizeof(gPeerAddr));
 }
 
+// AAA Sequence-Filtered State Polling on Client (Also handles late LAN_PKT_STATE to auto-start race!)
 bool LanClientPollState(LanStatePacket& outState) {
     if (gLanRole != LAN_CLIENT || gGameSock == INVALID_SOCKET) return false;
     bool got = false;
-    sockaddr_in from = { 0 };
+    sockaddr_in from{};
     socklen_t fromLen = sizeof(from);
-    LanStatePacket pkt;
-    while (recvfrom(gGameSock, (char*)&pkt, sizeof(pkt), 0, (sockaddr*)&from, &fromLen) == sizeof(LanStatePacket)) {
-        if (pkt.magic == 0x46415254 && pkt.type == LAN_PKT_STATE) {
-            gPeerAddr = from;
-            gPeerConnected = true;
-            outState = pkt;
-            got = true;
+    char buf[512];
+    while (true) {
+        fromLen = sizeof(from);
+        int n = recvfrom(gGameSock, buf, sizeof(buf), 0, (sockaddr*)&from, &fromLen);
+        if (n <= 0) break;
+        if (n == (int)sizeof(LanStatePacket)) {
+            const LanStatePacket* pkt = (const LanStatePacket*)buf;
+            if (pkt->magic == 0x46415254 && pkt->type == LAN_PKT_STATE) {
+                gPeerAddr = from;
+                gPeerConnected = true;
+                gLanMatchStart = true;
+                if (pkt->seq >= gLastRecvStateSeq || (gLastRecvStateSeq - pkt->seq) > 10000) {
+                    gLastRecvStateSeq = pkt->seq;
+                    outState = *pkt;
+                    got = true;
+                }
+            }
         }
     }
     return got;
