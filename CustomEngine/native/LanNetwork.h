@@ -13,21 +13,35 @@ enum LanRole {
 };
 
 enum LanPacketType : uint8_t {
-    LAN_PKT_BEACON = 1,
-    LAN_PKT_JOIN   = 2,
-    LAN_PKT_ACCEPT = 3,
-    LAN_PKT_LOBBY  = 4,
-    LAN_PKT_START  = 5,
-    LAN_PKT_STATE  = 6,
-    LAN_PKT_INPUT  = 7
+    LAN_PKT_BEACON       = 1,
+    LAN_PKT_JOIN         = 2,
+    LAN_PKT_ACCEPT       = 3,
+    LAN_PKT_LOBBY        = 4,
+    LAN_PKT_START        = 5,
+    LAN_PKT_STATE        = 6,
+    LAN_PKT_INPUT        = 7,
+    LAN_PKT_DISCOVER_REQ = 8
 };
 
 #pragma pack(push, 1)
+struct LanBeaconPacketV830 {
+    uint32_t magic;        // 0x46415254 ("FART")
+    uint8_t  type;         // LAN_PKT_BEACON
+    char     roomCode[8];  // e.g. "A80119"
+    char     roomName[32]; // e.g. "Pirate Room #A80119"
+    uint16_t hostPort;     // 7777
+    uint8_t  playerCount;  // 1..4
+    uint8_t  maxPlayers;   // 4
+    uint8_t  hostColor;    // 0..3
+    uint8_t  inGame;       // 0 = In Lobby, 1 = Racing
+};
+
 struct LanBeaconPacket {
     uint32_t magic;        // 0x46415254 ("FART")
     uint8_t  type;         // LAN_PKT_BEACON
-    char     roomCode[8];  // e.g. "8HF78N"
-    char     roomName[32]; // e.g. "Pirate Room #8HF78N"
+    char     roomCode[8];  // e.g. "A80119"
+    char     roomName[32]; // e.g. "Pirate Room #A80119"
+    char     hostName[32]; // Host player name
     uint16_t hostPort;     // 7777
     uint8_t  playerCount;  // 1..4
     uint8_t  maxPlayers;   // 4
@@ -39,6 +53,7 @@ struct LanLobbyPacket {
     uint32_t magic;
     uint8_t  type;         // LAN_PKT_JOIN, LAN_PKT_ACCEPT, LAN_PKT_LOBBY, LAN_PKT_START
     char     roomCode[8];
+    char     playerName[32];
     uint8_t  hostColor;
     uint8_t  clientColor;
     uint8_t  clientReady;
@@ -78,6 +93,7 @@ struct LanInputPacket {
 struct DiscoveredLanRoom {
     std::string roomCode;
     std::string roomName;
+    std::string hostName;
     std::string hostIp;
     uint16_t    hostPort;
     uint8_t     playerCount;
@@ -89,8 +105,8 @@ struct DiscoveredLanRoom {
 void LanEnsureWsa();
 void LanShutdown();
 bool LanStartDiscoveryListener(uint16_t discoveryPort = 7778);
-bool LanInitHost(uint16_t gamePort = 7777, const char* roomCode = "8HF78N");
-bool LanJoinRoom(const char* hostIp, uint16_t hostPort = 7777, const char* roomCode = "8HF78N");
+bool LanInitHost(uint16_t gamePort = 7777, const char* roomCode = nullptr);
+bool LanJoinRoom(const char* hostIp, uint16_t hostPort = 7777, const char* roomCode = nullptr);
 void LanUpdateDiscoveryAndLobby(float dt);
 
 LanRole LanGetRole();
@@ -99,12 +115,14 @@ const char* LanGetStatusText();
 const char* LanGetRoomCode();
 std::vector<DiscoveredLanRoom>& LanGetDiscoveredRooms();
 
+void LanGenerateSmartRoomCode(char outCode[8]);
+bool LanDecodeSmartRoomCode(const char* code, char outIp[64]);
+
 extern bool gHostReady;
 extern bool gClientReady;
 extern int  gConnectedPlayers;
 extern bool gSoloPracticeMode;
 inline bool LanInitClient(uint16_t hostPort = 7777, const char* hostIp = "127.0.0.1") { return LanJoinRoom(hostIp, hostPort); }
-
 
 bool LanHostPollInput(LanInputPacket& outInput);
 void LanHostBroadcastState(const LanStatePacket& state);
@@ -113,3 +131,17 @@ void LanClientSendInput(const LanInputPacket& input);
 bool LanClientPollState(LanStatePacket& outState);
 bool LanIsMatchStarted();
 void LanSetMatchStarted(bool started);
+
+// Player Names & Lobby Sync
+extern char gLocalPlayerName[32];
+extern char gRemotePlayerName[32];
+void LanSetLocalPlayerName(const char* name);
+const char* LanGetLocalPlayerName();
+const char* LanGetRemotePlayerName();
+
+void LanSendStartSignal();
+void LanClientSendLobbyUpdate(bool ready, uint8_t color);
+uint8_t LanGetHostColor();
+uint8_t LanGetClientColor();
+void LanSetHostColor(uint8_t color);
+void LanSetClientColor(uint8_t color);

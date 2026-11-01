@@ -27,12 +27,18 @@
 // =============================================================================
 
 #include "raylib.h"
+#ifndef _WIN32
+#ifndef strncpy_s
+#define strncpy_s(dst, src, count) do { strncpy((dst), (src), (count)); (dst)[(count)-1] = '\0'; } while(0)
+#endif
+#endif
 #include "LanNetwork.h"
 #include "Localization.h"
 #include "Codepoints.h"
 
 // Rule: Game version must be incremented on every update!
-static const char* GAME_VERSION_TAG = "v8.2.0";
+static const char* GAME_VERSION_TAG = "v8.3.1";
+static int s_camTouchId = -1;
 GameLanguage gCurrentLanguage = LANG_AR; // Default Arabic as requested
 static bool gShowInviteModal = false;
 
@@ -190,6 +196,137 @@ enum DeathCause {
 
 // =============================================================================
 
+#if defined(PLATFORM_ANDROID) || defined(__ANDROID__)
+static const char* VS_LIGHTING = R"(
+#version 100
+precision highp float;
+attribute vec3 vertexPosition;
+attribute vec2 vertexTexCoord;
+attribute vec3 vertexNormal;
+attribute vec4 vertexColor;
+uniform mat4 mvp;
+uniform float uButtSwell;
+uniform float uEyeBulge;
+varying vec2 fragTexCoord;
+varying vec4 fragColor;
+varying vec3 fragNormal;
+varying vec3 fragPosition;
+
+void main() {
+    fragTexCoord = vertexTexCoord;
+    fragColor    = vertexColor;
+    fragNormal   = vertexNormal;
+    fragPosition = vertexPosition;
+    vec3 pos     = vertexPosition;
+
+    if (pos.z < -0.01 && pos.y >= 0.18 && pos.y <= 0.52 && uButtSwell > 0.001) {
+        float wy = sin(clamp((pos.y - 0.18) / 0.34, 0.0, 1.0) * 3.14159265);
+        float wz = clamp((-pos.z - 0.01) / 0.12, 0.0, 1.0);
+        float wButt = wy * wz;
+        vec3 buttPivot = vec3(0.0, 0.34, -0.02);
+        pos = mix(pos, buttPivot + (pos - buttPivot) * (1.0 + uButtSwell), wButt);
+        pos.z -= uButtSwell * 0.14 * wButt;
+    }
+
+    bool isPupil  = (vertexTexCoord.x < 0.08) && (vertexTexCoord.y < 0.12 || vertexTexCoord.y > 0.88);
+    bool isSclera = (vertexTexCoord.x > 0.68 && vertexTexCoord.x < 0.75) && (vertexTexCoord.y < 0.05 || vertexTexCoord.y > 0.95);
+    if (pos.y > 0.88 && (isPupil || isSclera) && uEyeBulge > 0.001) {
+        float eyeSign = (pos.x >= 0.0) ? 1.0 : -1.0;
+        vec2 eyeCenterXY = vec2(eyeSign * 0.0456, 0.935);
+        pos.xy = eyeCenterXY + (pos.xy - eyeCenterXY) * (1.0 + uEyeBulge * 0.45);
+        pos.x += eyeSign * uEyeBulge * 0.012;
+        pos.z += uEyeBulge * 0.055;
+    }
+    gl_Position = mvp * vec4(pos, 1.0);
+}
+)";
+
+static const char* FS_LIGHTING = R"(
+#version 100
+precision highp float;
+varying vec2 fragTexCoord;
+varying vec4 fragColor;
+varying vec3 fragNormal;
+varying vec3 fragPosition;
+uniform sampler2D texture0;
+uniform vec4 colDiffuse;
+uniform vec3 lightDir;
+uniform vec3 lightColor;
+uniform vec3 ambientColor;
+uniform float uRedness;
+
+void main() {
+    vec4 texColor = texture2D(texture0, fragTexCoord);
+    vec3 N = normalize(fragNormal);
+    vec3 L = normalize(lightDir);
+    float ndotl = dot(N, L) * 0.5 + 0.5;
+    float toonDiff = smoothstep(0.32, 0.78, ndotl);
+    vec3 lighting = ambientColor + toonDiff * lightColor;
+
+    vec3 buttCenter = vec3(0.0, 0.34, -0.12);
+    vec3 buttScale  = vec3(0.26, 0.20, 0.16);
+    float buttDist  = length((fragPosition - buttCenter) / buttScale);
+    float buttMask  = (fragPosition.z < -0.01) ? clamp(1.0 - smoothstep(0.35, 1.05, buttDist), 0.0, 1.0) : 0.0;
+
+    vec3 redSkin = mix(texColor.rgb, vec3(0.96, 0.12, 0.12), uRedness * buttMask * 0.92);
+    gl_FragColor = vec4(redSkin * lighting * colDiffuse.rgb, texColor.a * colDiffuse.a);
+}
+)";
+
+static const char* VS_WATER = R"(
+#version 100
+precision highp float;
+attribute vec3 vertexPosition;
+attribute vec2 vertexTexCoord;
+attribute vec3 vertexNormal;
+uniform mat4 mvp;
+uniform vec3 trackOffset;
+uniform float uTime;
+varying vec2 fragTexCoord;
+varying vec3 fragNormal;
+varying vec3 fragPos;
+
+void main() {
+    fragTexCoord = vertexTexCoord;
+    vec3 pos = vertexPosition;
+    float w1 = sin(pos.z * 0.32 - uTime * 1.8 + pos.x * 0.12) * 0.05;
+    float w2 = cos(pos.x * 0.40 + pos.z * 0.22 - uTime * 2.2) * 0.04;
+    pos.y += w1 + w2;
+    fragPos = pos + trackOffset;
+    float dHdx = cos(pos.x * 0.40 + pos.z * 0.22 - uTime * 2.2) * 0.016;
+    float dHdz = cos(pos.z * 0.32 - uTime * 1.8 + pos.x * 0.12) * 0.016;
+    fragNormal = normalize(vec3(-dHdx, 1.0, -dHdz));
+    gl_Position = mvp * vec4(pos, 1.0);
+}
+)";
+
+static const char* FS_WATER = R"(
+#version 100
+precision highp float;
+varying vec2 fragTexCoord;
+varying vec3 fragNormal;
+varying vec3 fragPos;
+uniform sampler2D texture0;
+uniform float uTime;
+
+void main() {
+    vec3 deepCol    = vec3(0.04, 0.45, 0.78);
+    vec3 shallowCol = vec3(0.10, 0.68, 0.94);
+    vec3 foamCol    = vec3(0.78, 0.96, 1.00);
+
+    vec2 p1 = fragPos.xz * 0.55 + vec2(uTime * 0.45, -uTime * 0.60);
+    vec2 p2 = fragPos.xz * 0.72 + vec2(-uTime * 0.50, uTime * 0.40);
+    float c1 = sin(p1.x) * cos(p1.y) + sin(p1.x * 1.7 + p1.y * 1.3) * 0.5;
+    float c2 = cos(p2.x) * sin(p2.y) + cos(p2.x * 1.4 - p2.y * 1.6) * 0.5;
+    float causticPattern = smoothstep(0.35, 0.95, (c1 + c2) * 0.5 + 0.5);
+    float foamSparkle    = smoothstep(0.82, 0.98, (c1 * c2) + 0.4);
+
+    vec3 waterCol = mix(deepCol, shallowCol, 0.55 + 0.45 * causticPattern);
+    waterCol = mix(waterCol, foamCol, causticPattern * 0.32 + foamSparkle * 0.45);
+    gl_FragColor = vec4(waterCol, 0.95);
+}
+)";
+#else
 static const char* VS_LIGHTING = R"(
 #version 330
 in vec3 vertexPosition;
@@ -451,7 +588,63 @@ void main() {
 
 // =============================================================================
 
+#endif
+
+// =============================================================================
+// AAA Engine Optimization: 6-Plane Camera Frustum Culling
+// =============================================================================
+struct FrustumPlanes {
+    Vector4 planes[6]; // Left, Right, Bottom, Top, Near, Far
+};
+
+static FrustumPlanes ExtractCameraFrustum(const Camera3D& cam, float aspect) {
+    Matrix matView = MatrixLookAt(cam.position, cam.target, cam.up);
+    Matrix matProj = MatrixPerspective(cam.fovy * DEG2RAD, aspect, 0.2f, 220.0f);
+    Matrix vp      = MatrixMultiply(matView, matProj);
+
+    FrustumPlanes fp;
+    fp.planes[0] = Vector4{ vp.m3 + vp.m0, vp.m7 + vp.m4, vp.m11 + vp.m8,  vp.m15 + vp.m12 }; // Left
+    fp.planes[1] = Vector4{ vp.m3 - vp.m0, vp.m7 - vp.m4, vp.m11 - vp.m8,  vp.m15 - vp.m12 }; // Right
+    fp.planes[2] = Vector4{ vp.m3 + vp.m1, vp.m7 + vp.m5, vp.m11 + vp.m9,  vp.m15 + vp.m13 }; // Bottom
+    fp.planes[3] = Vector4{ vp.m3 - vp.m1, vp.m7 - vp.m5, vp.m11 - vp.m9,  vp.m15 - vp.m13 }; // Top
+    fp.planes[4] = Vector4{ vp.m3 + vp.m2, vp.m7 + vp.m6, vp.m11 + vp.m10, vp.m15 + vp.m14 }; // Near
+    fp.planes[5] = Vector4{ vp.m3 - vp.m2, vp.m7 - vp.m6, vp.m11 - vp.m10, vp.m15 - vp.m14 }; // Far
+    for (int i = 0; i < 6; i++) {
+        float len = sqrtf(fp.planes[i].x * fp.planes[i].x + fp.planes[i].y * fp.planes[i].y + fp.planes[i].z * fp.planes[i].z);
+        if (len > 1e-5f) {
+            fp.planes[i].x /= len; fp.planes[i].y /= len; fp.planes[i].z /= len; fp.planes[i].w /= len;
+        }
+    }
+    return fp;
+}
+
+static bool IsAABBInFrustum(const FrustumPlanes& fp, Vector3 bMin, Vector3 bMax) {
+    for (int i = 0; i < 6; i++) {
+        const Vector4& p = fp.planes[i];
+        Vector3 pv = {
+            (p.x >= 0.0f) ? bMax.x : bMin.x,
+            (p.y >= 0.0f) ? bMax.y : bMin.y,
+            (p.z >= 0.0f) ? bMax.z : bMin.z
+        };
+        if (p.x * pv.x + p.y * pv.y + p.z * pv.z + p.w < -3.0f) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool IsSphereInFrustum(const FrustumPlanes& fp, Vector3 center, float radius) {
+    for (int i = 0; i < 6; i++) {
+        const Vector4& p = fp.planes[i];
+        if (p.x * center.x + p.y * center.y + p.z * center.z + p.w < -radius) {
+            return false;
+        }
+    }
+    return true;
+}
+
 #include "spline_code.inl"
+
 
 static inline Vector3 GetSplinePoint(float t) {
 
@@ -1202,8 +1395,27 @@ static void AddWaterTriangle(float x0, float y0, float z0, float x1, float y1, f
     gWaterTris.push_back(wt);
 }
 
+static const float WATER_GRID_CELL_SIZE = 16.0f;
+static const int WATER_GRID_DIM = 64;
+static const float WATER_GRID_OFFSET_X = 512.0f;
+static const float WATER_GRID_OFFSET_Z = 512.0f;
+static std::vector<int> gWaterSpatialGrid[WATER_GRID_DIM][WATER_GRID_DIM];
+
+static inline void SpatialGridCoord(float x, float z, int& outGX, int& outGZ) {
+    outGX = (int)((x + WATER_GRID_OFFSET_X) / WATER_GRID_CELL_SIZE);
+    outGZ = (int)((z + WATER_GRID_OFFSET_Z) / WATER_GRID_CELL_SIZE);
+    if (outGX < 0) outGX = 0; if (outGX >= WATER_GRID_DIM) outGX = WATER_GRID_DIM - 1;
+    if (outGZ < 0) outGZ = 0; if (outGZ >= WATER_GRID_DIM) outGZ = WATER_GRID_DIM - 1;
+}
+
 static void BuildWaterTriangleGrid(const Model& waterModel, Vector3 offset) {
     gWaterTris.clear();
+    for (int gx = 0; gx < WATER_GRID_DIM; gx++) {
+        for (int gz = 0; gz < WATER_GRID_DIM; gz++) {
+            gWaterSpatialGrid[gx][gz].clear();
+        }
+    }
+
     for (int mIdx = 0; mIdx < waterModel.meshCount; mIdx++) {
         const Mesh& m = waterModel.meshes[mIdx];
         const float* v = m.vertices;
@@ -1221,7 +1433,6 @@ static void BuildWaterTriangleGrid(const Model& waterModel, Vector3 offset) {
                 );
             }
         } else {
-            // Raylib loads .obj with m.indices == nullptr and sequential 9 floats per triangle!
             for (int t = 0; t < m.triangleCount; t++) {
                 const float* p = &v[t * 9];
                 AddWaterTriangle(
@@ -1232,18 +1443,32 @@ static void BuildWaterTriangleGrid(const Model& waterModel, Vector3 offset) {
             }
         }
     }
-    printf("[WaterGrid] Loaded %zu active water surface triangles.\n", gWaterTris.size());
+
+    for (size_t i = 0; i < gWaterTris.size(); i++) {
+        int minGX, minGZ, maxGX, maxGZ;
+        SpatialGridCoord(gWaterTris[i].minX, gWaterTris[i].minZ, minGX, minGZ);
+        SpatialGridCoord(gWaterTris[i].maxX, gWaterTris[i].maxZ, maxGX, maxGZ);
+        for (int gx = minGX; gx <= maxGX; gx++) {
+            for (int gz = minGZ; gz <= maxGZ; gz++) {
+                gWaterSpatialGrid[gx][gz].push_back((int)i);
+            }
+        }
+    }
+    printf("[WaterGrid] Loaded %zu water triangles into 16x16m Spatial Hash Grid.\n", gWaterTris.size());
 }
 
 static bool IsSinglePointInWaterTri(float px, float pz, float& outWaterY) {
-    // 1. Circular start pond
     float dxPond = px - 15.43f, dzPond = pz - 84.0f;
     if (pz >= 74.0f && (dxPond * dxPond + dzPond * dzPond) <= (16.2f * 16.2f)) {
         outWaterY = 0.55f;
         return true;
     }
-    // 2. All triangles of GM_3D_Demo_Water.obj (including the first turn at Z=34.4!)
-    for (const auto& t : gWaterTris) {
+
+    int gx, gz;
+    SpatialGridCoord(px, pz, gx, gz);
+    const auto& cellTris = gWaterSpatialGrid[gx][gz];
+    for (int idx : cellTris) {
+        const auto& t = gWaterTris[idx];
         if (px < t.minX || px > t.maxX || pz < t.minZ || pz > t.maxZ) continue;
         float dX = px - t.x2, dZ = pz - t.z2;
         float dX21 = t.x2 - t.x1, dZ12 = t.z1 - t.z2;
@@ -2278,17 +2503,26 @@ int main(int argc, char** argv) {
     Model crocModel = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_Crocodile.obj").c_str());
     Model sharkModel= LoadModel(ResolveAsset("extracted_assets/meshes/Shark.obj").c_str());
 
-    // Canyon Environment Clustered Sectors (scene_2..15, excluding scene 0 with flying shards)
-#if !defined(PLATFORM_ANDROID) && !defined(__ANDROID__)
+    // Canyon Environment Clustered Sectors (scene_2..15, 14 sectors fully loaded on PC & Android!)
     static const int ENV_SECTOR_COUNT = 14;
     Model envSectors[ENV_SECTOR_COUNT];
+    BoundingBox envSectorBounds[ENV_SECTOR_COUNT];
     for (int s = 0; s < ENV_SECTOR_COUNT; s++) {
         std::string secName = "extracted_assets/meshes/Combined_Mesh_root__scene_" + std::to_string(s + 2) + ".obj";
         envSectors[s] = LoadModel(ResolveAsset(secName).c_str());
+        if (envSectors[s].meshCount > 0) {
+            envSectorBounds[s] = GetMeshBoundingBox(envSectors[s].meshes[0]);
+            for (int m = 1; m < envSectors[s].meshCount; m++) {
+                BoundingBox mb = GetMeshBoundingBox(envSectors[s].meshes[m]);
+                envSectorBounds[s].min.x = fminf(envSectorBounds[s].min.x, mb.min.x);
+                envSectorBounds[s].min.y = fminf(envSectorBounds[s].min.y, mb.min.y);
+                envSectorBounds[s].min.z = fminf(envSectorBounds[s].min.z, mb.min.z);
+                envSectorBounds[s].max.x = fmaxf(envSectorBounds[s].max.x, mb.max.x);
+                envSectorBounds[s].max.y = fmaxf(envSectorBounds[s].max.y, mb.max.y);
+                envSectorBounds[s].max.z = fmaxf(envSectorBounds[s].max.z, mb.max.z);
+            }
+        }
     }
-#else
-    static const int ENV_SECTOR_COUNT = 0;
-#endif
 
     auto ApplyMat = [&](Model& m) {
         for (int i = 0; i < m.materialCount; i++) {
@@ -2371,11 +2605,9 @@ int main(int argc, char** argv) {
 
     // Wall and Environment Sectors use vertically flipped bgr texture -> Authentic Green Foliage & Brown Cliffs!
     ApplyBgrMat(wallModel);
-#if !defined(PLATFORM_ANDROID) && !defined(__ANDROID__)
     for (int s = 0; s < ENV_SECTOR_COUNT; s++) {
-        ApplyBgrMat(envSectors[s]);
+        if (envSectors[s].meshCount > 0) ApplyBgrMat(envSectors[s]);
     }
-#endif
 
     // Water Material setup
 
@@ -2415,6 +2647,32 @@ int main(int argc, char** argv) {
     Sound sndEatMunch     = LoadSound(ResolveAudioFile("eat_munch.wav").c_str());
     Sound sndBurp         = LoadSound(ResolveAudioFile("burp.wav").c_str());
     Sound sndCheckpoint   = LoadSound(ResolveAudioFile("checkpoint_chime.wav").c_str());
+
+    // Vibrant Turquoise Fallback Base Texture (Prevents any black water on Adreno/Mali GPUs!)
+    Image imgCyan = GenImageColor(64, 64, Color{ 28, 168, 235, 255 });
+    Texture2D texWaterCyan = LoadTextureFromImage(imgCyan);
+    UnloadImage(imgCyan);
+    waterModel.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = texWaterCyan;
+
+    // Preload Main Menu Animated Video Frames (Plan v8.3.1) - High Quality PNG (36 frames)
+    std::vector<Texture2D> menuVideoFrames;
+#if defined(PLATFORM_ANDROID) || defined(__ANDROID__)
+    const int frameStep = 2; // 18 frames on mobile for instant loading
+#else
+    const int frameStep = 1; // 36 full frames on PC
+#endif
+    for (int f = 1; f <= 36; f += frameStep) {
+        char fName[128];
+        snprintf(fName, sizeof(fName), "extracted_assets/textures/menu_frames/frame_%03d.png", f);
+        std::string rPath = ResolveAsset(fName);
+        if (FileExists(rPath.c_str())) {
+            Texture2D ft = LoadTexture(rPath.c_str());
+            if (ft.id != 0) {
+                SetTextureFilter(ft, TEXTURE_FILTER_BILINEAR);
+                menuVideoFrames.push_back(ft);
+            }
+        }
+    }
 
     // 3 Oasis Animated Scene Textures (Plan v8.0 Task 1 & 2)
     Texture2D texMenuOasisFull  = LoadTexture(ResolveAsset("extracted_assets/textures/Menu_Oasis_Full.png").c_str());
@@ -2675,12 +2933,14 @@ int main(int argc, char** argv) {
         currentScreen = SCREEN_MAIN_MENU;
         testScreenshotMode = true;
     } else if (testScreenArg == "lobby") {
+        LanInitHost(7777, nullptr);
         currentScreen = SCREEN_LAN_LOBBY;
         testScreenshotMode = true;
     } else if (testScreenArg == "settings") {
         currentScreen = SCREEN_SETTINGS;
         testScreenshotMode = true;
     } else if (testScreenArg == "find_lobby") {
+        LanStartDiscoveryListener(7778);
         currentScreen = SCREEN_FIND_LOBBY;
         testScreenshotMode = true;
     } else if (testScreenArg == "mobile") {
@@ -2940,8 +3200,10 @@ int main(int argc, char** argv) {
 // 3. Player Inputs & Gas Physics
 
         bool p1InputDown = false;
-
         bool p1InputReleased = false;
+        bool p2InputDown = false;
+        bool p2InputReleased = false;
+        float p2NetRimMove = 0.0f;
 
         // Update Mobile Touch HUD Inputs
         isMobileTouchHUD = (gSettings.deviceMode == 2) || (gSettings.deviceMode == 0 && (GetTouchPointCount() > 0));
@@ -2975,11 +3237,115 @@ int main(int argc, char** argv) {
             if (touchSettings) {
                 currentScreen = SCREEN_SETTINGS;
             }
+
+            // Mobile Camera Rotation via Screen Drag / Swipe (outside virtual buttons)
+            static Vector2 s_lastTouchPos = { -1.0f, -1.0f };
+            bool camDragActive = false;
+            Vector2 camDragDelta = { 0.0f, 0.0f };
+
+            int tCount = GetTouchPointCount();
+            for (int t = 0; t < tCount; t++) {
+                Vector2 tp = GetTouchPosition(t);
+                bool onUI = CheckCollisionPointCircle(tp, posLeftBtn, rSteer * 1.35f) ||
+                            CheckCollisionPointCircle(tp, posRightBtn, rSteer * 1.35f) ||
+                            CheckCollisionPointCircle(tp, posGasBtn, rGas * 1.35f) ||
+                            CheckCollisionPointCircle(tp, posGearBtn, rGear * 2.2f);
+                if (!onUI) {
+                    if (s_camTouchId == -1 || s_camTouchId == t) {
+                        s_camTouchId = t;
+                        if (s_lastTouchPos.x >= 0.0f) {
+                            camDragDelta = Vector2{ tp.x - s_lastTouchPos.x, tp.y - s_lastTouchPos.y };
+                        }
+                        s_lastTouchPos = tp;
+                        camDragActive = true;
+                        break;
+                    }
+                }
+            }
+            if (!camDragActive) {
+                s_camTouchId = -1;
+                s_lastTouchPos = Vector2{ -1.0f, -1.0f };
+            }
+
+            if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !camDragActive) {
+                bool onUI = CheckCollisionPointCircle(mousePos, posLeftBtn, rSteer * 1.35f) ||
+                            CheckCollisionPointCircle(mousePos, posRightBtn, rSteer * 1.35f) ||
+                            CheckCollisionPointCircle(mousePos, posGasBtn, rGas * 1.35f) ||
+                            CheckCollisionPointCircle(mousePos, posGearBtn, rGear * 2.2f);
+                if (!onUI) {
+                    camDragDelta = GetMouseDelta();
+                    camDragActive = true;
+                }
+            }
+
+            if (camDragActive && (fabsf(camDragDelta.x) > 0.05f || fabsf(camDragDelta.y) > 0.05f)) {
+                float sens = gSettings.mouseSens * 0.0040f;
+                camCtrl.yaw   -= camDragDelta.x * sens;
+                camCtrl.pitch += (gSettings.invertMouseY ? -1.0f : 1.0f) * camDragDelta.y * sens;
+                camCtrl.pitch = Clamp(camCtrl.pitch, 0.05f, 0.95f);
+                camCtrl.autoRecenterTimer = 0.0f;
+            }
         }
 
         if (IsKeyPressed(KEY_F5)) {
             gSettings.showFPS = !gSettings.showFPS;
             SaveGameSettingsJSON("game_settings.json");
+        }
+
+        // LAN Co-op 60Hz Synchronization (Plan v8.3.0 Task 4)
+        static uint32_t netSeqHost = 0;
+        static uint32_t netSeqClient = 0;
+        if (LanGetRole() == LAN_HOST) {
+            singlePirateMode = false;
+            LanInputPacket inPkt;
+            while (LanHostPollInput(inPkt)) {
+                p2NetRimMove = inPkt.rimMove;
+                if (inPkt.gasDown)     p2InputDown = true;
+                if (inPkt.gasReleased) p2InputReleased = true;
+                if (inPkt.suicideReq && !raft.isDestroyed) TriggerBoatDeath(DEATH_SUICIDE);
+            }
+            LanStatePacket sp = { 0 };
+            sp.magic = 0x46415254; sp.type = LAN_PKT_STATE; sp.seq = ++netSeqHost;
+            sp.raftX = raft.position.x; sp.raftY = raft.position.y; sp.raftZ = raft.position.z;
+            sp.velX  = raft.velocity.x; sp.velY  = raft.velocity.y; sp.velZ  = raft.velocity.z;
+            sp.rotY  = raft.rotationY;  sp.pitch = raft.pitch;      sp.roll  = raft.roll;
+            sp.p1RimAngle = p1RimAngle; sp.p2RimAngle = p2RimAngle;
+            sp.p1Gas = gasP1.pressTimer; sp.p2Gas = gasP2.pressTimer;
+            sp.p1Redness = gasP1.redness; sp.p2Redness = gasP2.redness;
+            sp.p1Swell = gasP1.boneScale - 1.0f; sp.p2Swell = gasP2.boneScale - 1.0f;
+            sp.p1Eye = gasP1.isPressing ? Clamp(gasP1.pressTimer / 0.45f, 0.0f, 1.0f) : 0.0f; sp.p2Eye = gasP2.isPressing ? Clamp(gasP2.pressTimer / 0.45f, 0.0f, 1.0f) : 0.0f;
+            sp.raceTimer = raceTimer; sp.totalDeaths = raft.deaths; sp.currentCP = raft.currentCP;
+            sp.isDestroyed = raft.isDestroyed ? 1 : 0;
+            LanHostBroadcastState(sp);
+        } else if (LanGetRole() == LAN_CLIENT) {
+            singlePirateMode = false;
+            LanInputPacket inPkt = { 0 };
+            inPkt.magic = 0x46415254; inPkt.type = LAN_PKT_INPUT; inPkt.seq = ++netSeqClient;
+            inPkt.rimMove = (touchSteerRight ? 1.0f : 0.0f) - (touchSteerLeft ? 1.0f : 0.0f);
+            if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) inPkt.rimMove += 1.0f;
+            if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A))  inPkt.rimMove -= 1.0f;
+            inPkt.gasDown = (touchGas || IsKeyDown(KEY_SPACE) || IsKeyDown(KEY_W)) ? 1 : 0;
+            inPkt.gasReleased = (p1InputReleased) ? 1 : 0;
+            inPkt.suicideReq = IsKeyPressed(KEY_R) ? 1 : 0;
+            LanClientSendInput(inPkt);
+
+            LanStatePacket sp;
+            if (LanClientPollState(sp)) {
+                raft.position = Vector3Lerp(raft.position, Vector3{ sp.raftX, sp.raftY, sp.raftZ }, 0.5f);
+                raft.velocity = Vector3{ sp.velX, sp.velY, sp.velZ };
+                raft.rotationY = sp.rotY; raft.pitch = sp.pitch; raft.roll = sp.roll;
+                p1RimAngle = sp.p1RimAngle; p2RimAngle = sp.p2RimAngle;
+                gasP1.pressTimer = sp.p1Gas; gasP2.pressTimer = sp.p2Gas;
+                gasP1.redness = sp.p1Redness; gasP2.redness = sp.p2Redness;
+                gasP1.boneScale = 1.0f + sp.p1Swell; gasP2.boneScale = 1.0f + sp.p2Swell;
+                // eye synced
+                raceTimer = sp.raceTimer; raft.deaths = sp.totalDeaths; raft.currentCP = sp.currentCP;
+                if (sp.isDestroyed && !raft.isDestroyed) {
+                    TriggerBoatDeath(DEATH_SUICIDE);
+                } else if (!sp.isDestroyed && raft.isDestroyed) {
+                    raft.isDestroyed = false;
+                }
+            }
         }
 
         // P1 Controls: A/D (or Gamepad 0 Left Stick) slides left pirate along rim, W/SPACE (or Gamepad 0 South Face Button) unleashes gas
@@ -3064,9 +3430,7 @@ int main(int argc, char** argv) {
         }
 
         // Player 2 Independent Controls (Active only in Multiplayer LAN!)
-        bool p2InputDown = false;
         if (!singlePirateMode) {
-        bool p2InputReleased = false;
         if (!raft.isDestroyed) {
             float p2RimMove = 0.0f;
             if (IsKeyDown(KEY_LEFT))  p2RimMove -= 1.0f;
@@ -3075,6 +3439,7 @@ int main(int argc, char** argv) {
                 float gp2Axis = GetGamepadAxisMovement(1, GAMEPAD_AXIS_LEFT_X);
                 if (fabsf(gp2Axis) > 0.15f) p2RimMove += gp2Axis;
             }
+            if (p2NetRimMove != 0.0f) p2RimMove += p2NetRimMove;
             p2RimAngle += Clamp(p2RimMove, -1.0f, 1.0f) * 2.44f * dt;
             p2RimAngle = Clamp(p2RimAngle, 0.15f, 3.10f);
 
@@ -3276,7 +3641,13 @@ int main(int argc, char** argv) {
         raft.speed = horizSpeed;
 
         // 5. Check Custom Collision Shapes (12 types) & Obstacles
+        const float COLLISION_ACTIVE_RADIUS_SQ = 15.0f * 15.0f; // Proximity-Gated Collision (15m radius)
         for (const auto& ent : levelEntities) {
+            float cdx = raft.position.x - ent.position.x;
+            float cdz = raft.position.z - ent.position.z;
+            if (cdx * cdx + cdz * cdz > COLLISION_ACTIVE_RADIUS_SQ) {
+                continue; // Entity further than 15m is dormant - zero collision matrix overhead!
+            }
             if (ent.type >= ENT_COL_FLAT_WALL && ent.type < ENT_COUNT) {
                 float rad = -ent.rotationY * DEG2RAD;
                 float dx = raft.position.x - ent.position.x;
@@ -3822,28 +4193,19 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             camera.target   = Vector3Lerp(camera.target, desiredCamTarget, 14.0f * dt);
         }
 
-        // Auto Recenter
-
-        if (!IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && !camCtrl.freeLookMode) {
-
+        // Auto Recenter (Fixed v8.3.1 - Aligned forward, disabled on mobile/touch)
+#if !defined(PLATFORM_ANDROID) && !defined(__ANDROID__)
+        if (!IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && !camCtrl.freeLookMode && s_camTouchId == -1) {
             camCtrl.autoRecenterTimer += dt;
-
-            if (camCtrl.autoRecenterTimer > 3.0f && raft.speed > 2.0f) {
-
-                float targetYaw = atan2f(-raft.velocity.x, -raft.velocity.z);
-
+            if (camCtrl.autoRecenterTimer > 4.0f && raft.speed > 2.5f) {
+                float targetYaw = raft.rotationY;
                 float diff = targetYaw - camCtrl.yaw;
-
                 while (diff >  PI) diff -= 2.0f * PI;
-
                 while (diff < -PI) diff += 2.0f * PI;
-
-                camCtrl.yaw += diff * 1.5f * dt;
-
+                camCtrl.yaw += diff * 1.0f * dt;
             }
-
         }
-
+#endif
         if (useCustomTestCam) {
             camera.position = customTestCamPos;
             camera.target   = customTestCamTarget;
@@ -3895,6 +4257,52 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                         }
                     }
                 EndMode3D();
+
+        // Player Names Floating in White above Pirates' Heads (Plan v8.3.1 User Request)
+        if (!editorMode && !raft.isDestroyed) {
+            float rimSeatRadius = 0.95f;
+            float rimSeatHeight = 0.40f;
+
+            // Pirate 1 (Local Player on Host, Remote Player on Client)
+            float p1X = sinf(p1RimAngle) * rimSeatRadius;
+            float p1Z = cosf(p1RimAngle) * rimSeatRadius;
+            Vector3 localP1 = Vector3{ p1X, rimSeatHeight + 1.25f, p1Z };
+            Vector3 rotP1 = Vector3RotateByAxisAngle(localP1, Vector3{ 0, 1, 0 }, raft.rotationY);
+            Vector3 worldP1Head = Vector3Add(raft.position, rotP1);
+
+            Vector2 sP1 = GetWorldToScreen(worldP1Head, camera);
+            if (sP1.x >= -50.0f && sP1.x <= (float)GetScreenWidth() + 50.0f && sP1.y >= -50.0f && sP1.y <= (float)GetScreenHeight() + 50.0f) {
+                const char* nameP1 = (LanGetRole() == LAN_CLIENT) ? LanGetRemotePlayerName() : LanGetLocalPlayerName();
+                if (!nameP1 || strlen(nameP1) == 0) nameP1 = "Player 1";
+                Vector2 nmSz = MeasureTextEx(fontUIBold, nameP1, 18, 0.4f);
+                float pillW = nmSz.x + 20.0f;
+                float pillH = 26.0f;
+                DrawRectangleRounded(Rectangle{ sP1.x - pillW * 0.5f, sP1.y - pillH * 0.5f, pillW, pillH }, 0.45f, 4, Color{ 15, 23, 42, 215 });
+                DrawRectangleRoundedLinesEx(Rectangle{ sP1.x - pillW * 0.5f, sP1.y - pillH * 0.5f, pillW, pillH }, 0.45f, 4, 1.2f, Color{ 255, 255, 255, 180 });
+                DrawTextEx(fontUIBold, nameP1, Vector2{ sP1.x - nmSz.x * 0.5f, sP1.y - nmSz.y * 0.5f }, 18, 0.4f, WHITE);
+            }
+
+            if (!singlePirateMode) {
+                // Pirate 2 (Remote Player on Host, Local Player on Client)
+                float p2X = sinf(p2RimAngle) * rimSeatRadius;
+                float p2Z = cosf(p2RimAngle) * rimSeatRadius;
+                Vector3 localP2 = Vector3{ p2X, rimSeatHeight + 1.25f, p2Z };
+                Vector3 rotP2 = Vector3RotateByAxisAngle(localP2, Vector3{ 0, 1, 0 }, raft.rotationY);
+                Vector3 worldP2Head = Vector3Add(raft.position, rotP2);
+
+                Vector2 sP2 = GetWorldToScreen(worldP2Head, camera);
+                if (sP2.x >= -50.0f && sP2.x <= (float)GetScreenWidth() + 50.0f && sP2.y >= -50.0f && sP2.y <= (float)GetScreenHeight() + 50.0f) {
+                    const char* nameP2 = (LanGetRole() == LAN_CLIENT) ? LanGetLocalPlayerName() : LanGetRemotePlayerName();
+                    if (!nameP2 || strlen(nameP2) == 0) nameP2 = "Player 2";
+                    Vector2 nmSz = MeasureTextEx(fontUIBold, nameP2, 18, 0.4f);
+                    float pillW = nmSz.x + 20.0f;
+                    float pillH = 26.0f;
+                    DrawRectangleRounded(Rectangle{ sP2.x - pillW * 0.5f, sP2.y - pillH * 0.5f, pillW, pillH }, 0.45f, 4, Color{ 15, 23, 42, 215 });
+                    DrawRectangleRoundedLinesEx(Rectangle{ sP2.x - pillW * 0.5f, sP2.y - pillH * 0.5f, pillW, pillH }, 0.45f, 4, 1.2f, Color{ 56, 189, 248, 180 });
+                    DrawTextEx(fontUIBold, nameP2, Vector2{ sP2.x - nmSz.x * 0.5f, sP2.y - nmSz.y * 0.5f }, 18, 0.4f, WHITE);
+                }
+            }
+        }
             EndTextureMode();
         }
 
@@ -3938,11 +4346,15 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
             SetShaderValue(shaderLighting, uRednessLoc, &zeroRed, SHADER_UNIFORM_FLOAT);
 
-#if !defined(PLATFORM_ANDROID) && !defined(__ANDROID__)
+            rlEnableBackfaceCulling();
+            FrustumPlanes camFrustum = ExtractCameraFrustum(camera, (float)GetScreenWidth() / (float)GetScreenHeight());
             for (int s = 0; s < ENV_SECTOR_COUNT; s++) {
-                DrawModel(envSectors[s], Vector3{ 0, 0, 0 }, 1.0f, WHITE);
+                if (envSectors[s].meshCount > 0) {
+                    if (IsAABBInFrustum(camFrustum, envSectorBounds[s].min, envSectorBounds[s].max)) {
+                        DrawModel(envSectors[s], Vector3{ 0, 0, 0 }, 1.0f, WHITE);
+                    }
+                }
             }
-#endif
 
             // B. Authentic Canyon Walls
 
@@ -3968,7 +4380,19 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             // A. Authentic Start Basin inside Canyon Walls & Water Mesh (Zero fake cylinders)
 
             // E. Draw All Level Entities (Obstacles, Rocks, Trees, Checkpoints)
+        const float OBSTACLE_CULL_DIST_SQ = 90.0f * 90.0f;
         for (const auto& ent : levelEntities) {
+            if (!editorMode) {
+                float dx = ent.position.x - raft.position.x;
+                float dz = ent.position.z - raft.position.z;
+                if (dx * dx + dz * dz > OBSTACLE_CULL_DIST_SQ) {
+                    continue; // Distance culling (>90m)
+                }
+            }
+            float sRad = 8.5f * ((ent.scale > 0.01f) ? ent.scale : 1.0f);
+            if (!editorMode && !IsSphereInFrustum(camFrustum, ent.position, sRad)) {
+                continue; // Camera frustum culling & animation sleep
+            }
             Vector3 animPos;
             float animYaw, animRoll;
             float animPitch = 0.0f;
@@ -4343,6 +4767,52 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
         EndMode3D();
 
+        // Player Names Floating in White above Pirates' Heads (Plan v8.3.1 User Request)
+        if (!editorMode && !raft.isDestroyed) {
+            float rimSeatRadius = 0.95f;
+            float rimSeatHeight = 0.40f;
+
+            // Pirate 1 (Local Player on Host, Remote Player on Client)
+            float p1X = sinf(p1RimAngle) * rimSeatRadius;
+            float p1Z = cosf(p1RimAngle) * rimSeatRadius;
+            Vector3 localP1 = Vector3{ p1X, rimSeatHeight + 1.25f, p1Z };
+            Vector3 rotP1 = Vector3RotateByAxisAngle(localP1, Vector3{ 0, 1, 0 }, raft.rotationY);
+            Vector3 worldP1Head = Vector3Add(raft.position, rotP1);
+
+            Vector2 sP1 = GetWorldToScreen(worldP1Head, camera);
+            if (sP1.x >= -50.0f && sP1.x <= (float)GetScreenWidth() + 50.0f && sP1.y >= -50.0f && sP1.y <= (float)GetScreenHeight() + 50.0f) {
+                const char* nameP1 = (LanGetRole() == LAN_CLIENT) ? LanGetRemotePlayerName() : LanGetLocalPlayerName();
+                if (!nameP1 || strlen(nameP1) == 0) nameP1 = "Player 1";
+                Vector2 nmSz = MeasureTextEx(fontUIBold, nameP1, 18, 0.4f);
+                float pillW = nmSz.x + 20.0f;
+                float pillH = 26.0f;
+                DrawRectangleRounded(Rectangle{ sP1.x - pillW * 0.5f, sP1.y - pillH * 0.5f, pillW, pillH }, 0.45f, 4, Color{ 15, 23, 42, 215 });
+                DrawRectangleRoundedLinesEx(Rectangle{ sP1.x - pillW * 0.5f, sP1.y - pillH * 0.5f, pillW, pillH }, 0.45f, 4, 1.2f, Color{ 255, 255, 255, 180 });
+                DrawTextEx(fontUIBold, nameP1, Vector2{ sP1.x - nmSz.x * 0.5f, sP1.y - nmSz.y * 0.5f }, 18, 0.4f, WHITE);
+            }
+
+            if (!singlePirateMode) {
+                // Pirate 2 (Remote Player on Host, Local Player on Client)
+                float p2X = sinf(p2RimAngle) * rimSeatRadius;
+                float p2Z = cosf(p2RimAngle) * rimSeatRadius;
+                Vector3 localP2 = Vector3{ p2X, rimSeatHeight + 1.25f, p2Z };
+                Vector3 rotP2 = Vector3RotateByAxisAngle(localP2, Vector3{ 0, 1, 0 }, raft.rotationY);
+                Vector3 worldP2Head = Vector3Add(raft.position, rotP2);
+
+                Vector2 sP2 = GetWorldToScreen(worldP2Head, camera);
+                if (sP2.x >= -50.0f && sP2.x <= (float)GetScreenWidth() + 50.0f && sP2.y >= -50.0f && sP2.y <= (float)GetScreenHeight() + 50.0f) {
+                    const char* nameP2 = (LanGetRole() == LAN_CLIENT) ? LanGetLocalPlayerName() : LanGetRemotePlayerName();
+                    if (!nameP2 || strlen(nameP2) == 0) nameP2 = "Player 2";
+                    Vector2 nmSz = MeasureTextEx(fontUIBold, nameP2, 18, 0.4f);
+                    float pillW = nmSz.x + 20.0f;
+                    float pillH = 26.0f;
+                    DrawRectangleRounded(Rectangle{ sP2.x - pillW * 0.5f, sP2.y - pillH * 0.5f, pillW, pillH }, 0.45f, 4, Color{ 15, 23, 42, 215 });
+                    DrawRectangleRoundedLinesEx(Rectangle{ sP2.x - pillW * 0.5f, sP2.y - pillH * 0.5f, pillW, pillH }, 0.45f, 4, 1.2f, Color{ 56, 189, 248, 180 });
+                    DrawTextEx(fontUIBold, nameP2, Vector2{ sP2.x - nmSz.x * 0.5f, sP2.y - nmSz.y * 0.5f }, 18, 0.4f, WHITE);
+                }
+            }
+        }
+
         // =====================================================================
 
         // Authentic Game UI (1:1 Matching Image 2 & Disassembled Sprites)
@@ -4458,11 +4928,11 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             }
         }
 
-                // 5. Bottom-Right: [F1] LEVEL EDITOR Toggle Button (Godot Style)
+                // 5. [F1] LEVEL EDITOR Toggle Handling (HUD button removed in play mode per user request!)
         {
             Rectangle btnEditorRec = { (float)GetScreenWidth() - 175, (float)GetScreenHeight() - 44, 160, 32 };
             bool hoverEditor = CheckCollisionPointRec(mousePos, btnEditorRec);
-            if ((hoverEditor && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_F1)) {
+            if ((hoverEditor && editorMode && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_F1)) {
                 editorMode = !editorMode;
                 if (editorMode) {
                     editorCamPos = Vector3Add(raft.position, Vector3{ 0.0f, 4.5f, 6.0f });
@@ -4477,13 +4947,17 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 }
             }
 
-            Color btnBg = editorMode ? Color{ 71, 140, 191, 245 } : (hoverEditor ? Color{ 48, 54, 70, 240 } : Color{ 32, 37, 49, 230 });
-            Color btnBorder = editorMode ? Color{ 110, 180, 230, 255 } : Color{ 68, 76, 95, 200 };
-            DrawRectangleRounded(btnEditorRec, 0.25f, 4, btnBg);
-            DrawRectangleRoundedLinesEx(btnEditorRec, 0.25f, 4, 1.0f, btnBorder);
-            const char* toggleLbl = editorMode ? "Play Mode (F1)" : "Level Editor (F1)";
-            Vector2 tSz = MeasureTextEx(fontUIBold, toggleLbl, 14, 0.4f);
-            DrawTextEx(fontUIBold, toggleLbl, Vector2{ btnEditorRec.x + (btnEditorRec.width - tSz.x) * 0.5f, btnEditorRec.y + 8 }, 14, 0.4f, WHITE);
+            // Only render button while INSIDE editorMode to allow returning to Play Mode!
+            // When !editorMode, button is hidden completely from in-game HUD!
+            if (editorMode) {
+                Color btnBg = Color{ 71, 140, 191, 245 };
+                Color btnBorder = Color{ 110, 180, 230, 255 };
+                DrawRectangleRounded(btnEditorRec, 0.25f, 4, btnBg);
+                DrawRectangleRoundedLinesEx(btnEditorRec, 0.25f, 4, 1.0f, btnBorder);
+                const char* toggleLbl = "Play Mode (F1)";
+                Vector2 tSz = MeasureTextEx(fontUIBold, toggleLbl, 14, 0.4f);
+                DrawTextEx(fontUIBold, toggleLbl, Vector2{ btnEditorRec.x + (btnEditorRec.width - tSz.x) * 0.5f, btnEditorRec.y + 8 }, 14, 0.4f, WHITE);
+            }
 
             // Prominent Top Bar Natural Motion Toggle Button (Accessible anytime in Editor!)
             if (editorMode) {
@@ -5160,8 +5634,17 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             if (IsSoundPlaying(sndSnore)) StopSound(sndSnore);
             if (IsSoundPlaying(sndEatMunch)) StopSound(sndEatMunch);
 
-            // Clean 100% static background (Menu_Oasis_Full.png) - No cutouts, no snot bubbles, no duplicate pirates!
-            if (texMenuOasisFull.id != 0) {
+            // Animated Video Background (Plan v8.3.0 Task 1) - Silenced, 12 FPS smooth loop
+            if (!menuVideoFrames.empty()) {
+                static float menuVideoTimer = 0.0f;
+                menuVideoTimer += dt;
+                int fIdx = (int)(menuVideoTimer * 12.0f) % (int)menuVideoFrames.size();
+                Texture2D curFrame = menuVideoFrames[fIdx];
+                if (curFrame.id != 0) {
+                    DrawTexturePro(curFrame, Rectangle{ 0, 0, (float)curFrame.width, (float)curFrame.height },
+                                   Rectangle{ 0, 0, scrW, scrH }, Vector2{0, 0}, 0.0f, WHITE);
+                }
+            } else if (texMenuOasisFull.id != 0) {
                 DrawTexturePro(texMenuOasisFull, Rectangle{ 0, 0, (float)texMenuOasisFull.width, (float)texMenuOasisFull.height },
                                Rectangle{ 0, 0, scrW, scrH }, Vector2{0, 0}, 0.0f, WHITE);
             } else if (texMenuOasisClean.id != 0) {
@@ -5230,7 +5713,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                         gasP1.gasDepleted = false;
                         currentScreen = SCREEN_GAMEPLAY;
                     } else if (m == 1) { // CREATE LOBBY
-                        LanInitHost(7777, "8HF78N");
+                        LanInitHost(7777, nullptr);
                         gHostReady = false;
                         gClientReady = false;
                         gSoloPracticeMode = false;
@@ -5247,11 +5730,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 }
             }
 
-            // Room code box next to FIND LOBBY
-            float findY = menuStartY + 2 * menuGapY;
-            DrawSlantedRect(380.0f, findY + 3.0f, 190.0f, 44.0f, 10.0f, Color{ 15, 30, 45, 215 });
-            DrawSlantedRectLines(380.0f, findY + 3.0f, 190.0f, 44.0f, 10.0f, 1.2f, Color{ 45, 85, 120, 200 });
-            DrawTextEx(fontUIBold, "8HF78N", Vector2{ 415.0f, findY + 11.0f }, 22, 0.5f, Color{ 52, 235, 120, 255 });
+            // Static room code box deleted as requested (v8.3.1)
 
             // Language Toggle in Top-Right
             Rectangle langBtnRec = { scrW - 190.0f, 20.0f, 165.0f, 42.0f };
@@ -5269,13 +5748,14 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             DrawTextEx(fontUIBold, LocText(STR_ESC_BACK), Vector2{ 38.0f, scrH - 42.0f }, 15, 0.3f, Color{ 220, 230, 245, 220 });
             DrawTextEx(fontUIBold, LocText(STR_ENTER_SELECT), Vector2{ 175.0f, scrH - 42.0f }, 15, 0.3f, Color{ 220, 230, 245, 220 });
 
-            // Bottom-Right Version Badge (v8.2.0)
+            // Bottom-Right Version Badge (v8.3.0)
             DrawSlantedRect(scrW - 165.0f, scrH - 52.0f, 145.0f, 38.0f, 10.0f, Color{ 18, 28, 42, 230 });
             DrawSlantedRectLines(scrW - 165.0f, scrH - 52.0f, 145.0f, 38.0f, 10.0f, 1.2f, Color{ 48, 70, 98, 220 });
             Vector2 verSz = MeasureTextEx(fontUIBold, GAME_VERSION_TAG, 18, 0.4f);
             DrawTextEx(fontUIBold, GAME_VERSION_TAG, Vector2{ scrW - 165.0f + (145.0f - verSz.x) * 0.5f, scrH - 44.0f }, 18, 0.4f, Color{ 172, 255, 45, 255 });
         } else if (currentScreen == SCREEN_LAN_LOBBY) {
             ClearBackground(Color{ 18, 22, 34, 255 });
+            LanUpdateDiscoveryAndLobby(GetFrameTime());
 
             float scrW = (float)GetScreenWidth();
             float scrH = (float)GetScreenHeight();
@@ -5283,8 +5763,8 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             // Authentic Stage Backdrop (Image 5 & 98a07c Parity):
             // Upper half: Warm terracotta canyon wall (y = 0..320)
             DrawRectangle(0, 0, (int)scrW, 320, Color{ 186, 108, 92, 255 });
-            for (int i = 0; i < 7; i++) {
-                float strataY = 45.0f + i * 42.0f;
+            for (int s = 0; s < 7; s++) {
+                float strataY = 45.0f + s * 42.0f;
                 DrawLineEx(Vector2{ 0.0f, strataY }, Vector2{ scrW, strataY + 14.0f }, 2.5f, Color{ 198, 118, 100, 180 });
                 DrawLineEx(Vector2{ 0.0f, strataY + 8.0f }, Vector2{ scrW, strataY + 22.0f }, 1.5f, Color{ 174, 98, 84, 180 });
             }
@@ -5304,7 +5784,19 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             DrawCircle((int)scrW - 110, 332, 18.0f, Color{ 140, 92, 80, 220 });
             DrawCircle((int)scrW - 150, 338, 12.0f, Color{ 160, 110, 95, 220 });
 
-            // 3D Standing Pirates on the stage floor (feet right above color cards at y = 345)
+            // Top-Left Back / Leave Button (v8.3.1 Mobile & PC Support)
+            Rectangle leaveRec = { 25.0f, 16.0f, 150.0f, 48.0f };
+            bool hovLeave = CheckCollisionPointRec(mousePos, leaveRec);
+            DrawSlantedRect(leaveRec.x, leaveRec.y, leaveRec.width, leaveRec.height, 10.0f, hovLeave ? Color{ 238, 52, 132, 255 } : Color{ 180, 40, 95, 230 });
+            const char* leaveTxt = (gCurrentLanguage == LANG_AR) ? "< خروج" : "< LEAVE";
+            Vector2 lvSz = MeasureTextEx(fontUIBold, leaveTxt, 17, 0.3f);
+            DrawTextEx(fontUIBold, leaveTxt, Vector2{ leaveRec.x + (leaveRec.width - lvSz.x) * 0.5f, leaveRec.y + 13.0f }, 17, 0.3f, WHITE);
+            if ((hovLeave && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_BACK)) {
+                LanShutdown();
+                currentScreen = SCREEN_MAIN_MENU;
+            }
+
+            // 3D Standing Pirates on the stage floor
             Camera3D lobbyCam = { 0 };
             lobbyCam.position = Vector3{ 0.0f, 1.05f, 4.20f };
             lobbyCam.target   = Vector3{ 0.0f, 0.55f, 0.0f };
@@ -5314,71 +5806,68 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
             BeginMode3D(lobbyCam);
                 float pBob = sinf(runTime * 2.5f) * 0.02f;
+                uint8_t p1Col = (LanGetRole() == LAN_CLIENT) ? LanGetHostColor() : (uint8_t)selectedLobbyChar;
+                uint8_t p2Col = (LanGetRole() == LAN_CLIENT) ? (uint8_t)selectedLobbyChar : LanGetClientColor();
                 if (gConnectedPlayers <= 1) {
-                    // Single pirate standing centered
                     rlPushMatrix();
                         rlTranslatef(0.0f, 0.08f + pBob, 0.0f);
                         rlScalef(1.28f, 1.28f, 1.28f);
-                        Model* pCurChar = (selectedLobbyChar % 2 == 0) ? &charB : &charA;
+                        Model* pCurChar = (p1Col % 2 == 0) ? &charB : &charA;
                         DrawModel(*pCurChar, Vector3{0,0,0}, 1.0f, WHITE);
                     rlPopMatrix();
                 } else {
-                    // Two or more pirates standing side by side
                     rlPushMatrix();
                         rlTranslatef(-0.95f, 0.08f + pBob, 0.0f);
                         rlScalef(1.28f, 1.28f, 1.28f);
-                        Model* pCurChar = (selectedLobbyChar % 2 == 0) ? &charB : &charA;
-                        DrawModel(*pCurChar, Vector3{0,0,0}, 1.0f, WHITE);
+                        Model* pHostModel = (p1Col % 2 == 0) ? &charB : &charA;
+                        DrawModel(*pHostModel, Vector3{0,0,0}, 1.0f, WHITE);
                     rlPopMatrix();
 
                     rlPushMatrix();
                         rlTranslatef(0.95f, 0.08f + pBob, 0.0f);
                         rlScalef(1.28f, 1.28f, 1.28f);
-                        DrawModel(charA, Vector3{0,0,0}, 1.0f, WHITE);
+                        Model* pClientModel = (p2Col % 2 == 0) ? &charB : &charA;
+                        DrawModel(*pClientModel, Vector3{0,0,0}, 1.0f, WHITE);
                     rlPopMatrix();
                 }
             EndMode3D();
 
-            // Name Markers & Green Checkmarks above pirates
+            // Name Markers & White Player Names above Pirates (Plan v8.3.1 User Request)
             Vector2 p1Head = GetWorldToScreen(Vector3{ (gConnectedPlayers <= 1) ? 0.0f : -0.95f, 1.55f, 0.0f }, lobbyCam);
-            if (texMarkerYou.id != 0) {
-                float mw = 120.0f, mh = 38.0f;
-                DrawTexturePro(texMarkerYou, Rectangle{ 0, 0, (float)texMarkerYou.width, (float)texMarkerYou.height },
-                               Rectangle{ p1Head.x - mw * 0.5f, p1Head.y - 20.0f, mw, mh }, Vector2{0,0}, 0.0f, WHITE);
-            } else {
-                DrawSlantedRect(p1Head.x - 55.0f, p1Head.y - 18.0f, 110.0f, 32.0f, 8.0f, Color{ 106, 134, 178, 240 });
-                Vector2 youSz = MeasureTextEx(fontUIBold, LocText(STR_YOU_MARKER), 16, 0.4f);
-                DrawTextEx(fontUIBold, LocText(STR_YOU_MARKER), Vector2{ p1Head.x - youSz.x * 0.5f, p1Head.y - 10.0f }, 16, 0.4f, WHITE);
-            }
+            const char* hostPName = (LanGetRole() == LAN_CLIENT) ? LanGetRemotePlayerName() : LanGetLocalPlayerName();
+            if (!hostPName || strlen(hostPName) == 0) hostPName = "Captain 1";
+            Vector2 hNameSz = MeasureTextEx(fontUIBold, hostPName, 18, 0.4f);
+            float hPillW = hNameSz.x + 24.0f;
+            DrawRectangleRounded(Rectangle{ p1Head.x - hPillW * 0.5f, p1Head.y - 32.0f, hPillW, 28.0f }, 0.45f, 4, Color{ 15, 23, 42, 220 });
+            DrawRectangleRoundedLinesEx(Rectangle{ p1Head.x - hPillW * 0.5f, p1Head.y - 32.0f, hPillW, 28.0f }, 0.45f, 4, 1.2f, Color{ 255, 255, 255, 200 });
+            DrawTextEx(fontUIBold, hostPName, Vector2{ p1Head.x - hNameSz.x * 0.5f, p1Head.y - 28.0f }, 18, 0.4f, WHITE);
 
             // Green Tik above You if ready
             if (gHostReady) {
                 if (texIconTikGreen.id != 0) {
                     DrawTexturePro(texIconTikGreen, Rectangle{ 0, 0, (float)texIconTikGreen.width, (float)texIconTikGreen.height },
-                                   Rectangle{ p1Head.x - 18.0f, p1Head.y - 62.0f, 36.0f, 36.0f }, Vector2{0,0}, 0.0f, WHITE);
+                                   Rectangle{ p1Head.x - 18.0f, p1Head.y - 70.0f, 36.0f, 36.0f }, Vector2{0,0}, 0.0f, WHITE);
                 } else {
-                    DrawCircle((int)p1Head.x, (int)p1Head.y - 44, 16.0f, Color{ 34, 197, 94, 255 });
+                    DrawCircle((int)p1Head.x, (int)p1Head.y - 52, 16.0f, Color{ 34, 197, 94, 255 });
                 }
             }
 
             if (gConnectedPlayers >= 2) {
                 Vector2 p2Head = GetWorldToScreen(Vector3{ 0.95f, 1.55f, 0.0f }, lobbyCam);
-                if (texMarkerPlayer.id != 0) {
-                    float mw = 120.0f, mh = 38.0f;
-                    DrawTexturePro(texMarkerPlayer, Rectangle{ 0, 0, (float)texMarkerPlayer.width, (float)texMarkerPlayer.height },
-                                   Rectangle{ p2Head.x - mw * 0.5f, p2Head.y - 20.0f, mw, mh }, Vector2{0,0}, 0.0f, WHITE);
-                } else {
-                    DrawSlantedRect(p2Head.x - 55.0f, p2Head.y - 18.0f, 110.0f, 32.0f, 8.0f, Color{ 180, 85, 75, 240 });
-                    Vector2 plSz = MeasureTextEx(fontUIBold, LocText(STR_PLAYER_MARKER), 16, 0.4f);
-                    DrawTextEx(fontUIBold, LocText(STR_PLAYER_MARKER), Vector2{ p2Head.x - plSz.x * 0.5f, p2Head.y - 10.0f }, 16, 0.4f, WHITE);
-                }
+                const char* clientPName = (LanGetRole() == LAN_CLIENT) ? LanGetLocalPlayerName() : LanGetRemotePlayerName();
+                if (!clientPName || strlen(clientPName) == 0) clientPName = "Captain 2";
+                Vector2 cNameSz = MeasureTextEx(fontUIBold, clientPName, 18, 0.4f);
+                float cPillW = cNameSz.x + 24.0f;
+                DrawRectangleRounded(Rectangle{ p2Head.x - cPillW * 0.5f, p2Head.y - 32.0f, cPillW, 28.0f }, 0.45f, 4, Color{ 15, 23, 42, 220 });
+                DrawRectangleRoundedLinesEx(Rectangle{ p2Head.x - cPillW * 0.5f, p2Head.y - 32.0f, cPillW, 28.0f }, 0.45f, 4, 1.2f, Color{ 56, 189, 248, 200 });
+                DrawTextEx(fontUIBold, clientPName, Vector2{ p2Head.x - cNameSz.x * 0.5f, p2Head.y - 28.0f }, 18, 0.4f, WHITE);
 
                 if (gClientReady) {
                     if (texIconTikGreen.id != 0) {
                         DrawTexturePro(texIconTikGreen, Rectangle{ 0, 0, (float)texIconTikGreen.width, (float)texIconTikGreen.height },
-                                       Rectangle{ p2Head.x - 18.0f, p2Head.y - 62.0f, 36.0f, 36.0f }, Vector2{0,0}, 0.0f, WHITE);
+                                       Rectangle{ p2Head.x - 18.0f, p2Head.y - 70.0f, 36.0f, 36.0f }, Vector2{0,0}, 0.0f, WHITE);
                     } else {
-                        DrawCircle((int)p2Head.x, (int)p2Head.y - 44, 16.0f, Color{ 34, 197, 94, 255 });
+                        DrawCircle((int)p2Head.x, (int)p2Head.y - 52, 16.0f, Color{ 34, 197, 94, 255 });
                     }
                 }
             }
@@ -5391,14 +5880,14 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             Vector2 lobSz = MeasureTextEx(fontUIBold, LocText(STR_LOBBY_TITLE), 22, 0.5f);
             DrawTextEx(fontUIBold, LocText(STR_LOBBY_TITLE), Vector2{ (scrW - lobSz.x) * 0.5f, 12.0f }, 22, 0.5f, WHITE);
 
-            // Top Right: Room Code
-            float codeBoxW = 210.0f, codeBoxH = 54.0f;
+            // Top Right: Dynamic Room Code (v8.3.1 Clean Parity)
+            float codeBoxW = 220.0f, codeBoxH = 54.0f;
             float codeBoxX = scrW - codeBoxW - 35.0f;
             float codeBoxY = 16.0f;
             DrawSlantedRect(codeBoxX, codeBoxY, codeBoxW, codeBoxH, 12.0f, Color{ 22, 30, 48, 220 });
             DrawSlantedRectLines(codeBoxX, codeBoxY, codeBoxW, codeBoxH, 12.0f, 1.2f, Color{ 56, 75, 110, 200 });
             DrawTextEx(fontUI, LocText(STR_YOUR_CODE), Vector2{ codeBoxX + 22.0f, codeBoxY + 8.0f }, 11, 0.3f, Color{ 160, 175, 200, 255 });
-            DrawTextEx(fontUIBold, "8HF78N", Vector2{ codeBoxX + 22.0f, codeBoxY + 24.0f }, 20, 0.4f, Color{ 52, 235, 120, 255 });
+            DrawTextEx(fontUIBold, LanGetRoomCode(), Vector2{ codeBoxX + 22.0f, codeBoxY + 24.0f }, 20, 0.4f, Color{ 52, 235, 120, 255 });
 
             // 4 Character Color Cards (y = 358, h = 76)
             float cardW = 76.0f, cardH = 76.0f, cardGap = 16.0f;
@@ -5425,6 +5914,11 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
                 if (hovC && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                     selectedLobbyChar = c;
+                    if (LanGetRole() == LAN_CLIENT) {
+                        LanClientSendLobbyUpdate(gClientReady, (uint8_t)selectedLobbyChar);
+                    } else if (LanGetRole() == LAN_HOST) {
+                        LanSetHostColor((uint8_t)selectedLobbyChar);
+                    }
                 }
             }
 
@@ -5457,180 +5951,249 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 }
 
                 if (isM0) {
-                    DrawRectangleLinesEx(mRec, 2.5f, Color{ 238, 52, 132, 255 });
-                } else {
-                    DrawRectangle(mRec.x, mRec.y + mRec.height - 28.0f, mRec.width, 28.0f, Color{ 20, 25, 35, 190 });
-                    DrawTextEx(fontUIBold, LocText(STR_COMING_SOON), Vector2{ mRec.x + 35.0f, mRec.y + mRec.height - 22.0f }, 13, 0.3f, Color{ 230, 235, 245, 255 });
+                    DrawRectangleLinesEx(mRec, 3.0f, Color{ 238, 52, 132, 255 });
+                }
+
+                DrawRectangle(mRec.x, mRec.y + mRec.height - 24.0f, mRec.width, 24.0f, Color{ 15, 23, 42, 210 });
+                Vector2 mtSz = MeasureTextEx(fontUIBold, LocText(mTitles[m]), 12, 0.2f);
+                DrawTextEx(fontUIBold, LocText(mTitles[m]), Vector2{ mRec.x + (mRec.width - mtSz.x) * 0.5f, mRec.y + mRec.height - 18.0f }, 12, 0.2f, WHITE);
+            }
+
+            // Bottom-Right Action Button: [SPACE] READY (Image 5 Parity)
+            float rdyW = 320.0f, rdyH = 56.0f;
+            float rdyX = scrW - rdyW - 35.0f;
+            float rdyY = scrH - rdyH - 25.0f;
+
+            Rectangle rdyRec = { rdyX, rdyY, rdyW, rdyH };
+            bool hovRdy = CheckCollisionPointRec(mousePos, rdyRec);
+
+            Color rdyBg = gHostReady ? Color{ 34, 197, 94, 255 } : (hovRdy ? Color{ 255, 60, 135, 255 } : Color{ 238, 52, 132, 255 });
+            DrawSlantedRect(rdyRec.x, rdyRec.y, rdyRec.width, rdyRec.height, 14.0f, rdyBg);
+            DrawSlantedRectLines(rdyRec.x, rdyRec.y, rdyRec.width, rdyRec.height, 14.0f, 2.0f, WHITE);
+
+            if (texKeySpace.id != 0) {
+                DrawTexturePro(texKeySpace, Rectangle{ 0, 0, (float)texKeySpace.width, (float)texKeySpace.height },
+                               Rectangle{ rdyRec.x + 22.0f, rdyRec.y + 12.0f, 48.0f, 32.0f }, Vector2{0,0}, 0.0f, WHITE);
+            }
+
+            const char* rdyLabel = gHostReady ? LocText(STR_NOT_READY_BTN) : LocText(STR_READY_BTN);
+            DrawTextEx(fontUIBold, rdyLabel, Vector2{ rdyRec.x + 85.0f, rdyRec.y + 15.0f }, 22, 0.5f, WHITE);
+
+            if ((hovRdy && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_ENTER)) {
+                if (LanGetRole() == LAN_HOST) {
+                    gHostReady = !gHostReady;
+                } else if (LanGetRole() == LAN_CLIENT) {
+                    gClientReady = !gClientReady;
+                    LanClientSendLobbyUpdate(gClientReady, (uint8_t)selectedLobbyChar);
                 }
             }
 
-            // Bottom Buttons (Matching Image 5 exactly)
-            // 1. Left: INVITE FRIENDS
-            Rectangle invBtnRec = { 58.0f, scrH - 68.0f, 260.0f, 56.0f };
-            bool hovInv = CheckCollisionPointRec(mousePos, invBtnRec);
-            DrawSlantedRect(invBtnRec.x, invBtnRec.y, invBtnRec.width, invBtnRec.height, 12.0f, hovInv ? Color{ 18, 160, 235, 255 } : Color{ 14, 138, 206, 255 });
-            Vector2 invSz = MeasureTextEx(fontUIBold, LocText(STR_INVITE_FRIENDS), 18, 0.4f);
-            DrawTextEx(fontUIBold, LocText(STR_INVITE_FRIENDS), Vector2{ invBtnRec.x + (invBtnRec.width - invSz.x) * 0.5f, invBtnRec.y + 17.0f }, 18, 0.4f, Color{ 255, 225, 60, 255 });
-            if (hovInv && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                SetClipboardText("8HF78N");
-                gShowInviteModal = true;
+            // Start Race Condition: In 2-Player mode, both players must be ready!
+            if (LanGetRole() == LAN_HOST && gConnectedPlayers >= 2 && gHostReady && gClientReady) {
+                LanSetMatchStarted(true);
+                LanSendStartSignal();
+                singlePirateMode = false;
+                p1RimAngle = 3.14159f;
+                p2RimAngle = 0.0f;
+                raft.position = Vector3{ 15.55f, 0.58f, 90.80f };
+                raft.velocity = Vector3Zero();
+                raft.rotationY = 3.14159f;
+                raft.isDestroyed = false;
+                raft.currentCP = 0;
+                gasP1.gasEnergy = GAS_MAX;
+                gasP2.gasEnergy = GAS_MAX;
+                currentScreen = SCREEN_GAMEPLAY;
+            } else if (LanGetRole() == LAN_CLIENT && LanIsMatchStarted()) {
+                singlePirateMode = false;
+                p1RimAngle = 3.14159f;
+                p2RimAngle = 0.0f;
+                raft.position = Vector3{ 15.55f, 0.58f, 90.80f };
+                raft.velocity = Vector3Zero();
+                raft.rotationY = 3.14159f;
+                raft.isDestroyed = false;
+                raft.currentCP = 0;
+                gasP1.gasEnergy = GAS_MAX;
+                gasP2.gasEnergy = GAS_MAX;
+                currentScreen = SCREEN_GAMEPLAY;
             }
 
-            // 2. Center: READY <-> UNREADY White Trapezoid Button
-            float readyBtnW = 270.0f, readyBtnH = 64.0f;
-            float readyBtnX = (scrW - readyBtnW) * 0.5f;
-            float readyBtnY = scrH - 64.0f;
-            Rectangle rdyClickRec = { readyBtnX, readyBtnY, readyBtnW, readyBtnH };
-            bool hovRdy = CheckCollisionPointRec(mousePos, rdyClickRec);
+            // Bottom-Left Status
+            DrawTextEx(fontUIBold, LanGetStatusText(), Vector2{ 25.0f, scrH - 55.0f }, 15, 0.3f, Color{ 220, 230, 245, 230 });
 
-            DrawTrapezoid(readyBtnX, readyBtnY, readyBtnW, readyBtnH, 18.0f, hovRdy ? Color{ 245, 245, 250, 255 } : WHITE);
-            DrawTrapezoidLines(readyBtnX, readyBtnY, readyBtnW, readyBtnH, 18.0f, 1.8f, Color{ 200, 210, 230, 255 });
-
-            bool myReady = (LanGetRole() == LAN_HOST) ? gHostReady : gClientReady;
-            if (!myReady) {
-                // [SPACE] READY (in pink-red)
-                if (texKeySpace.id != 0) {
-                    DrawTexturePro(texKeySpace, Rectangle{ 0, 0, (float)texKeySpace.width, (float)texKeySpace.height },
-                                   Rectangle{ readyBtnX + 38.0f, readyBtnY + 18.0f, 44.0f, 26.0f }, Vector2{0,0}, 0.0f, WHITE);
-                }
-                DrawTextEx(fontUIBold, LocText(STR_READY_WORD), Vector2{ readyBtnX + 96.0f, readyBtnY + 18.0f }, 24, 0.5f, Color{ 225, 82, 98, 255 });
-            } else {
-                // [X] UNREADY (in dark navy)
-                DrawRectangle(readyBtnX + 42.0f, readyBtnY + 18.0f, 28.0f, 28.0f, Color{ 28, 33, 53, 255 });
-                DrawTextEx(fontUIBold, "X", Vector2{ readyBtnX + 49.0f, readyBtnY + 21.0f }, 20, 0.4f, WHITE);
-                DrawTextEx(fontUIBold, LocText(STR_UNREADY_BTN), Vector2{ readyBtnX + 85.0f, readyBtnY + 18.0f }, 22, 0.5f, Color{ 28, 33, 53, 255 });
-            }
-
-            if ((hovRdy && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_SPACE)) {
-                if (LanGetRole() == LAN_HOST) gHostReady = !gHostReady;
-                else gClientReady = !gClientReady;
-            }
-
-            // 3. Right: Yellow Slanted START GAME Button (Host Only, enabled when 2+ players all-ready)
-            if (LanGetRole() == LAN_HOST) {
-                Rectangle startBtnRec = { scrW - 325.0f, scrH - 68.0f, 265.0f, 56.0f };
-                bool hovStart = CheckCollisionPointRec(mousePos, startBtnRec);
-                DrawSlantedRect(startBtnRec.x, startBtnRec.y, startBtnRec.width, startBtnRec.height, 12.0f, hovStart ? Color{ 255, 235, 65, 255 } : Color{ 246, 224, 52, 255 });
-
-                if (texIconKEnter.id != 0) {
-                    DrawTexturePro(texIconKEnter, Rectangle{ 0, 0, (float)texIconKEnter.width, (float)texIconKEnter.height },
-                                   Rectangle{ startBtnRec.x + 22.0f, startBtnRec.y + 14.0f, 28.0f, 28.0f }, Vector2{0,0}, 0.0f, WHITE);
-                }
-                Vector2 sgSz = MeasureTextEx(fontUIBold, LocText(STR_START_GAME_BTN), 20, 0.4f);
-                DrawTextEx(fontUIBold, LocText(STR_START_GAME_BTN), Vector2{ startBtnRec.x + 60.0f, startBtnRec.y + 16.0f }, 20, 0.4f, Color{ 238, 52, 132, 255 });
-
-                if ((hovStart && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_ENTER)) {
-                    if (gConnectedPlayers >= 2 && gHostReady && gClientReady) {
-                        currentScreen = SCREEN_GAMEPLAY;
-                    } else {
-                        editorMsg = LocText(STR_MIN_PLAYERS_ALERT);
-                        editorMsgTimer = 2.5f;
-                    }
-                }
-            }
-
-            // Alert banner if host clicks start before 2 players ready
-            if (editorMsgTimer > 0.0f && !editorMsg.empty()) {
-                float abW = 560.0f, abH = 38.0f;
-                DrawTrapezoid((scrW - abW) * 0.5f, scrH - 110.0f, abW, abH, 12.0f, Color{ 220, 38, 38, 235 });
-                Vector2 emSz = MeasureTextEx(fontUIBold, editorMsg.c_str(), 16, 0.3f);
-                DrawTextEx(fontUIBold, editorMsg.c_str(), Vector2{ (scrW - emSz.x) * 0.5f, scrH - 101.0f }, 16, 0.3f, WHITE);
-            }
-
-            // Bottom-Left [ESC] LEAVE
-            DrawTextEx(fontUIBold, LocText(STR_ESC_LEAVE), Vector2{ 25.0f, scrH - 95.0f }, 14, 0.3f, Color{ 220, 230, 245, 200 });
-            if (IsKeyPressed(KEY_ESCAPE)) {
-                LanShutdown();
-                currentScreen = SCREEN_MAIN_MENU;
-            }
         } else if (currentScreen == SCREEN_FIND_LOBBY) {
             ClearBackground(Color{ 18, 22, 34, 255 });
             if (texMenuOasisClean.id != 0) {
                 DrawTexturePro(texMenuOasisClean, Rectangle{ 0, 0, (float)texMenuOasisClean.width, (float)texMenuOasisClean.height },
                                Rectangle{ 0, 0, (float)GetScreenWidth(), (float)GetScreenHeight() }, Vector2{0,0}, 0.0f, WHITE);
             }
-            // Soft warm cartoon tint (Task 4 Parity - NO green military radar!)
-            DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{ 28, 24, 52, 120 });
+            DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{ 28, 24, 52, 140 });
 
-            // Top Header: Back Button & Title
-            Rectangle backRec = { 30.0f, 32.0f, 120.0f, 54.0f };
+            float scrW = (float)GetScreenWidth();
+            float scrH = (float)GetScreenHeight();
+
+            // Top Header: Back Button (v8.3.1 Mobile & PC Support)
+            Rectangle backRec = { 25.0f, 20.0f, 130.0f, 50.0f };
             bool hovBack = CheckCollisionPointRec(mousePos, backRec);
-            DrawSlantedRect(backRec.x, backRec.y, backRec.width, backRec.height, 14.0f, hovBack ? Color{ 255, 60, 135, 255 } : Color{ 255, 38, 118, 255 });
-            if (texIconArrow.id != 0) {
-                DrawTexturePro(texIconArrow, Rectangle{ 0, 0, -(float)texIconArrow.width, (float)texIconArrow.height },
-                               Rectangle{ 45.0f, backRec.y + 14.0f, 26.0f, 26.0f }, Vector2{0,0}, 0.0f, WHITE);
-            }
-            if ((hovBack && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_ESCAPE)) {
+            DrawSlantedRect(backRec.x, backRec.y, backRec.width, backRec.height, 12.0f, hovBack ? Color{ 255, 60, 135, 255 } : Color{ 255, 38, 118, 255 });
+            const char* backTxt = (gCurrentLanguage == LANG_AR) ? "< رجوع" : "< BACK";
+            Vector2 bkSz = MeasureTextEx(fontUIBold, backTxt, 18, 0.3f);
+            DrawTextEx(fontUIBold, backTxt, Vector2{ backRec.x + (backRec.width - bkSz.x) * 0.5f, backRec.y + 14.0f }, 18, 0.3f, WHITE);
+            if ((hovBack && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_BACK)) {
                 currentScreen = SCREEN_MAIN_MENU;
             }
 
             // Purple slanted banner title
-            DrawSlantedRect(175.0f, 32.0f, 720.0f, 54.0f, 12.0f, Color{ 138, 122, 245, 255 });
-            DrawTextEx(fontUIBold, LocText(STR_FIND_TITLE), Vector2{ 200.0f, 44.0f }, 24, 0.4f, WHITE);
+            DrawSlantedRect(175.0f, 20.0f, 720.0f, 50.0f, 12.0f, Color{ 138, 122, 245, 255 });
+            DrawTextEx(fontUIBold, LocText(STR_FIND_TITLE), Vector2{ 200.0f, 32.0f }, 24, 0.4f, WHITE);
 
             LanStartDiscoveryListener(7778);
             LanUpdateDiscoveryAndLobby(GetFrameTime());
 
+            float barW = 920.0f;
+            float barX = (scrW - barW) * 0.5f;
+
+            // Player Name Input Field (REQUIRED CONDITION - Plan v8.3.1)
+            float nameBarY = 82.0f;
+            DrawRectangleRounded(Rectangle{ barX, nameBarY, barW, 48.0f }, 0.15f, 4, Color{ 245, 247, 255, 255 });
+            DrawRectangleRoundedLinesEx(Rectangle{ barX, nameBarY, barW, 48.0f }, 0.15f, 4, 1.5f, Color{ 138, 122, 245, 200 });
+
+            const char* namePrompt = (gCurrentLanguage == LANG_AR) ? "اسمك (إلزامي):" : "Your Name (Required):";
+            DrawTextEx(fontUIBold, namePrompt, Vector2{ barX + 20.0f, nameBarY + 14.0f }, 17, 0.4f, Color{ 40, 50, 75, 255 });
+
+            Rectangle nameInRec = { barX + 240.0f, nameBarY + 6.0f, 320.0f, 36.0f };
+            static bool s_editNameActive = false;
+            if (CheckCollisionPointRec(mousePos, nameInRec) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                s_editNameActive = true;
+            }
+            if (s_editNameActive) {
+                int ch = GetCharPressed();
+                while (ch > 0) {
+                    size_t len = strlen(gLocalPlayerName);
+                    if (len < 22 && ((ch >= 32 && ch <= 126) || (ch >= 0x0600 && ch <= 0x06FF))) {
+                        gLocalPlayerName[len] = (char)ch;
+                        gLocalPlayerName[len + 1] = '\0';
+                    }
+                    ch = GetCharPressed();
+                }
+                if (IsKeyPressed(KEY_BACKSPACE)) {
+                    size_t len = strlen(gLocalPlayerName);
+                    if (len > 0) gLocalPlayerName[len - 1] = '\0';
+                }
+                if (IsKeyPressed(KEY_ENTER) || (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mousePos, nameInRec))) {
+                    s_editNameActive = false;
+                }
+            }
+            DrawRectangleRounded(nameInRec, 0.12f, 4, s_editNameActive ? WHITE : Color{ 230, 238, 250, 255 });
+            DrawRectangleRoundedLinesEx(nameInRec, 0.12f, 4, 1.5f, s_editNameActive ? Color{ 34, 197, 94, 255 } : Color{ 160, 175, 200, 200 });
+            const char* dispName = (strlen(gLocalPlayerName) > 0) ? gLocalPlayerName : "Enter name...";
+            DrawTextEx(fontUIBold, dispName, Vector2{ nameInRec.x + 12.0f, nameInRec.y + 8.0f }, 18, 0.4f,
+                       (strlen(gLocalPlayerName) > 0) ? Color{ 25, 35, 60, 255 } : Color{ 140, 155, 175, 255 });
+
+            // Name status indicator
+            bool nameValid = (strlen(gLocalPlayerName) > 0);
+            if (!nameValid) {
+                const char* warnTxt = (gCurrentLanguage == LANG_AR) ? "! يرجى كتابة اسمك أولاً !" : "! Please enter your name first !";
+                DrawTextEx(fontUIBold, warnTxt, Vector2{ barX + 580.0f, nameBarY + 14.0f }, 16, 0.4f, Color{ 239, 68, 68, 255 });
+            } else {
+                DrawCircle((int)(barX + 585.0f), (int)(nameBarY + 24.0f), 8.0f, Color{ 34, 197, 94, 255 });
+                DrawTextEx(fontUI, "Ready", Vector2{ barX + 600.0f, nameBarY + 14.0f }, 15, 0.3f, Color{ 34, 197, 94, 255 });
+            }
+
             // Quick Join Code Bar
-            float barW = 920.0f, barH = 58.0f;
-            float barX = ((float)GetScreenWidth() - barW) * 0.5f;
-            float barY = 110.0f;
+            float barY = 140.0f;
+            float barH = 54.0f;
             DrawRectangleRounded(Rectangle{ barX, barY, barW, barH }, 0.12f, 4, Color{ 252, 252, 255, 255 });
-            DrawTextEx(fontUIBold, LocText(STR_ROOM_CODE_LBL), Vector2{ barX + 24.0f, barY + 18.0f }, 18, 0.4f, Color{ 40, 50, 75, 255 });
+            DrawTextEx(fontUIBold, LocText(STR_ROOM_CODE_LBL), Vector2{ barX + 24.0f, barY + 17.0f }, 17, 0.4f, Color{ 40, 50, 75, 255 });
 
-            Rectangle codeInRec = { barX + 160.0f, barY + 8.0f, 180.0f, 42.0f };
-            DrawRectangleRounded(codeInRec, 0.1f, 4, Color{ 235, 240, 250, 255 });
-            DrawTextEx(fontUIBold, "8HF78N", Vector2{ codeInRec.x + 38.0f, codeInRec.y + 10.0f }, 20, 0.5f, Color{ 238, 52, 132, 255 });
+            static char s_manualRoomCode[16] = "";
+            static bool s_editCodeActive = false;
+            Rectangle codeInRec = { barX + 160.0f, barY + 7.0f, 200.0f, 40.0f };
+            if (CheckCollisionPointRec(mousePos, codeInRec) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                s_editCodeActive = true;
+            }
+            if (s_editCodeActive) {
+                int ch = GetCharPressed();
+                while (ch > 0) {
+                    size_t len = strlen(s_manualRoomCode);
+                    if (len < 6 && ((ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z'))) {
+                        s_manualRoomCode[len] = (char)toupper(ch);
+                        s_manualRoomCode[len + 1] = '\0';
+                    }
+                    ch = GetCharPressed();
+                }
+                if (IsKeyPressed(KEY_BACKSPACE)) {
+                    size_t len = strlen(s_manualRoomCode);
+                    if (len > 0) s_manualRoomCode[len - 1] = '\0';
+                }
+                if (IsKeyPressed(KEY_ENTER) || (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mousePos, codeInRec))) {
+                    s_editCodeActive = false;
+                }
+            }
+            DrawRectangleRounded(codeInRec, 0.1f, 4, s_editCodeActive ? WHITE : Color{ 235, 240, 250, 255 });
+            DrawRectangleRoundedLinesEx(codeInRec, 0.1f, 4, 1.5f, s_editCodeActive ? Color{ 34, 197, 94, 255 } : Color{ 138, 122, 245, 180 });
+            const char* codeDisp = (strlen(s_manualRoomCode) > 0) ? s_manualRoomCode : "Code (e.g. A80119)";
+            DrawTextEx(fontUIBold, codeDisp, Vector2{ codeInRec.x + 12.0f, codeInRec.y + 10.0f }, 18, 0.4f,
+                       (strlen(s_manualRoomCode) > 0) ? Color{ 238, 52, 132, 255 } : Color{ 140, 155, 175, 255 });
 
-            Rectangle btnJoinCode = { barX + barW - 220.0f, barY + 7.0f, 200.0f, 44.0f };
+            Rectangle btnJoinCode = { barX + barW - 220.0f, barY + 7.0f, 200.0f, 40.0f };
             bool hovJCode = CheckCollisionPointRec(mousePos, btnJoinCode);
-            DrawSlantedRect(btnJoinCode.x, btnJoinCode.y, btnJoinCode.width, btnJoinCode.height, 10.0f, hovJCode ? Color{ 255, 60, 135, 255 } : Color{ 255, 38, 118, 255 });
+            DrawSlantedRect(btnJoinCode.x, btnJoinCode.y, btnJoinCode.width, btnJoinCode.height, 10.0f,
+                           (!nameValid) ? Color{ 140, 150, 165, 220 } : (hovJCode ? Color{ 255, 60, 135, 255 } : Color{ 255, 38, 118, 255 }));
             Vector2 jcSz = MeasureTextEx(fontUIBold, LocText(STR_JOIN_BY_CODE), 16, 0.4f);
-            DrawTextEx(fontUIBold, LocText(STR_JOIN_BY_CODE), Vector2{ btnJoinCode.x + (btnJoinCode.width - jcSz.x) * 0.5f, btnJoinCode.y + 12.0f }, 16, 0.4f, WHITE);
-            if (hovJCode && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                LanJoinRoom("127.0.0.1", 7777, "8HF78N");
+            DrawTextEx(fontUIBold, LocText(STR_JOIN_BY_CODE), Vector2{ btnJoinCode.x + (btnJoinCode.width - jcSz.x) * 0.5f, btnJoinCode.y + 11.0f }, 16, 0.4f, WHITE);
+            if (hovJCode && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && nameValid) {
+                if (strlen(s_manualRoomCode) == 6) {
+                    LanJoinRoom(s_manualRoomCode, 7777, s_manualRoomCode);
+                } else {
+                    LanJoinRoom("127.0.0.1", 7777, nullptr);
+                }
                 currentScreen = SCREEN_LAN_LOBBY;
             }
 
             // Discovered Rooms List (Wide Horizontal Cards)
             float listX = barX;
-            float listY = 190.0f;
+            float listY = 205.0f;
             float cardW = barW;
             float cardH = 76.0f;
-            float cardGap = 14.0f;
+            float cardGap = 12.0f;
 
             auto& rooms = LanGetDiscoveredRooms();
 
             if (rooms.empty()) {
-                Rectangle emptyCard = { listX, listY, cardW, 200.0f };
+                Rectangle emptyCard = { listX, listY, cardW, 190.0f };
                 DrawRectangleRounded(emptyCard, 0.08f, 4, Color{ 252, 252, 255, 245 });
                 DrawRectangleRoundedLinesEx(emptyCard, 0.08f, 4, 2.0f, Color{ 138, 122, 245, 180 });
 
                 if (texHipo.id != 0) {
-                    float hSz = 72.0f;
+                    float hSz = 68.0f;
                     DrawTexturePro(texHipo, Rectangle{ 0, 0, (float)texHipo.width, (float)texHipo.height },
-                                   Rectangle{ listX + 45.0f, listY + 35.0f, hSz, hSz }, Vector2{0,0}, sinf(runTime * 3.0f) * 6.0f, WHITE);
+                                   Rectangle{ listX + 45.0f, listY + 30.0f, hSz, hSz }, Vector2{0,0}, sinf(runTime * 3.0f) * 6.0f, WHITE);
                 }
 
-                DrawTextEx(fontUIBold, LocText(STR_WAITING_HOST_MSG), Vector2{ listX + 140.0f, listY + 45.0f }, 18, 0.4f, Color{ 40, 50, 75, 255 });
-                DrawTextEx(fontUI, "Create a room on another PC/phone on this Wi-Fi, or test with Local Host below.", Vector2{ listX + 140.0f, listY + 76.0f }, 14, 0.3f, Color{ 100, 115, 140, 255 });
+                DrawTextEx(fontUIBold, LocText(STR_WAITING_HOST_MSG), Vector2{ listX + 135.0f, listY + 35.0f }, 18, 0.4f, Color{ 40, 50, 75, 255 });
+                const char* tipTxt = (gCurrentLanguage == LANG_AR) ? "افتح غرفة على جهاز آخر على نفس الواي فاي، وسيتم اكتشافها تلقائياً هنا." : "Open a room on another PC/phone on this Wi-Fi, and it will appear here automatically.";
+                DrawTextEx(fontUI, tipTxt, Vector2{ listX + 135.0f, listY + 68.0f }, 14, 0.3f, Color{ 100, 115, 140, 255 });
 
-                Rectangle btnCreateNow = { listX + 140.0f, listY + 115.0f, 240.0f, 50.0f };
+                Rectangle btnCreateNow = { listX + 135.0f, listY + 110.0f, 250.0f, 48.0f };
                 bool hovCNow = CheckCollisionPointRec(mousePos, btnCreateNow);
-                DrawSlantedRect(btnCreateNow.x, btnCreateNow.y, btnCreateNow.width, btnCreateNow.height, 10.0f, hovCNow ? Color{ 255, 60, 135, 255 } : Color{ 255, 38, 118, 255 });
+                DrawSlantedRect(btnCreateNow.x, btnCreateNow.y, btnCreateNow.width, btnCreateNow.height, 10.0f,
+                               (!nameValid) ? Color{ 140, 150, 165, 220 } : (hovCNow ? Color{ 255, 60, 135, 255 } : Color{ 255, 38, 118, 255 }));
                 Vector2 cnSz = MeasureTextEx(fontUIBold, LocText(STR_CREATE_NOW_BTN), 16, 0.4f);
-                DrawTextEx(fontUIBold, LocText(STR_CREATE_NOW_BTN), Vector2{ btnCreateNow.x + (btnCreateNow.width - cnSz.x) * 0.5f, btnCreateNow.y + 15.0f }, 16, 0.4f, WHITE);
-                if (hovCNow && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                    LanInitHost(7777, "8HF78N");
+                DrawTextEx(fontUIBold, LocText(STR_CREATE_NOW_BTN), Vector2{ btnCreateNow.x + (btnCreateNow.width - cnSz.x) * 0.5f, btnCreateNow.y + 14.0f }, 16, 0.4f, WHITE);
+                if (hovCNow && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && nameValid) {
+                    LanInitHost(7777, nullptr);
                     currentScreen = SCREEN_LAN_LOBBY;
                 }
 
-                Rectangle joinLocalBtn = { listX + 410.0f, listY + 115.0f, 240.0f, 50.0f };
+                Rectangle joinLocalBtn = { listX + 415.0f, listY + 110.0f, 250.0f, 48.0f };
                 bool hovJLocal = CheckCollisionPointRec(mousePos, joinLocalBtn);
-                DrawSlantedRect(joinLocalBtn.x, joinLocalBtn.y, joinLocalBtn.width, joinLocalBtn.height, 10.0f, hovJLocal ? Color{ 34, 197, 94, 255 } : Color{ 22, 163, 74, 255 });
-                DrawTextEx(fontUIBold, "[ JOIN LOCAL HOST ]", Vector2{ joinLocalBtn.x + 30.0f, joinLocalBtn.y + 16.0f }, 15, 0.4f, WHITE);
-                if (hovJLocal && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                    LanJoinRoom("127.0.0.1", 7777, "8HF78N");
+                DrawSlantedRect(joinLocalBtn.x, joinLocalBtn.y, joinLocalBtn.width, joinLocalBtn.height, 10.0f,
+                               (!nameValid) ? Color{ 140, 150, 165, 220 } : (hovJLocal ? Color{ 34, 197, 94, 255 } : Color{ 22, 163, 74, 255 }));
+                const char* locJoinTxt = (gCurrentLanguage == LANG_AR) ? "انضمام لمضيف محلي" : "JOIN LOCAL HOST";
+                Vector2 ljSz = MeasureTextEx(fontUIBold, locJoinTxt, 16, 0.3f);
+                DrawTextEx(fontUIBold, locJoinTxt, Vector2{ joinLocalBtn.x + (joinLocalBtn.width - ljSz.x) * 0.5f, joinLocalBtn.y + 14.0f }, 16, 0.3f, WHITE);
+                if (hovJLocal && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && nameValid) {
+                    LanJoinRoom("127.0.0.1", 7777, nullptr);
                     currentScreen = SCREEN_LAN_LOBBY;
                 }
             } else {
@@ -5649,8 +6212,9 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                                        Rectangle{ listX + 16.0f, ry + 10.0f, 56.0f, 56.0f }, Vector2{0,0}, 0.0f, WHITE);
                     }
 
-                    DrawTextEx(fontUIBold, rooms[r].roomName.c_str(), Vector2{ listX + 88.0f, ry + 16.0f }, 19, 0.4f, Color{ 30, 40, 65, 255 });
-                    std::string subInfo = "Host IP: " + rooms[r].hostIp + ":" + std::to_string(rooms[r].hostPort) + "  |  Code: " + rooms[r].roomCode;
+                    std::string rTitle = rooms[r].hostName + " (" + rooms[r].roomCode + ")";
+                    DrawTextEx(fontUIBold, rTitle.c_str(), Vector2{ listX + 88.0f, ry + 16.0f }, 19, 0.4f, Color{ 30, 40, 65, 255 });
+                    std::string subInfo = "IP: " + rooms[r].hostIp + ":" + std::to_string(rooms[r].hostPort) + "  |  Code: " + rooms[r].roomCode;
                     DrawTextEx(fontUI, subInfo.c_str(), Vector2{ listX + 88.0f, ry + 44.0f }, 13, 0.3f, Color{ 90, 105, 130, 255 });
 
                     // Player Count Badge
@@ -5659,11 +6223,12 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
                     Rectangle btnJoin = { listX + cardW - 170.0f, ry + 12.0f, 150.0f, 52.0f };
                     bool hovJoin = CheckCollisionPointRec(mousePos, btnJoin);
-                    DrawSlantedRect(btnJoin.x, btnJoin.y, btnJoin.width, btnJoin.height, 10.0f, hovJoin ? Color{ 40, 215, 80, 255 } : Color{ 34, 197, 94, 255 });
+                    DrawSlantedRect(btnJoin.x, btnJoin.y, btnJoin.width, btnJoin.height, 10.0f,
+                                   (!nameValid) ? Color{ 140, 150, 165, 220 } : (hovJoin ? Color{ 40, 215, 80, 255 } : Color{ 34, 197, 94, 255 }));
                     Vector2 jSz = MeasureTextEx(fontUIBold, LocText(STR_JOIN_ROOM_BTN), 18, 0.4f);
                     DrawTextEx(fontUIBold, LocText(STR_JOIN_ROOM_BTN), Vector2{ btnJoin.x + (btnJoin.width - jSz.x) * 0.5f, btnJoin.y + 16.0f }, 18, 0.4f, WHITE);
 
-                    if ((hovJoin || hovCard) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                    if ((hovJoin || hovCard) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && nameValid) {
                         LanJoinRoom(rooms[r].hostIp.c_str(), rooms[r].hostPort, rooms[r].roomCode.c_str());
                         currentScreen = SCREEN_LAN_LOBBY;
                     }
@@ -5674,13 +6239,13 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             float fBotY = (float)GetScreenHeight() - 52.0f;
             Rectangle btnCreateRec = { listX, fBotY, 240.0f, 40.0f };
             bool hovCreate = CheckCollisionPointRec(mousePos, btnCreateRec);
-            DrawSlantedRect(btnCreateRec.x, btnCreateRec.y, btnCreateRec.width, btnCreateRec.height, 10.0f, hovCreate ? Color{ 245, 158, 11, 255 } : Color{ 217, 119, 6, 255 });
+            DrawSlantedRect(btnCreateRec.x, btnCreateRec.y, btnCreateRec.width, btnCreateRec.height, 10.0f,
+                           (!nameValid) ? Color{ 140, 150, 165, 220 } : (hovCreate ? Color{ 245, 158, 11, 255 } : Color{ 217, 119, 6, 255 }));
             DrawTextEx(fontUIBold, LocText(STR_CREATE_NOW_BTN), Vector2{ btnCreateRec.x + 22.0f, btnCreateRec.y + 11.0f }, 14, 0.4f, WHITE);
-            if (hovCreate && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                LanInitHost(7777, "8HF78N");
+            if (hovCreate && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && nameValid) {
+                LanInitHost(7777, nullptr);
                 currentScreen = SCREEN_LAN_LOBBY;
             }
-
         } else if (currentScreen == SCREEN_SETTINGS) {
             ClearBackground(Color{ 18, 22, 34, 255 });
 
@@ -6060,11 +6625,13 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
     UnloadTexture(texFinish);
     UnloadTexture(texEsc);
 
-#if !defined(PLATFORM_ANDROID) && !defined(__ANDROID__)
     for (int s = 0; s < ENV_SECTOR_COUNT; s++) {
-        UnloadModel(envSectors[s]);
+        if (envSectors[s].meshCount > 0) UnloadModel(envSectors[s]);
     }
-#endif
+    for (auto& vf : menuVideoFrames) {
+        if (vf.id != 0) UnloadTexture(vf);
+    }
+    UnloadTexture(texWaterCyan);
     UnloadModel(wallModel);
     UnloadModel(waterModel);
     UnloadModel(wallColModel);

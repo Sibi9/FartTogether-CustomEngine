@@ -7,7 +7,7 @@
   "cameraShake": true,
   "maxCamDist": 30.0,
   "showFPS": true,
-  "deviceMode": 0,
+  "deviceMode": 1,
   "mouseSens": 1.00,
   "invertMouseY": false,
   "touchBtnScale": 1.00,

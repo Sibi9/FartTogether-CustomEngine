@@ -50,7 +50,7 @@ old_lan_hdr = """#define WIN32_LEAN_AND_MEAN
 
 #pragma comment(lib, "ws2_32.lib")"""
 
-lan_mod = lan_text.replace(old_lan_hdr, compat_lan + "\n#include <stdio.h>\n#include <string.h>\n#include \"LanNetwork.h\"\n")
+lan_mod = lan_text
 lan_mod = lan_mod.replace("WSADATA wsa;\n        if (WSAStartup(MAKEWORD(2, 2), &wsa) == 0) {\n            gWsaReady = true;\n        }",
 """#ifdef _WIN32
         WSADATA wsa;
@@ -115,23 +115,6 @@ new_hud = """#if defined(PLATFORM_ANDROID) || defined(__ANDROID__)
         bool isMobileTouchHUD = (gSettings.deviceMode == 2) || (gSettings.deviceMode == 0 && (GetTouchPointCount() > 0));
 #endif"""
 engine_mod = engine_mod.replace(old_hud, new_hud)
-
-# Use default shader on Android if needed for 100% GLES compatibility
-old_shaders = """    Shader shaderLighting = LoadShaderFromMemory(VS_LIGHTING, FS_LIGHTING);"""
-new_shaders = """#if defined(PLATFORM_ANDROID) || defined(__ANDROID__)
-    Shader shaderLighting = GetShaderDefault_Compat();
-#else
-    Shader shaderLighting = LoadShaderFromMemory(VS_LIGHTING, FS_LIGHTING);
-#endif"""
-engine_mod = engine_mod.replace(old_shaders, new_shaders)
-
-old_water = """    Shader shaderWater = LoadShaderFromMemory(VS_WATER, FS_WATER);"""
-new_water = """#if defined(PLATFORM_ANDROID) || defined(__ANDROID__)
-    Shader shaderWater = GetShaderDefault_Compat();
-#else
-    Shader shaderWater = LoadShaderFromMemory(VS_WATER, FS_WATER);
-#endif"""
-engine_mod = engine_mod.replace(old_water, new_water)
 
 abis = [
     ("arm64-v8a", "aarch64-linux-android24-clang.cmd", "aarch64-linux-android24-clang++.cmd"),
@@ -210,16 +193,14 @@ for abi_name, cc_name, cxx_name in abis:
 
     # 2. Compile LanNetwork
     lan_obj = abi_dir / "LanNetwork.o"
+    if lan_obj.exists(): lan_obj.unlink()
     objs.append(str(lan_obj))
-    if not lan_obj.exists():
-        print(f"[{abi_name}] Compiling LanNetwork.cpp...")
-        cmd = [str(clang_cpp), "-std=c++17"] + cflags_common + ["-c", str(build_root / "LanNetwork.cpp"), "-o", str(lan_obj)]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode != 0:
-            print(f"Error compiling LanNetwork:", res.stderr)
-            exit(1)
-    else:
-        print(f"[{abi_name}] LanNetwork.o already exists.")
+    print(f"[{abi_name}] Compiling LanNetwork.cpp...")
+    cmd = [str(clang_cpp), "-std=c++17"] + cflags_common + ["-c", str(build_root / "LanNetwork.cpp"), "-o", str(lan_obj)]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        print(f"Error compiling LanNetwork:", res.stderr)
+        exit(1)
             
     # 3. Compile GameEngine (remove previous failed obj)
     engine_obj = abi_dir / "GameEngine.o"
