@@ -40,6 +40,12 @@ static bool     gLanMatchStart    = false;
 static sockaddr_in gPeerAddr      = { 0 };
 static uint32_t gLastRecvInputSeq = 0;
 static uint32_t gLastRecvStateSeq = 0;
+
+static inline bool IsPacketSeqNewer(uint32_t incoming, uint32_t last) {
+    if (last == 0) return true;
+    return (int32_t)(incoming - last) > 0;
+}
+
 static float    gBeaconTimer      = 0.0f;
 static float    gProbeTimer       = 0.0f;
 static char     gCurrentRoomCode[8] = "A80119";

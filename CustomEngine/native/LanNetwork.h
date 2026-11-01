@@ -139,6 +139,7 @@ bool LanClientPollState(LanStatePacket& outState);
 bool LanIsMatchStarted();
 void LanSetMatchStarted(bool started);
 
+// Player Names & Lobby Sync
 extern char gLocalPlayerName[32];
 extern char gRemotePlayerName[32];
 void LanSetLocalPlayerName(const char* name);
