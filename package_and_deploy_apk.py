@@ -7,7 +7,7 @@ import time
 from PIL import Image
 
 def build_and_deploy():
-    print("=== Packaging Universal Android APK: FartTogether_v8.4.0.apk ===")
+    print("=== Packaging Universal Android APK: FartTogether_v8.4.1.apk ===")
     
     desktop_dir = pathlib.Path(os.environ.get("USERPROFILE", ".")) / "Desktop"
     if not desktop_dir.exists():
@@ -24,8 +24,8 @@ def build_and_deploy():
     manifest_xml = '''<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.gamesmrkt.farttogether"
-    android:versionCode="840"
-    android:versionName="8.4.0">
+    android:versionCode="841"
+    android:versionName="8.4.1">
 
     <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="34" />
     <uses-feature android:glEsVersion="0x00020000" android:required="true" />
@@ -162,7 +162,7 @@ def build_and_deploy():
     ]
     subprocess.run(cmd_key, check=True)
 
-    final_apk = desktop_dir / "FartTogether_v8.4.0.apk"
+    final_apk = desktop_dir / "FartTogether_v8.4.1.apk"
     cmd_sign = [
         "cmd.exe", "/c", str(apksigner), "sign",
         "--ks", str(keystore_path),
@@ -181,7 +181,7 @@ def build_and_deploy():
     print(f"File size: {final_apk.stat().st_size:,} bytes")
 
     # Copy to project root
-    shutil.copy2(final_apk, "FartTogether_v8.4.0.apk")
+    shutil.copy2(final_apk, "FartTogether_v8.4.1.apk")
 
     # Step 7: Test install and run on connected phone
     if adb.exists():

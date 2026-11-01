@@ -37,7 +37,7 @@
 #include "Codepoints.h"
 
 // Rule: Game version must be incremented on every update!
-static const char* GAME_VERSION_TAG = "v8.4.0";
+static const char* GAME_VERSION_TAG = "v8.4.1";
 static int s_camTouchId = -1;
 GameLanguage gCurrentLanguage = LANG_AR; // Default Arabic as requested
 static bool gShowInviteModal = false;
@@ -2917,8 +2917,8 @@ int main(int argc, char** argv) {
     // Authentic Rim Seating Angles (in radians)
 
     // Left Pirate starts at rear-left (-152 deg), Right Pirate starts at rear-right (+152 deg)
-    float p1RimAngle = -2.65f;
-    float p2RimAngle =  2.65f;
+    float p1RimAngle =  2.45f;
+    float p2RimAngle = -2.45f;
 
     float raceTimer = 0.0f;
     int totalDeaths = 0;
@@ -3188,10 +3188,16 @@ int main(int argc, char** argv) {
 
         }
 
-        // Update Kinetic Obstacles (Runs both in gameplay and in editor when natural motion is toggled ON!)
-        if (!editorMode || editorAnimateObstacles) {
+        // Update Kinetic Obstacles (Synchronized strictly to authoritative raceTimer in gameplay!)
+        if (editorMode) {
+            if (editorAnimateObstacles) {
+                for (auto& ent : levelEntities) {
+                    ent.animTimer += dt * ent.animSpeed;
+                }
+            }
+        } else {
             for (auto& ent : levelEntities) {
-                ent.animTimer += dt * ent.animSpeed;
+                ent.animTimer = raceTimer * ent.animSpeed;
             }
         }
 
@@ -3319,31 +3325,31 @@ int main(int argc, char** argv) {
             }
             angle += moveInput * 2.50f * dtStep;
             if (totalPlayers == 2) {
-                // 2 Players: Half boat each (P1 left [-3.10f, -0.05f], P2 right [0.05f, 3.10f])
+                // 2 Players: Half boat each (P1 left [0.05f, 3.10f], P2 right [-3.10f, -0.05f])
                 if (playerIndex == 0) {
-                    angle = Clamp(angle, -3.10f, -0.05f);
-                } else {
                     angle = Clamp(angle,  0.05f,  3.10f);
+                } else {
+                    angle = Clamp(angle, -3.10f, -0.05f);
                 }
             } else if (totalPlayers == 3) {
                 // 3 Players: Third of boat each
                 if (playerIndex == 0) {
-                    angle = Clamp(angle, -3.10f, -1.08f);
+                    angle = Clamp(angle,  1.08f,  3.10f);
                 } else if (playerIndex == 1) {
                     angle = Clamp(angle, -1.02f,  1.02f);
                 } else {
-                    angle = Clamp(angle,  1.08f,  3.10f);
+                    angle = Clamp(angle, -3.10f, -1.08f);
                 }
             } else if (totalPlayers >= 4) {
                 // 4 Players: Quarter of boat each
                 if (playerIndex == 0) {
-                    angle = Clamp(angle, -3.10f, -1.60f);
-                } else if (playerIndex == 1) {
-                    angle = Clamp(angle, -1.54f, -0.05f);
-                } else if (playerIndex == 2) {
-                    angle = Clamp(angle,  0.05f,  1.54f);
-                } else {
                     angle = Clamp(angle,  1.60f,  3.10f);
+                } else if (playerIndex == 1) {
+                    angle = Clamp(angle,  0.05f,  1.54f);
+                } else if (playerIndex == 2) {
+                    angle = Clamp(angle, -1.54f, -0.05f);
+                } else {
+                    angle = Clamp(angle, -3.10f, -1.60f);
                 }
             }
         };
@@ -3445,12 +3451,12 @@ int main(int argc, char** argv) {
             if (LanClientPollState(sp)) {
                 Vector3 authPos = Vector3{ sp.raftX, sp.raftY, sp.raftZ };
                 float posErr = Vector3Distance(raft.position, authPos);
-                if (posErr > 4.5f) {
+                if (posErr > 3.0f) {
                     raft.position = authPos;
                 } else {
-                    raft.position = Vector3Lerp(raft.position, authPos, 0.38f);
+                    raft.position = Vector3Lerp(raft.position, authPos, 0.65f);
                 }
-                raft.velocity = Vector3Lerp(raft.velocity, Vector3{ sp.velX, sp.velY, sp.velZ }, 0.55f);
+                raft.velocity = Vector3Lerp(raft.velocity, Vector3{ sp.velX, sp.velY, sp.velZ }, 0.75f);
 
                 // Shortest-arc angular reconciliation
                 float rotDiff = sp.rotY - raft.rotationY;
@@ -3922,7 +3928,9 @@ int main(int argc, char** argv) {
                 } else if (ent.isLethal != 0) {
                     // Lethal Hazard: Explodes boat ONLY on true contact with obstacle mesh triangles
                     if (!raft.isDestroyed && raft.invulnerableTimer <= 0.0f) {
-                        TriggerBoatDeath(DEATH_OBSTACLE);
+                        if (LanGetRole() != LAN_CLIENT) {
+                            TriggerBoatDeath(DEATH_OBSTACLE);
+                        }
                     }
                 } else {
                     // Non-Lethal Hazard (e.g. #77 OBS_F18_SPIKE rebound pillar & custom bounce pads):
@@ -5883,7 +5891,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                     if (m == 0) { // PLAY SOLO (Single Pirate Mode, 360 degree rotation)
                         LanShutdown();
                         singlePirateMode = true;
-                        p1RimAngle = 3.14159f;
+                        p1RimAngle = -3.14159f;
                         raft.position = Vector3{ 15.55f, 0.58f, 90.80f };
                         raft.velocity = Vector3{ 0.0f, 0.0f, 0.0f };
                         raft.rotationY = 3.14159f;
@@ -5891,6 +5899,10 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                         raft.currentCP = 0;
                         gasP1.gasEnergy = GAS_MAX;
                         gasP1.gasDepleted = false;
+                        raceTimer = 0.0f;
+                        for (auto& ent : levelEntities) {
+                            ent.animTimer = 0.0f;
+                        }
                         currentScreen = SCREEN_GAMEPLAY;
                     } else if (m == 1) { // CREATE LOBBY
                         LanInitHost(7777, nullptr);
@@ -6174,8 +6186,8 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 LanSetMatchStarted(true);
                 LanSendStartSignal();
                 singlePirateMode = false;
-                p1RimAngle = 3.14159f;
-                p2RimAngle = 0.0f;
+                p1RimAngle =  2.45f;
+                p2RimAngle = -2.45f;
                 raft.position = Vector3{ 15.55f, 0.58f, 90.80f };
                 raft.velocity = Vector3Zero();
                 raft.rotationY = 3.14159f;
@@ -6183,11 +6195,15 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 raft.currentCP = 0;
                 gasP1.gasEnergy = GAS_MAX;
                 gasP2.gasEnergy = GAS_MAX;
+                raceTimer = 0.0f;
+                for (auto& ent : levelEntities) {
+                    ent.animTimer = 0.0f;
+                }
                 currentScreen = SCREEN_GAMEPLAY;
             } else if (LanGetRole() == LAN_CLIENT && LanIsMatchStarted()) {
                 singlePirateMode = false;
-                p1RimAngle = 3.14159f;
-                p2RimAngle = 0.0f;
+                p1RimAngle =  2.45f;
+                p2RimAngle = -2.45f;
                 raft.position = Vector3{ 15.55f, 0.58f, 90.80f };
                 raft.velocity = Vector3Zero();
                 raft.rotationY = 3.14159f;
@@ -6195,6 +6211,10 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 raft.currentCP = 0;
                 gasP1.gasEnergy = GAS_MAX;
                 gasP2.gasEnergy = GAS_MAX;
+                raceTimer = 0.0f;
+                for (auto& ent : levelEntities) {
+                    ent.animTimer = 0.0f;
+                }
                 currentScreen = SCREEN_GAMEPLAY;
             }
 
