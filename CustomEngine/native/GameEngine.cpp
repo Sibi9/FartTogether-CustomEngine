@@ -37,8 +37,9 @@
 #include "Codepoints.h"
 
 // Rule: Game version must be incremented on every update!
-static const char* GAME_VERSION_TAG = "v8.4.1";
+static const char* GAME_VERSION_TAG = "v8.4.2";
 static int s_camTouchId = -1;
+static bool s_clientSuicideRequested = false;
 GameLanguage gCurrentLanguage = LANG_AR; // Default Arabic as requested
 static bool gShowInviteModal = false;
 
@@ -2665,12 +2666,10 @@ int main(int argc, char** argv) {
         char fName[128];
         snprintf(fName, sizeof(fName), "extracted_assets/textures/menu_frames/frame_%03d.png", f);
         std::string rPath = ResolveAsset(fName);
-        if (FileExists(rPath.c_str())) {
-            Texture2D ft = LoadTexture(rPath.c_str());
-            if (ft.id != 0) {
-                SetTextureFilter(ft, TEXTURE_FILTER_BILINEAR);
-                menuVideoFrames.push_back(ft);
-            }
+        Texture2D ft = LoadTexture(rPath.c_str());
+        if (ft.id != 0) {
+            SetTextureFilter(ft, TEXTURE_FILTER_BILINEAR);
+            menuVideoFrames.push_back(ft);
         }
     }
 
@@ -3111,17 +3110,7 @@ int main(int argc, char** argv) {
 
         Vector2 mousePos = GetMousePosition();
 
-        // 1. Mouse Drag Window
-
-        if (mousePos.y < 38 && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-
-            Vector2 delta = GetMouseDelta();
-
-            Vector2 winPos = GetWindowPosition();
-
-            SetWindowPosition((int)(winPos.x + delta.x), (int)(winPos.y + delta.y));
-
-        }
+        // Top window dragging disabled in gameplay to avoid conflict with progress bar and stopwatch
 
         if (CheckCollisionPointRec(mousePos, btnCloseRec) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) break;
 
@@ -3431,7 +3420,10 @@ int main(int argc, char** argv) {
                 }
             }
 
-            if (IsKeyPressed(KEY_R)) localClientSuicideSeq++;
+            if (IsKeyPressed(KEY_R) || s_clientSuicideRequested) {
+                localClientSuicideSeq++;
+                s_clientSuicideRequested = false;
+            }
 
             // Send Authoritative Client Input Packet (with Monotonic Event Counters!) to Host
             LanInputPacket inPkt{};
@@ -5111,7 +5103,11 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
             if ((hoverSuicide && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_R)) {
                 if (!editorMode && !raft.isDestroyed) {
-                    TriggerBoatDeath(DEATH_SUICIDE);
+                    if (LanGetRole() == LAN_CLIENT) {
+                        s_clientSuicideRequested = true;
+                    } else {
+                        TriggerBoatDeath(DEATH_SUICIDE);
+                    }
                 }
             }
         }
@@ -6810,15 +6806,12 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
     UnloadTexture(texCaustic);
     UnloadTexture(texFoam1);
     UnloadTexture(texFoam2);
-    UnloadTexture(texPalette);
     UnloadTexture(texPaletteFlipped);
     UnloadTexture(texBgrDefault);
     UnloadTexture(texBgrTree);
     UnloadTexture(texSkyFront);
     UnloadTexture(texRockDark);
-    UnloadTexture(texGradientPalette);
     UnloadTexture(texRaftFoam);
-    for (int p = 0; p < 4; p++) UnloadTexture(texFart[p]);
     UnloadTexture(texHipo);
     UnloadTexture(texClock);
     UnloadTexture(texCrashed);
