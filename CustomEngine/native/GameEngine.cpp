@@ -3050,8 +3050,8 @@ int main(int argc, char** argv) {
         raft.lastDeathCause = cause;
 
         camCtrl.shakeTrauma = 1.0f; // maximum trauma shake
-        gCartoonFX.dizzyStarsTimer = 2.0f;
-        SpawnComicPopup(raft.position, (const char*)u8"بووووم!!", "KABOOM!!", Color{ 239, 68, 68, 255 }, Color{ 250, 232, 82, 255 }, 1.45f);
+        gCartoonFX.dizzyStarsTimer = 0.0f; // User request: No stars when dying
+        // User request: No words/comic popups when dying
 
         // Eject Pirates in comedic ragdoll trajectories
 
@@ -4009,10 +4009,9 @@ int main(int argc, char** argv) {
                     raft.invulnerableTimer = 0.50f; // Temporary hazard-grace timer on bounce!
                     camCtrl.shakeTrauma = fmaxf(camCtrl.shakeTrauma, Clamp(impactSpd / 12.0f, 0.25f, 0.55f));
                     TriggerBoatCartoonSquash(0.32f, 0.65f);
-                    gCartoonFX.dizzyStarsTimer = 1.8f;
+                    gCartoonFX.dizzyStarsTimer = 0.0f;
                     SetSoundPitch(sndBounce, 0.95f + ((float)(rand() % 35) / 100.0f));
                     PlaySound(sndBounce);
-                    SpawnComicPopup(raft.position, (const char*)u8"نطّة بهلوانية!", "BOING!!", Color{ 244, 114, 182, 255 }, Color{ 131, 24, 67, 255 }, 1.20f);
                 }
             }
         }
@@ -5017,7 +5016,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
         }
 
         // 2. Orbiting Tom & Jerry Style Dizzy Stars above Pirate Head after impacts
-        if (!editorMode && gCartoonFX.dizzyStarsTimer > 0.0f) {
+        if (!editorMode && !raft.isDestroyed && gCartoonFX.dizzyStarsTimer > 0.0f) {
             Vector3 dizzyCenter = raft.isDestroyed ? ragdollA.position : Vector3Add(raft.position, Vector3{ 0.0f, 1.85f, 0.0f });
             for (int st = 0; st < 5; st++) {
                 float stAng = runTime * 7.5f + st * (2.0f * PI / 5.0f);
@@ -5073,7 +5072,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             Vector2 sP1 = GetWorldToScreen(worldP1Head, camera);
             if (sP1.x >= -50.0f && sP1.x <= (float)GetScreenWidth() + 50.0f && sP1.y >= -50.0f && sP1.y <= (float)GetScreenHeight() + 50.0f) {
                 const char* nameP1 = (LanGetRole() == LAN_CLIENT) ? LanGetRemotePlayerName() : LanGetLocalPlayerName();
-                if (!nameP1 || strlen(nameP1) == 0) nameP1 = "Player 1";
+                if (!nameP1 || strlen(nameP1) == 0) nameP1 = LocText(STR_CAPTAIN_1);
                 Vector2 nmSz = MeasureTextEx(fontUIBold, nameP1, 18, 0.4f);
                 float pillW = nmSz.x + 20.0f;
                 float pillH = 26.0f;
@@ -5093,7 +5092,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 Vector2 sP2 = GetWorldToScreen(worldP2Head, camera);
                 if (sP2.x >= -50.0f && sP2.x <= (float)GetScreenWidth() + 50.0f && sP2.y >= -50.0f && sP2.y <= (float)GetScreenHeight() + 50.0f) {
                     const char* nameP2 = (LanGetRole() == LAN_CLIENT) ? LanGetLocalPlayerName() : LanGetRemotePlayerName();
-                    if (!nameP2 || strlen(nameP2) == 0) nameP2 = "Player 2";
+                    if (!nameP2 || strlen(nameP2) == 0) nameP2 = LocText(STR_CAPTAIN_2);
                     Vector2 nmSz = MeasureTextEx(fontUIBold, nameP2, 18, 0.4f);
                     float pillW = nmSz.x + 20.0f;
                     float pillH = 26.0f;
@@ -5199,38 +5198,26 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 float curRim = (LanGetRole() == LAN_CLIENT) ? p2RimAngle : p1RimAngle;
                 camCtrl.yaw = WrapAnglePi(raft.rotationY + curRim + PI);
                 camCtrl.pitch = 0.22f;
-                SpawnComicPopup(raft.position,
-                    camCtrl.pirateEyeLock ? (const char*)u8"عين القرصان!" : (const char*)u8"كاميرا حرة!",
-                    camCtrl.pirateEyeLock ? "PIRATE VIEW!" : "FREE CAM!",
-                    camCtrl.pirateEyeLock ? Color{ 52, 211, 153, 255 } : Color{ 56, 189, 248, 255 },
-                    Color{ 15, 23, 42, 255 }, 0.85f);
             }
 
-            Color eyeBg  = camCtrl.pirateEyeLock ? Color{ 34, 197, 94, 245 } : (hovEye ? Color{ 45, 62, 95, 240 } : Color{ 15, 23, 42, 225 });
-            Color eyeBrd = camCtrl.pirateEyeLock ? Color{ 250, 232, 82, 255 } : Color{ 148, 163, 184, 210 };
+            // User request: Static Black & White Eye image that does not move / animate
+            Color eyeBg  = camCtrl.pirateEyeLock ? Color{ 30, 30, 30, 245 } : (hovEye ? Color{ 50, 50, 50, 235 } : Color{ 15, 15, 15, 225 });
+            Color eyeBrd = camCtrl.pirateEyeLock ? Color{ 255, 255, 255, 255 } : Color{ 180, 180, 180, 210 };
             DrawRectangleRounded(btnEyeRec, 0.45f, 6, eyeBg);
             DrawRectangleRoundedLinesEx(btnEyeRec, 0.45f, 6, 2.0f, eyeBrd);
 
-            // Draw Expressive Classic Cartoon Eye Icon (Sclera + Iris + Pupil + Eyelashes)
+            // Clean, static black-and-white eye graphic (Centered, zero movement, zero blinking)
             float ecx = eyeBtnX + eyeBtnW * 0.5f;
-            float ecy = eyeBtnY + eyeBtnH * 0.5f + 1.0f;
-            camCtrl.eyeBlinkTimer += dt;
-            float blinkOpen = (fmodf(camCtrl.eyeBlinkTimer, 4.2f) > 4.05f) ? 0.15f : 1.0f;
-            float ryEye = 9.5f * blinkOpen;
+            float ecy = eyeBtnY + eyeBtnH * 0.5f;
 
-            DrawEllipse((int)ecx, (int)ecy, 16.0f, ryEye + 2.0f, Color{ 15, 23, 42, 255 });
-            DrawEllipse((int)ecx, (int)ecy, 14.0f, ryEye, WHITE);
+            // Outer sclera with sharp black contour
+            DrawEllipse((int)ecx, (int)ecy, 14.0f, 9.0f, WHITE);
+            DrawEllipseLines((int)ecx, (int)ecy, 14.0f, 9.0f, BLACK);
+            DrawEllipseLines((int)ecx, (int)ecy, 13.0f, 8.0f, BLACK);
 
-            if (blinkOpen > 0.3f) {
-                float lookShiftX = sinf(runTime * 2.5f) * 2.0f;
-                Color irisCol = camCtrl.pirateEyeLock ? Color{ 245, 158, 11, 255 } : Color{ 14, 165, 233, 255 };
-                DrawCircleV(Vector2{ ecx + lookShiftX, ecy }, 6.2f, irisCol);
-                DrawCircleV(Vector2{ ecx + lookShiftX, ecy }, 3.4f, Color{ 15, 23, 42, 255 });
-                DrawCircleV(Vector2{ ecx + lookShiftX - 2.0f, ecy - 2.2f }, 1.6f, WHITE);
-            }
-            DrawLineEx(Vector2{ ecx - 9.0f, ecy - ryEye - 1.0f }, Vector2{ ecx - 12.0f, ecy - ryEye - 5.0f }, 2.0f, WHITE);
-            DrawLineEx(Vector2{ ecx,        ecy - ryEye - 2.0f }, Vector2{ ecx,         ecy - ryEye - 6.5f }, 2.0f, WHITE);
-            DrawLineEx(Vector2{ ecx + 9.0f, ecy - ryEye - 1.0f }, Vector2{ ecx + 12.0f, ecy - ryEye - 5.0f }, 2.0f, WHITE);
+            // Static pupil & iris with crisp white reflection dot
+            DrawCircle((int)ecx, (int)ecy, 5.0f, BLACK);
+            DrawCircle((int)ecx - 2, (int)ecy - 2, 1.8f, WHITE);
         }
 
 
@@ -5255,7 +5242,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
             DrawTexturePro(texEsc, Rectangle{ 0, 0, (float)texEsc.width, (float)texEsc.height },
                            Rectangle{ 26, (float)GetScreenHeight() - 43, 24, 24 }, Vector2{ 0, 0 }, 0.0f, WHITE);
-            DrawText("LEAVE", 58, GetScreenHeight() - 40, 16, RAYWHITE);
+            DrawTextEx(fontUIBold, LocText(STR_LEAVE_HUD), Vector2{ 58.0f, (float)GetScreenHeight() - 41.0f }, 16, 0.3f, RAYWHITE);
             if ((hoverLeave && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_ESCAPE)) {
                 currentScreen = SCREEN_MAIN_MENU;
             }
@@ -5269,7 +5256,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             DrawRectangleRoundedLinesEx(btnSuicideRec, 0.35f, 4, 1.2f, hoverSuicide ? Color{ 239, 68, 68, 255 } : Color{ 153, 27, 27, 180 });
 
             DrawText("[R]", 155, GetScreenHeight() - 40, 16, Color{ 248, 113, 113, 255 });
-            DrawTextEx(fontUIBold, LocText(STR_SUICIDE_HUD), Vector2{ 155.0f, (float)GetScreenHeight() - 41.0f }, 16, 0.3f, Color{ 248, 113, 113, 255 });
+            DrawTextEx(fontUIBold, LocText(STR_SUICIDE_HUD), Vector2{ 184.0f, (float)GetScreenHeight() - 41.0f }, 16, 0.3f, Color{ 248, 113, 113, 255 });
 
             if ((hoverSuicide && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_R)) {
                 if (!editorMode && !raft.isDestroyed) {
@@ -6674,8 +6661,8 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
             if (activeSettTab == 1) { // GRAPHICS
                 // Row 0: Quality
-                DrawSettingRow(0, "Quality Level", [&](Rectangle rRec, float ry, bool isHov) {
-                    const char* qNames[4] = { "<  Low (30 FPS)  >", "<  Medium (60 FPS)  >", "<  High (60 FPS)  >", "<  Ultra (120 FPS)  >" };
+                DrawSettingRow(0, LocText(STR_QUALITY_PRESET), [&](Rectangle rRec, float ry, bool isHov) {
+                    const char* qNames[4] = { LocText(STR_QUAL_LOW), LocText(STR_QUAL_MED), LocText(STR_QUAL_HIGH), LocText(STR_QUAL_ULTRA) };
                     Rectangle bQ = { rRec.x + rRec.width - 270.0f, ry + 16.0f, 240.0f, 34.0f };
                     bool hovQ = CheckCollisionPointRec(mousePos, bQ);
                     DrawSlantedRect(bQ.x, bQ.y, bQ.width, bQ.height, 8.0f, hovQ ? Color{ 126, 114, 228, 255 } : Color{ 230, 235, 248, 255 });
@@ -6698,8 +6685,8 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                     } else {
                         DrawSlantedRect(bSw.x + 4.0f, bSw.y + 2.0f, 65.0f, 30.0f, 8.0f, Color{ 120, 125, 140, 255 });
                     }
-                    DrawTextEx(fontUIBold, "OFF", Vector2{ bSw.x + 22.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.cameraShake ? Color{ 120, 125, 140, 255 } : WHITE);
-                    DrawTextEx(fontUIBold, "ON", Vector2{ bSw.x + 88.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.cameraShake ? WHITE : Color{ 120, 125, 140, 255 });
+                    DrawTextEx(fontUIBold, LocText(STR_OFF), Vector2{ bSw.x + 20.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.cameraShake ? Color{ 120, 125, 140, 255 } : WHITE);
+                    DrawTextEx(fontUIBold, LocText(STR_ON), Vector2{ bSw.x + 85.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.cameraShake ? WHITE : Color{ 120, 125, 140, 255 });
                     if (hovSw && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                         gSettings.cameraShake = !gSettings.cameraShake;
                         SaveGameSettingsJSON("game_settings.json");
@@ -6731,8 +6718,8 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                     } else {
                         DrawSlantedRect(bSw.x + 4.0f, bSw.y + 2.0f, 65.0f, 30.0f, 8.0f, Color{ 120, 125, 140, 255 });
                     }
-                    DrawTextEx(fontUIBold, "OFF", Vector2{ bSw.x + 22.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.showFPS ? Color{ 120, 125, 140, 255 } : WHITE);
-                    DrawTextEx(fontUIBold, "ON", Vector2{ bSw.x + 88.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.showFPS ? WHITE : Color{ 120, 125, 140, 255 });
+                    DrawTextEx(fontUIBold, LocText(STR_OFF), Vector2{ bSw.x + 20.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.showFPS ? Color{ 120, 125, 140, 255 } : WHITE);
+                    DrawTextEx(fontUIBold, LocText(STR_ON), Vector2{ bSw.x + 85.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.showFPS ? WHITE : Color{ 120, 125, 140, 255 });
                     if (hovSw && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                         gSettings.showFPS = !gSettings.showFPS;
                         SaveGameSettingsJSON("game_settings.json");
@@ -6756,14 +6743,14 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                         }
                     });
                 };
-                DrawAudioSlider(0, "Master Volume", gSettings.masterVolume);
-                DrawAudioSlider(1, "Music (OST & Waves)", gSettings.musicVolume);
-                DrawAudioSlider(2, "Sound Effects (SFX)", gSettings.sfxVolume);
-                DrawAudioSlider(3, "Fart & Gas Volume", gSettings.fartVolume);
+                DrawAudioSlider(0, LocText(STR_VOL_MASTER), gSettings.masterVolume);
+                DrawAudioSlider(1, LocText(STR_VOL_MUSIC), gSettings.musicVolume);
+                DrawAudioSlider(2, LocText(STR_VOL_SFX), gSettings.sfxVolume);
+                DrawAudioSlider(3, LocText(STR_VOL_FART), gSettings.fartVolume);
 
             } else if (activeSettTab == 0) { // GENERAL
                 DrawSettingRow(0, LocText(STR_LANGUAGE_LBL), [&](Rectangle rRec, float ry, bool isHov) {
-                    const char* lNames[2] = { (const char*)u8"<  العربية (افتراضي)  >", "<  English  >" };
+                    const char* lNames[2] = { LocText(STR_LANG_CURRENT), "<  English  >" };
                     Rectangle bL = { rRec.x + rRec.width - 260.0f, ry + 16.0f, 230.0f, 34.0f };
                     bool hovL = CheckCollisionPointRec(mousePos, bL);
                     DrawSlantedRect(bL.x, bL.y, bL.width, bL.height, 8.0f, hovL ? Color{ 126, 114, 228, 255 } : Color{ 230, 235, 248, 255 });
@@ -6777,8 +6764,8 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 });
 
                 DrawSettingRow(1, LocText(STR_DEVICE_PROFILE), [&](Rectangle rRec, float ry, bool isHov) {
-                    const char* dNames[3] = { "<  Auto-Detect  >", "<  PC (Keyboard/Mouse)  >", "<  Mobile (Touchscreen)  >" };
-                    Rectangle bD = { rRec.x + rRec.width - 260.0f, ry + 16.0f, 230.0f, 34.0f };
+                    const char* dNames[3] = { LocText(STR_DEV_AUTO), LocText(STR_DEV_PC), LocText(STR_DEV_MOBILE) };
+                    Rectangle bD = { rRec.x + rRec.width - 280.0f, ry + 16.0f, 250.0f, 34.0f };
                     bool hovD = CheckCollisionPointRec(mousePos, bD);
                     DrawSlantedRect(bD.x, bD.y, bD.width, bD.height, 8.0f, hovD ? Color{ 126, 114, 228, 255 } : Color{ 230, 235, 248, 255 });
                     Vector2 dSz = MeasureTextEx(fontUIBold, dNames[gSettings.deviceMode], 13, 0.3f);
@@ -6798,8 +6785,8 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                     } else {
                         DrawSlantedRect(bSw.x + 4.0f, bSw.y + 2.0f, 65.0f, 30.0f, 8.0f, Color{ 120, 125, 140, 255 });
                     }
-                    DrawTextEx(fontUIBold, "OFF", Vector2{ bSw.x + 22.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.invertMouseY ? Color{ 120, 125, 140, 255 } : WHITE);
-                    DrawTextEx(fontUIBold, "ON", Vector2{ bSw.x + 88.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.invertMouseY ? WHITE : Color{ 120, 125, 140, 255 });
+                    DrawTextEx(fontUIBold, LocText(STR_OFF), Vector2{ bSw.x + 20.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.invertMouseY ? Color{ 120, 125, 140, 255 } : WHITE);
+                    DrawTextEx(fontUIBold, LocText(STR_ON), Vector2{ bSw.x + 85.0f, bSw.y + 8.0f }, 13, 0.3f, gSettings.invertMouseY ? WHITE : Color{ 120, 125, 140, 255 });
                     if (hovSw && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                         gSettings.invertMouseY = !gSettings.invertMouseY;
                         SaveGameSettingsJSON("game_settings.json");
@@ -6809,33 +6796,56 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             } else { // CONTROLS
                 static int controlSubTab = (gSettings.deviceMode == 2) ? 1 : 0; // 0=PC, 1=Mobile Touch
 
-                // Sub tab switcher: PC vs Mobile
-                Rectangle bSubPC  = { rowX, rowY - 42.0f, 150.0f, 34.0f };
-                Rectangle bSubMob = { rowX + 160.0f, rowY - 42.0f, 180.0f, 34.0f };
+                // Sub tab switcher: PC vs Mobile - Place below main tabs with clean 13px gap (ZERO overlap!)
+                float subTabY = 188.0f;
+                Rectangle bSubPC  = { rowX, subTabY, 185.0f, 36.0f };
+                Rectangle bSubMob = { rowX + 200.0f, subTabY, 215.0f, 36.0f };
                 bool hovSubPC  = CheckCollisionPointRec(mousePos, bSubPC);
                 bool hovSubMob = CheckCollisionPointRec(mousePos, bSubMob);
                 DrawSlantedRect(bSubPC.x, bSubPC.y, bSubPC.width, bSubPC.height, 8.0f, (controlSubTab == 0) ? Color{ 126, 114, 228, 255 } : Color{ 45, 55, 75, 220 });
-                DrawTextEx(fontUIBold, "PC Keyboard/Mouse", Vector2{ bSubPC.x + 12.0f, bSubPC.y + 9.0f }, 13, 0.3f, WHITE);
+                Vector2 pcSz = MeasureTextEx(fontUIBold, LocText(STR_TAB_PC_MODE), 13, 0.3f);
+                DrawTextEx(fontUIBold, LocText(STR_TAB_PC_MODE), Vector2{ bSubPC.x + (bSubPC.width - pcSz.x) * 0.5f, bSubPC.y + 9.0f }, 13, 0.3f, WHITE);
+
                 DrawSlantedRect(bSubMob.x, bSubMob.y, bSubMob.width, bSubMob.height, 8.0f, (controlSubTab == 1) ? Color{ 126, 114, 228, 255 } : Color{ 45, 55, 75, 220 });
-                DrawTextEx(fontUIBold, "Mobile Touch Controls", Vector2{ bSubMob.x + 14.0f, bSubMob.y + 9.0f }, 13, 0.3f, WHITE);
+                Vector2 mobSz = MeasureTextEx(fontUIBold, LocText(STR_TAB_MOBILE_MODE), 13, 0.3f);
+                DrawTextEx(fontUIBold, LocText(STR_TAB_MOBILE_MODE), Vector2{ bSubMob.x + (bSubMob.width - mobSz.x) * 0.5f, bSubMob.y + 9.0f }, 13, 0.3f, WHITE);
                 if (hovSubPC && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) controlSubTab = 0;
                 if (hovSubMob && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) controlSubTab = 1;
 
+                float ctrlRowY = 236.0f;
+                auto DrawCtrlRow = [&](int idx, const char* label, auto drawControls) {
+                    float ry = ctrlRowY + idx * (rowH + rowGap);
+                    Rectangle rRec = { rowX, ry, rowW, rowH };
+                    bool isHov = CheckCollisionPointRec(mousePos, rRec);
+
+                    Color rowBg = isHov ? Color{ 250, 232, 82, 255 } : Color{ 252, 252, 255, 255 };
+                    Color txtCol = isHov ? Color{ 24, 24, 34, 255 } : Color{ 105, 95, 205, 255 };
+
+                    DrawSlantedRect(rRec.x, rRec.y, rRec.width, rRec.height, 12.0f, rowBg);
+                    DrawTextEx(fontUIBold, label, Vector2{ rRec.x + 40.0f, ry + 22.0f }, 17, 0.4f, txtCol);
+
+                    drawControls(rRec, ry, isHov);
+                };
+
                 if (controlSubTab == 0) { // PC MODE
-                    DrawSettingRow(0, "P1 Fart Gas Controls", [&](Rectangle rRec, float ry, bool isHov) {
-                        DrawTextEx(fontUIBold, "A (Left) / D (Right) & Space/W (Gas)", Vector2{ rRec.x + rRec.width - 320.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+                    DrawCtrlRow(0, LocText(STR_P1_GAS_CONTROLS), [&](Rectangle rRec, float ry, bool isHov) {
+                        Vector2 kSz = MeasureTextEx(fontUIBold, LocText(STR_P1_GAS_KEYS), 14, 0.3f);
+                        DrawTextEx(fontUIBold, LocText(STR_P1_GAS_KEYS), Vector2{ rRec.x + rRec.width - kSz.x - 30.0f, ry + 22.0f }, 14, 0.3f, Color{ 30, 35, 55, 255 });
                     });
-                    DrawSettingRow(1, "Level Editor Mode", [&](Rectangle rRec, float ry, bool isHov) {
-                        DrawTextEx(fontUIBold, "[ Press F1 Key ]", Vector2{ rRec.x + rRec.width - 160.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+                    DrawCtrlRow(1, LocText(STR_LEVEL_EDITOR_ROW), [&](Rectangle rRec, float ry, bool isHov) {
+                        Vector2 kSz = MeasureTextEx(fontUIBold, LocText(STR_LEVEL_EDITOR_KEY), 14, 0.3f);
+                        DrawTextEx(fontUIBold, LocText(STR_LEVEL_EDITOR_KEY), Vector2{ rRec.x + rRec.width - kSz.x - 30.0f, ry + 22.0f }, 14, 0.3f, Color{ 30, 35, 55, 255 });
                     });
-                    DrawSettingRow(2, "Show FPS Toggle Key", [&](Rectangle rRec, float ry, bool isHov) {
-                        DrawTextEx(fontUIBold, "[ F5 Key ]", Vector2{ rRec.x + rRec.width - 150.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+                    DrawCtrlRow(2, LocText(STR_SHOW_FPS_ROW), [&](Rectangle rRec, float ry, bool isHov) {
+                        Vector2 kSz = MeasureTextEx(fontUIBold, LocText(STR_SHOW_FPS_KEY), 14, 0.3f);
+                        DrawTextEx(fontUIBold, LocText(STR_SHOW_FPS_KEY), Vector2{ rRec.x + rRec.width - kSz.x - 30.0f, ry + 22.0f }, 14, 0.3f, Color{ 30, 35, 55, 255 });
                     });
-                    DrawSettingRow(3, "Suicide Respawn Key", [&](Rectangle rRec, float ry, bool isHov) {
-                        DrawTextEx(fontUIBold, "[ R Key ]", Vector2{ rRec.x + rRec.width - 150.0f, ry + 22.0f }, 15, 0.4f, Color{ 30, 35, 55, 255 });
+                    DrawCtrlRow(3, LocText(STR_SUICIDE_HUD), [&](Rectangle rRec, float ry, bool isHov) {
+                        Vector2 kSz = MeasureTextEx(fontUIBold, LocText(STR_SUICIDE_KEY), 14, 0.3f);
+                        DrawTextEx(fontUIBold, LocText(STR_SUICIDE_KEY), Vector2{ rRec.x + rRec.width - kSz.x - 30.0f, ry + 22.0f }, 14, 0.3f, Color{ 30, 35, 55, 255 });
                     });
                 } else { // MOBILE TOUCH MODE
-                    DrawSettingRow(0, "Touch Button Scale", [&](Rectangle rRec, float ry, bool isHov) {
+                    DrawCtrlRow(0, LocText(STR_TOUCH_SIZE_ROW), [&](Rectangle rRec, float ry, bool isHov) {
                         float sldX = rRec.x + rRec.width - 340.0f;
                         DrawTextEx(fontUIBold, TextFormat("%.0f%%", gSettings.touchBtnScale * 100.0f), Vector2{ sldX - 60.0f, ry + 22.0f }, 15, 0.3f, Color{ 30, 35, 55, 255 });
                         Rectangle sldBar = { sldX, ry + 27.0f, 280.0f, 10.0f };
@@ -6849,11 +6859,12 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                         }
                     });
 
-                    DrawSettingRow(1, "Steer Buttons Pos X / Y", [&](Rectangle rRec, float ry, bool isHov) {
-                        Rectangle bReset = { rRec.x + rRec.width - 240.0f, ry + 16.0f, 200.0f, 34.0f };
+                    DrawCtrlRow(1, LocText(STR_RESET_STEER_POS), [&](Rectangle rRec, float ry, bool isHov) {
+                        Rectangle bReset = { rRec.x + rRec.width - 250.0f, ry + 16.0f, 220.0f, 34.0f };
                         bool hovR = CheckCollisionPointRec(mousePos, bReset);
                         DrawSlantedRect(bReset.x, bReset.y, bReset.width, bReset.height, 8.0f, hovR ? Color{ 126, 114, 228, 255 } : Color{ 230, 235, 248, 255 });
-                        DrawTextEx(fontUIBold, "Reset Left/Right Pos", Vector2{ bReset.x + 20.0f, bReset.y + 8.0f }, 13, 0.3f, hovR ? WHITE : Color{ 30, 35, 55, 255 });
+                        Vector2 bSz = MeasureTextEx(fontUIBold, LocText(STR_RESET_STEER_POS), 13, 0.3f);
+                        DrawTextEx(fontUIBold, LocText(STR_RESET_STEER_POS), Vector2{ bReset.x + (bReset.width - bSz.x) * 0.5f, bReset.y + 8.0f }, 13, 0.3f, hovR ? WHITE : Color{ 30, 35, 55, 255 });
                         if (hovR && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                             gSettings.steerLeftPosX = 0.08f; gSettings.steerLeftPosY = 0.78f;
                             gSettings.steerRightPosX = 0.22f; gSettings.steerRightPosY = 0.78f;
@@ -6861,19 +6872,20 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                         }
                     });
 
-                    DrawSettingRow(2, "Gas Button Pos X / Y", [&](Rectangle rRec, float ry, bool isHov) {
-                        Rectangle bReset = { rRec.x + rRec.width - 240.0f, ry + 16.0f, 200.0f, 34.0f };
+                    DrawCtrlRow(2, LocText(STR_RESET_GAS_POS), [&](Rectangle rRec, float ry, bool isHov) {
+                        Rectangle bReset = { rRec.x + rRec.width - 250.0f, ry + 16.0f, 220.0f, 34.0f };
                         bool hovR = CheckCollisionPointRec(mousePos, bReset);
                         DrawSlantedRect(bReset.x, bReset.y, bReset.width, bReset.height, 8.0f, hovR ? Color{ 126, 114, 228, 255 } : Color{ 230, 235, 248, 255 });
-                        DrawTextEx(fontUIBold, "Reset Gas Button Pos", Vector2{ bReset.x + 22.0f, bReset.y + 8.0f }, 13, 0.3f, hovR ? WHITE : Color{ 30, 35, 55, 255 });
+                        Vector2 bSz = MeasureTextEx(fontUIBold, LocText(STR_RESET_GAS_POS), 13, 0.3f);
+                        DrawTextEx(fontUIBold, LocText(STR_RESET_GAS_POS), Vector2{ bReset.x + (bReset.width - bSz.x) * 0.5f, bReset.y + 8.0f }, 13, 0.3f, hovR ? WHITE : Color{ 30, 35, 55, 255 });
                         if (hovR && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                             gSettings.gasBtnPosX = 0.86f; gSettings.gasBtnPosY = 0.76f;
                             SaveGameSettingsJSON("game_settings.json");
                         }
                     });
 
-                    DrawSettingRow(3, "USB Keyboard/Mouse OTG", [&](Rectangle rRec, float ry, bool isHov) {
-                        DrawTextEx(fontUIBold, "[ Auto-Supported via USB Host ]", Vector2{ rRec.x + rRec.width - 280.0f, ry + 22.0f }, 14, 0.3f, Color{ 34, 197, 94, 255 });
+                    DrawCtrlRow(3, LocText(STR_DEVICE_MODE), [&](Rectangle rRec, float ry, bool isHov) {
+                        DrawTextEx(fontUIBold, "[ USB OTG Support ]", Vector2{ rRec.x + rRec.width - 220.0f, ry + 22.0f }, 14, 0.3f, Color{ 34, 197, 94, 255 });
                     });
                 }
             }
