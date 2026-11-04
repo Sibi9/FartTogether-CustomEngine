@@ -2,9 +2,14 @@
   "tapBurstForce": 480.00,
   "sustainedMaxForce": 480.00,
   "sustainedMinForce": 480.00,
-  "steerTorque": 6.00,
+  "steerTorque": 3.00,
+  "steerScale": 0.080,
   "boatMaxSpeed": 12.00,
   "waterLinearDrag": 0.400,
-  "gasDrainRate": 12.00,
-  "gasRegenRate": 18.00
+  "gasDrainRate": 15.00,
+  "gasRegenRate": 22.00,
+  "gasTapCost": 6.00,
+  "gasTapThreshold": 0.10,
+  "gasRegenDelay": 0.50,
+  "gasRampSeconds": 2.50
 }

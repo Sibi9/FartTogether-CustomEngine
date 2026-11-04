@@ -209,7 +209,6 @@ inline std::string Reshape(const std::string& input) {
                 } else {
                     if (!curAr.empty()) {
                         auto sh = ShapeWord(curAr);
-                        std::reverse(sh.begin(), sh.end());
                         resWord.insert(resWord.end(), sh.begin(), sh.end());
                         curAr.clear();
                     }
@@ -225,10 +224,9 @@ inline std::string Reshape(const std::string& input) {
             }
             if (!curAr.empty()) {
                 auto sh = ShapeWord(curAr);
-                std::reverse(sh.begin(), sh.end());
                 resWord.insert(resWord.end(), sh.begin(), sh.end());
             }
-            // Reverse token order to preserve outer punctuation
+            // Reverse token order so Arabic glyphs and punctuation render properly in LTR engine
             std::reverse(resWord.begin(), resWord.end());
             processedWords.push_back(resWord);
         } else {
@@ -249,3 +247,4 @@ inline std::string Reshape(const std::string& input) {
 }
 
 } // namespace ArabicShaper
+

@@ -146,7 +146,10 @@ cflags_common = [
     "-DMAL_NO_OSS",
     "-DSTBIR_NO_SIMD",
     "-fPIC",
-    "-O2",
+    "-O3",
+    "-ffast-math",
+    "-funroll-loops",
+    "-ftree-vectorize",
     "-ffunction-sections",
     "-fdata-sections",
     f"-I{raylib_src}",
@@ -163,7 +166,7 @@ ldflags_common = [
     "-Wl,-z,relro",
     "-Wl,-z,now",
     "-u", "ANativeActivity_onCreate",
-    "-llog", "-landroid", "-lEGL", "-lGLESv2", "-lOpenSLES", "-lc", "-lm"
+    "-llog", "-landroid", "-lEGL", "-lGLESv2", "-lOpenSLES", "-lc", "-lm", "-latomic"
 ]
 
 for abi_name, cc_name, cxx_name in abis:

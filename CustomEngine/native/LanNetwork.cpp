@@ -29,6 +29,7 @@ typedef int SOCKET;
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 #include "LanNetwork.h"
 
 static SOCKET   gGameSock         = INVALID_SOCKET;
@@ -137,6 +138,14 @@ static void ConfigureLowLatencySocket(SOCKET s) {
 
 static uint32_t LanGetLocalIPv4() {
     LanEnsureWsa();
+    static uint32_t s_cachedIp = 0;
+    static time_t   s_lastCheckTime = 0;
+    time_t now = time(NULL);
+    if (s_cachedIp != 0 && (now - s_lastCheckTime) < 5) {
+        return s_cachedIp;
+    }
+    s_lastCheckTime = now;
+
     const char* testTargets[] = { "192.168.1.1", "192.168.0.1", "192.168.43.1", "10.0.0.1", "8.8.8.8", "1.1.1.1" };
     for (const char* tgt : testTargets) {
         SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
@@ -151,9 +160,13 @@ static uint32_t LanGetLocalIPv4() {
         getsockname(s, (sockaddr*)&local, &len);
         closesocket(s);
         uint32_t ip = ntohl(local.sin_addr.s_addr);
-        if (ip != 0 && ip != 0x7F000001) return ip;
+        if (ip != 0 && ip != 0x7F000001) {
+            s_cachedIp = ip;
+            return ip;
+        }
     }
-    return 0x7F000001;
+    s_cachedIp = 0x7F000001;
+    return s_cachedIp;
 }
 
 void LanGenerateSmartRoomCode(char outCode[8]) {

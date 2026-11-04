@@ -36,8 +36,15 @@
 #include "Localization.h"
 #include "Codepoints.h"
 
+#if defined(_WIN32)
+extern "C" {
+    __declspec(dllimport) void* __stdcall GetConsoleWindow(void);
+    __declspec(dllimport) int   __stdcall ShowWindow(void* hWnd, int nCmdShow);
+}
+#endif
+
 // Rule: Game version must be incremented on every update!
-static const char* GAME_VERSION_TAG = "v8.5.0";
+static const char* GAME_VERSION_TAG = "v8.6.0";
 static int s_camTouchId = -1;
 static bool s_clientSuicideRequested = false;
 GameLanguage gCurrentLanguage = LANG_AR; // Default Arabic as requested
@@ -49,8 +56,13 @@ static bool gShowInviteModal = false;
 #include "rlgl.h"
 
 #include <vector>
+#include <set>
+#include <tuple>
 
 #include <string>
+
+static bool gPlacementDebugEyes = false;
+static std::vector<Vector3> sEyeVertsLocal;
 
 #include <cmath>
 
@@ -59,6 +71,139 @@ static bool gShowInviteModal = false;
 #include <algorithm>
 
 #include <iostream>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <condition_variable>
+#include <functional>
+#if defined(PLATFORM_ANDROID) || defined(__ANDROID__)
+#include <sched.h>
+#include <sys/resource.h>
+#endif
+
+// =============================================================================
+// AAA Multi-Core Parallel Job Dispatcher (Uses ALL CPU Cores on Mobile & PC!)
+// =============================================================================
+class ParallelJobSystem {
+public:
+    void Init() {
+        if (m_initialized) return;
+        unsigned int hw = std::thread::hardware_concurrency();
+        // Use up to (hw - 1) worker threads alongside the main thread (clamped to 2..7 workers)
+        m_numWorkers = (hw > 2) ? (int)(hw - 1) : 2;
+        if (m_numWorkers > 7) m_numWorkers = 7;
+        m_stop = false;
+        m_generation = 0;
+        m_activeWorkers = 0;
+
+#if defined(PLATFORM_ANDROID) || defined(__ANDROID__)
+        // Request high thread priority on Android so OS scheduler moves threads to BIG performance cores!
+        setpriority(PRIO_PROCESS, 0, -10);
+#endif
+
+        for (int i = 0; i < m_numWorkers; i++) {
+            m_workers.emplace_back([this, i]() {
+#if defined(PLATFORM_ANDROID) || defined(__ANDROID__)
+                setpriority(PRIO_PROCESS, 0, -8);
+#endif
+                uint64_t localGen = 0;
+                while (true) {
+                    {
+                        std::unique_lock<std::mutex> lk(m_mutex);
+                        m_cvWake.wait(lk, [&]() { return m_stop || m_generation > localGen; });
+                        if (m_stop) return;
+                        localGen = m_generation;
+                    }
+                    // Lock-free atomic work stealing across chunks
+                    while (true) {
+                        int idx = m_nextIndex.fetch_add(m_grainSize, std::memory_order_relaxed);
+                        if (idx >= m_totalCount) break;
+                        int endIdx = idx + m_grainSize;
+                        if (endIdx > m_totalCount) endIdx = m_totalCount;
+                        for (int k = idx; k < endIdx; k++) {
+                            m_currentTask(k);
+                        }
+                    }
+                    if (m_activeWorkers.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                        std::lock_guard<std::mutex> lk(m_doneMutex);
+                        m_cvDone.notify_one();
+                    }
+                }
+            });
+        }
+        m_initialized = true;
+        printf("[MultiCore] Initialized ParallelJobSystem with %d worker threads + 1 main thread (%u total CPU cores).\n",
+               m_numWorkers, hw);
+    }
+
+    void ParallelFor(int count, int grainSize, const std::function<void(int)>& fn) {
+        if (count <= 0) return;
+        if (!m_initialized || count <= grainSize || m_numWorkers <= 0) {
+            for (int i = 0; i < count; i++) fn(i);
+            return;
+        }
+        m_currentTask = fn;
+        m_totalCount  = count;
+        m_grainSize   = (grainSize > 0) ? grainSize : 1;
+        m_nextIndex.store(0, std::memory_order_relaxed);
+        m_activeWorkers.store(m_numWorkers, std::memory_order_relaxed);
+
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            m_generation++;
+        }
+        m_cvWake.notify_all();
+
+        // Main thread also steals and executes work chunks so zero cores sit idle!
+        while (true) {
+            int idx = m_nextIndex.fetch_add(m_grainSize, std::memory_order_relaxed);
+            if (idx >= m_totalCount) break;
+            int endIdx = idx + m_grainSize;
+            if (endIdx > m_totalCount) endIdx = m_totalCount;
+            for (int k = idx; k < endIdx; k++) {
+                m_currentTask(k);
+            }
+        }
+
+        // Wait for worker threads to finish remaining items (< 0.05ms barrier)
+        std::unique_lock<std::mutex> lk(m_doneMutex);
+        m_cvDone.wait(lk, [&]() { return m_activeWorkers.load(std::memory_order_acquire) == 0; });
+    }
+
+    void Shutdown() {
+        if (!m_initialized) return;
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            m_stop = true;
+        }
+        m_cvWake.notify_all();
+        for (auto& t : m_workers) {
+            if (t.joinable()) t.join();
+        }
+        m_workers.clear();
+        m_initialized = false;
+    }
+
+    ~ParallelJobSystem() { Shutdown(); }
+
+private:
+    std::vector<std::thread> m_workers;
+    std::mutex m_mutex;
+    std::mutex m_doneMutex;
+    std::condition_variable m_cvWake;
+    std::condition_variable m_cvDone;
+    std::function<void(int)> m_currentTask;
+    std::atomic<int> m_nextIndex{0};
+    std::atomic<int> m_activeWorkers{0};
+    uint64_t m_generation = 0;
+    int m_totalCount = 0;
+    int m_grainSize = 1;
+    int m_numWorkers = 0;
+    bool m_stop = false;
+    bool m_initialized = false;
+};
+
+static ParallelJobSystem gJobSystem;
 
 // =============================================================================
 
@@ -96,45 +241,36 @@ static const float BOAT_ANGULAR_DAMPING = 2.0f;
 
 static const float BOAT_MAX_SPEED = 14.0f;
 
-static const float BOAT_STEER_TORQUE = 6.0f;
+static const float BOAT_STEER_TORQUE = 6.0f; // DEPRECATED: Use gPhysCfg.steerTorque
 
 static const float BOAT_ATTACHMENT_RADIUS = 1.40f;
 
-// Gas Physics
+// Unified Pirate Seat & Boat Placement Constants (Plan Step 2)
+static const float kRimSeatRadius  = 0.98f;
+static const float kRimSeatHeight  = 0.51f;
+static const float kBoatMeshYawDeg = 45.0f;
+static const float kPirateScale    = 1.0f;
 
-static const float GAS_NORMAL_FORCE = 900.0f;
-
-static const float GAS_MIN_FORCE = 100.0f;
-
-static const float GAS_RAMP_SECONDS = 3.0f;
-
+// Gas Physics Constants
+// DEPRECATED: GAS_NORMAL_FORCE, GAS_MIN_FORCE, GAS_RAMP_SECONDS, GAS_TAP_THRESHOLD_SECONDS, GAS_TAP_BURST_FORCE, GAS_TAP_COST, GAS_DRAIN_PER_SEC, GAS_REGEN_PER_SEC, GAS_REGEN_DELAY are superseded by gPhysCfg
+static const float GAS_NORMAL_FORCE = 900.0f; // DEPRECATED: Replaced by gPhysCfg.sustainedMaxForce
+static const float GAS_MIN_FORCE = 100.0f;    // DEPRECATED: Replaced by gPhysCfg.sustainedMinForce
+static const float GAS_RAMP_SECONDS = 3.0f;   // DEPRECATED: Replaced by gPhysCfg.gasRampSeconds
 static const float GAS_RELEASE_SECONDS = 0.50f;
-
-static const float GAS_TAP_THRESHOLD_SECONDS = 0.10f;
-
-static const float GAS_TAP_BURST_FORCE = 900.0f;
-
-static const float GAS_TAP_COST = 10.0f;
-
+static const float GAS_TAP_THRESHOLD_SECONDS = 0.10f; // DEPRECATED: Replaced by gPhysCfg.gasTapThreshold
+static const float GAS_TAP_BURST_FORCE = 900.0f;      // DEPRECATED: Replaced by gPhysCfg.tapBurstForce
+static const float GAS_TAP_COST = 10.0f;              // DEPRECATED: Replaced by gPhysCfg.gasTapCost
 static const float GAS_MAX = 100.0f;
-
-static const float GAS_DRAIN_PER_SEC = 12.0f;
-
-static const float GAS_REGEN_PER_SEC = 18.0f;
-
-static const float GAS_REGEN_DELAY = 1.0f;
-
+static const float GAS_DRAIN_PER_SEC = 12.0f;         // DEPRECATED: Replaced by gPhysCfg.gasDrainRate
+static const float GAS_REGEN_PER_SEC = 18.0f;         // DEPRECATED: Replaced by gPhysCfg.gasRegenRate
+static const float GAS_REGEN_DELAY = 1.0f;            // DEPRECATED: Replaced by gPhysCfg.gasRegenDelay
 static const float GAS_RECOVER_PERCENT = 0.35f;
 
 // Pirate Butt Jiggle & Swelling
-
 static const float BUTT_PEAK_SCALE = 1.30f;
-
 static const float BUTT_TREMBLE_FREQ = 12.0f;
-
 static const float BUTT_TREMBLE_AMP = 0.05f;
-
-static const float BUTT_MIN_TREMBLE_THRESHOLD = 0.55f;
+static const float BUTT_MIN_TREMBLE_THRESHOLD = 0.55f; // DEPRECATED
 
 // Bumper Obstacle Physics
 
@@ -220,23 +356,26 @@ void main() {
     fragPosition = vertexPosition;
     vec3 pos     = vertexPosition;
 
-    if (pos.z < -0.01 && pos.y >= 0.18 && pos.y <= 0.52 && uButtSwell > 0.001) {
-        float wy = sin(clamp((pos.y - 0.18) / 0.34, 0.0, 1.0) * 3.14159265);
-        float wz = clamp((-pos.z - 0.01) / 0.12, 0.0, 1.0);
+    if (pos.z < -0.10 && pos.y >= 0.16 && pos.y <= 0.48 && uButtSwell > 0.001) {
+        float wy = sin(clamp((pos.y - 0.16) / 0.32, 0.0, 1.0) * 3.14159265);
+        float wz = clamp((-pos.z - 0.10) / 0.22, 0.0, 1.0);
         float wButt = wy * wz;
-        vec3 buttPivot = vec3(0.0, 0.34, -0.02);
+        vec3 buttPivot = vec3(0.0, 0.32, -0.24);
         pos = mix(pos, buttPivot + (pos - buttPivot) * (1.0 + uButtSwell), wButt);
         pos.z -= uButtSwell * 0.14 * wButt;
     }
 
     bool isPupil  = (vertexTexCoord.x < 0.08) && (vertexTexCoord.y < 0.12 || vertexTexCoord.y > 0.88);
     bool isSclera = (vertexTexCoord.x > 0.68 && vertexTexCoord.x < 0.75) && (vertexTexCoord.y < 0.05 || vertexTexCoord.y > 0.95);
-    if (pos.y > 0.88 && (isPupil || isSclera) && uEyeBulge > 0.001) {
+    bool isEyeGrip = (pos.y > 0.68 && pos.z > 0.40 && (isPupil || isSclera));
+    bool isEyeLegacy = (pos.y > 0.88 && pos.z > 0.20 && (isPupil || isSclera));
+    if ((isEyeGrip || isEyeLegacy) && uEyeBulge > 0.001) {
         float eyeSign = (pos.x >= 0.0) ? 1.0 : -1.0;
-        vec2 eyeCenterXY = vec2(eyeSign * 0.0456, 0.935);
-        pos.xy = eyeCenterXY + (pos.xy - eyeCenterXY) * (1.0 + uEyeBulge * 0.58);
-        pos.x += eyeSign * uEyeBulge * 0.016;
-        pos.z += uEyeBulge * 0.072;
+        vec3 eyeCenter = isEyeGrip ? vec3(eyeSign * 0.04555, 0.7607, 0.5243) : vec3(eyeSign * 0.04555, 0.9480, 0.2868);
+        pos = eyeCenter + (pos - eyeCenter) * (1.0 + uEyeBulge * 0.48);
+        pos.x += eyeSign * uEyeBulge * 0.048;
+        pos.y += uEyeBulge * 0.026;
+        pos.z -= uEyeBulge * 0.045;
     }
     gl_Position = mvp * vec4(pos, 1.0);
 }
@@ -257,8 +396,18 @@ uniform vec3 ambientColor;
 uniform float uRedness;
 uniform int uIsJungleTree;
 uniform int uQualityLevel;
+uniform float uEyeBulge;
+uniform float uDebugEyes;
 
 void main() {
+    if (uDebugEyes > 0.5) {
+        bool isPupil  = (fragTexCoord.x < 0.08) && (fragTexCoord.y < 0.12 || fragTexCoord.y > 0.88);
+        bool isSclera = (fragTexCoord.x > 0.68 && fragTexCoord.x < 0.75) && (fragTexCoord.y < 0.05 || fragTexCoord.y > 0.95);
+        if (((fragPosition.y > 0.68 && fragPosition.z > 0.40) || (fragPosition.y > 0.88 && fragPosition.z > 0.20)) && (isPupil || isSclera)) {
+            gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0);
+            return;
+        }
+    }
     vec4 texColor = texture2D(texture0, fragTexCoord);
     vec3 baseRgb = texColor.rgb;
 
@@ -280,15 +429,13 @@ void main() {
     vec3 shadowTint = ambientColor * vec3(0.92, 0.88, 1.04);
     vec3 lighting = mix(shadowTint, lightColor * 1.06, toonBand);
 
-    vec3 buttCenter = vec3(0.0, 0.34, -0.12);
-    vec3 buttScale  = vec3(0.26, 0.20, 0.16);
-    float buttDist  = length((fragPosition - buttCenter) / buttScale);
-    float buttMask  = (fragPosition.z < -0.01) ? clamp(1.0 - smoothstep(0.35, 1.05, buttDist), 0.0, 1.0) : 0.0;
-
-    vec3 redSkin = mix(baseRgb, vec3(0.98, 0.10, 0.10), uRedness * buttMask * 0.94);
-    float luma = dot(redSkin, vec3(0.299, 0.587, 0.114));
-    vec3 vibrantSkin = mix(vec3(luma), redSkin, 1.18);
-    gl_FragColor = vec4(vibrantSkin * lighting * colDiffuse.rgb, texColor.a * colDiffuse.a);
+    vec3 buttCenter = vec3(0.0, 0.32, -0.24);
+    float buttDist  = length((fragPosition - buttCenter) / vec3(0.24, 0.20, 0.14));
+    float buttMask  = (fragPosition.z < -0.10) ? clamp(1.0 - smoothstep(0.15, 1.0, buttDist), 0.0, 1.0) : 0.0;
+    vec3 blush      = vec3(1.0, 0.30, 0.38);
+    vec3 redSkin    = mix(baseRgb, blush, uRedness * buttMask * 0.60);
+    vec3 finalRgb   = redSkin * lighting * colDiffuse.rgb + blush * (0.22 * uRedness * buttMask);
+    gl_FragColor    = vec4(finalRgb, texColor.a * colDiffuse.a);
 }
 )";
 
@@ -347,8 +494,8 @@ void main() {
         N = normalize(N * 0.60 + rippleN * 0.40);
     }
 
-    vec3 deepCol    = vec3(0.02, 0.18, 0.46);
-    vec3 shallowCol = vec3(0.05, 0.64, 0.88);
+    vec3 deepCol    = vec3(0.01, 0.22, 0.52);
+    vec3 shallowCol = vec3(0.04, 0.68, 0.92);
     float depthMix  = clamp(N.y * 0.85 - 0.10, 0.0, 1.0);
     vec3 baseCol    = mix(deepCol, shallowCol, depthMix);
 
@@ -356,8 +503,8 @@ void main() {
     vec2 uvC2 = fragPos.xz * 0.13 + vec2(-uTime * 0.030, uTime * 0.020);
     float c1 = texture2D(causticTex, uvC1).r;
     float c2 = (uQualityLevel >= 1) ? texture2D(causticTex, uvC2).r : c1;
-    float causticVal = (c1 * 0.6 + c2 * 0.4) * 0.65;
-    vec3 causticCol = shallowCol * (causticVal * 1.32);
+    float causticVal = (c1 * 0.6 + c2 * 0.4) * 0.68;
+    vec3 causticCol = shallowCol * (causticVal * 1.38);
 
     vec2 uvF1 = fragPos.xz * 0.22 + vec2(0.0, -uTime * 0.10);
     float f1 = texture2D(foam1Tex, uvF1).r;
@@ -367,21 +514,27 @@ void main() {
         f2 = texture2D(foam2Tex, uvF2).r;
     }
     float foamSample = f1 * 0.65 + f2 * 0.35;
-    float foamMask = smoothstep(0.64, 0.82, foamSample) * 0.85;
-    vec3 foamCol = vec3(0.75, 0.97, 1.00);
+    float foamMask = smoothstep(0.62, 0.80, foamSample) * 0.88;
+    vec3 foamCol = vec3(0.82, 0.98, 1.00);
 
     vec3 sunDir = normalize(vec3(-0.35, 0.80, -0.45));
     vec3 R = reflect(-sunDir, N);
     float RdotV = max(dot(R, V), 0.0);
-    float spec = pow(RdotV, 64.0) * 0.45;
-    vec3 sunGlint = vec3(1.0, 0.95, 0.85) * spec;
+    float spec = pow(RdotV, 64.0) * 0.52;
+    vec3 sunGlint = vec3(1.0, 0.96, 0.86) * spec;
 
-    float fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.20;
-    vec3 skyGlint = vec3(0.60, 0.82, 0.98) * fresnel;
+    float fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.24;
+    vec3 skyGlint = vec3(0.62, 0.86, 1.00) * fresnel;
 
     vec3 waterBody = baseCol + causticCol + skyGlint;
     vec3 rgb = mix(waterBody, foamCol, foamMask) + sunGlint;
-    gl_FragColor = vec4(rgb, 0.94);
+
+    // Atmospheric distance fog on distant water
+    float camDist = length(camPos - fragPos);
+    float fogFactor = clamp((camDist - 60.0) / 55.0, 0.0, 0.65);
+    rgb = mix(rgb, vec3(0.68, 0.86, 0.98), fogFactor);
+
+    gl_FragColor = vec4(rgb, 0.95);
 }
 )";
 #else
@@ -406,23 +559,26 @@ void main() {
     fragPosition = vertexPosition;
     vec3 pos = vertexPosition;
 
-    if (pos.z < -0.01 && pos.y >= 0.18 && pos.y <= 0.52 && uButtSwell > 0.001) {
-        float wy = sin(clamp((pos.y - 0.18) / 0.34, 0.0, 1.0) * 3.14159265);
-        float wz = clamp((-pos.z - 0.01) / 0.12, 0.0, 1.0);
+    if (pos.z < -0.10 && pos.y >= 0.16 && pos.y <= 0.48 && uButtSwell > 0.001) {
+        float wy = sin(clamp((pos.y - 0.16) / 0.32, 0.0, 1.0) * 3.14159265);
+        float wz = clamp((-pos.z - 0.10) / 0.22, 0.0, 1.0);
         float wButt = wy * wz;
-        vec3 buttPivot = vec3(0.0, 0.34, -0.02);
+        vec3 buttPivot = vec3(0.0, 0.32, -0.24);
         pos = mix(pos, buttPivot + (pos - buttPivot) * (1.0 + uButtSwell), wButt);
         pos.z -= uButtSwell * 0.14 * wButt;
     }
 
     bool isPupil  = (vertexTexCoord.x < 0.08) && (vertexTexCoord.y < 0.12 || vertexTexCoord.y > 0.88);
     bool isSclera = (vertexTexCoord.x > 0.68 && vertexTexCoord.x < 0.75) && (vertexTexCoord.y < 0.05 || vertexTexCoord.y > 0.95);
-    if (pos.y > 0.88 && (isPupil || isSclera) && uEyeBulge > 0.001) {
+    bool isEyeGrip = (pos.y > 0.68 && pos.z > 0.40 && (isPupil || isSclera));
+    bool isEyeLegacy = (pos.y > 0.88 && pos.z > 0.20 && (isPupil || isSclera));
+    if ((isEyeGrip || isEyeLegacy) && uEyeBulge > 0.001) {
         float eyeSign = (pos.x >= 0.0) ? 1.0 : -1.0;
-        vec2 eyeCenterXY = vec2(eyeSign * 0.0456, 0.935);
-        pos.xy = eyeCenterXY + (pos.xy - eyeCenterXY) * (1.0 + uEyeBulge * 0.58);
-        pos.x += eyeSign * uEyeBulge * 0.016;
-        pos.z += uEyeBulge * 0.072;
+        vec3 eyeCenter = isEyeGrip ? vec3(eyeSign * 0.04555, 0.7607, 0.5243) : vec3(eyeSign * 0.04555, 0.9480, 0.2868);
+        pos = eyeCenter + (pos - eyeCenter) * (1.0 + uEyeBulge * 0.48);
+        pos.x += eyeSign * uEyeBulge * 0.048;
+        pos.y += uEyeBulge * 0.026;
+        pos.z -= uEyeBulge * 0.045;
     }
 
     gl_Position = mvp * vec4(pos, 1.0);
@@ -442,9 +598,19 @@ uniform vec3 ambientColor;
 uniform float uRedness;
 uniform int uIsJungleTree;
 uniform int uQualityLevel;
+uniform float uEyeBulge;
+uniform float uDebugEyes;
 out vec4 finalColor;
 
 void main() {
+    if (uDebugEyes > 0.5) {
+        bool isPupil  = (fragTexCoord.x < 0.08) && (fragTexCoord.y < 0.12 || fragTexCoord.y > 0.88);
+        bool isSclera = (fragTexCoord.x > 0.68 && fragTexCoord.x < 0.75) && (fragTexCoord.y < 0.05 || fragTexCoord.y > 0.95);
+        if (((fragPosition.y > 0.68 && fragPosition.z > 0.40) || (fragPosition.y > 0.88 && fragPosition.z > 0.20)) && (isPupil || isSclera)) {
+            finalColor = vec4(1.0, 0.0, 1.0, 1.0);
+            return;
+        }
+    }
     vec4 texColor = texture(texture0, fragTexCoord);
     vec3 baseRgb = texColor.rgb;
 
@@ -466,17 +632,14 @@ void main() {
     vec3 shadowTint = ambientColor * vec3(0.92, 0.88, 1.04);
     vec3 lighting = mix(shadowTint, lightColor * 1.06, toonBand);
 
-    vec3 buttCenter = vec3(0.0, 0.34, -0.12);
-    vec3 buttScale  = vec3(0.26, 0.20, 0.16);
-    float buttDist  = length((fragPosition - buttCenter) / buttScale);
-    float buttMask  = (fragPosition.z < -0.01) ? clamp(1.0 - smoothstep(0.35, 1.05, buttDist), 0.0, 1.0) : 0.0;
-
-    vec3 redSkin = mix(baseRgb, vec3(0.98, 0.10, 0.10), uRedness * buttMask * 0.94);
-    float luma = dot(redSkin, vec3(0.299, 0.587, 0.114));
-    vec3 vibrantSkin = mix(vec3(luma), redSkin, 1.18);
-    vec3 litColor = vibrantSkin * lighting * colDiffuse.rgb;
-    finalColor = vec4(litColor, texColor.a * colDiffuse.a);
-})";
+    vec3 buttCenter = vec3(0.0, 0.32, -0.24);
+    float buttDist  = length((fragPosition - buttCenter) / vec3(0.24, 0.20, 0.14));
+    float buttMask  = (fragPosition.z < -0.10) ? clamp(1.0 - smoothstep(0.15, 1.0, buttDist), 0.0, 1.0) : 0.0;
+    vec3 blush      = vec3(1.0, 0.30, 0.38);
+    vec3 redSkin    = mix(baseRgb, blush, uRedness * buttMask * 0.60);
+    vec3 finalRgb   = redSkin * lighting * colDiffuse.rgb + blush * (0.22 * uRedness * buttMask);
+    finalColor      = vec4(finalRgb, texColor.a * colDiffuse.a);
+})";;
 
 static const char* VS_WATER = R"(
 #version 330
@@ -532,8 +695,8 @@ void main() {
         N = normalize(fragNormal * 0.60 + rippleN * 0.40);
     }
 
-    vec3 deepCol    = vec3(0.02, 0.18, 0.46);
-    vec3 shallowCol = vec3(0.05, 0.64, 0.88);
+    vec3 deepCol    = vec3(0.01, 0.22, 0.52);
+    vec3 shallowCol = vec3(0.04, 0.68, 0.92);
     float depthMix  = clamp(N.y * 0.85 - 0.10, 0.0, 1.0);
     vec3 baseCol    = mix(deepCol, shallowCol, depthMix);
 
@@ -541,8 +704,8 @@ void main() {
     vec2 uvC2 = fragPos.xz * 0.13 + vec2(-uTime * 0.030, uTime * 0.020);
     float c1 = texture(causticTex, uvC1).r;
     float c2 = (uQualityLevel >= 1) ? texture(causticTex, uvC2).r : c1;
-    float causticVal = (c1 * 0.6 + c2 * 0.4) * 0.65;
-    vec3 causticCol = shallowCol * (causticVal * 1.32);
+    float causticVal = (c1 * 0.6 + c2 * 0.4) * 0.68;
+    vec3 causticCol = shallowCol * (causticVal * 1.38);
 
     vec2 uvF1 = fragPos.xz * 0.22 + vec2(0.0, -uTime * 0.10);
     float f1 = texture(foam1Tex, uvF1).r;
@@ -552,21 +715,26 @@ void main() {
         f2 = texture(foam2Tex, uvF2).r;
     }
     float foamSample = f1 * 0.65 + f2 * 0.35;
-    float foamMask = smoothstep(0.64, 0.82, foamSample) * 0.85;
-    vec3 foamCol = vec3(0.75, 0.97, 1.00);
+    float foamMask = smoothstep(0.62, 0.80, foamSample) * 0.88;
+    vec3 foamCol = vec3(0.82, 0.98, 1.00);
 
     vec3 sunDir = normalize(vec3(-0.35, 0.80, -0.45));
     vec3 R = reflect(-sunDir, N);
     float RdotV = max(dot(R, V), 0.0);
-    float spec = pow(RdotV, 64.0) * 0.45;
-    vec3 sunGlint = vec3(1.0, 0.95, 0.85) * spec;
+    float spec = pow(RdotV, 64.0) * 0.52;
+    vec3 sunGlint = vec3(1.0, 0.96, 0.86) * spec;
 
-    float fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.20;
-    vec3 skyGlint = vec3(0.60, 0.82, 0.98) * fresnel;
+    float fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.24;
+    vec3 skyGlint = vec3(0.62, 0.86, 1.00) * fresnel;
 
     vec3 waterBody = baseCol + causticCol + skyGlint;
     vec3 rgb = mix(waterBody, foamCol, foamMask) + sunGlint;
-    finalColor = vec4(rgb, 0.94);
+
+    float camDist = length(camPos - fragPos);
+    float fogFactor = clamp((camDist - 60.0) / 55.0, 0.0, 0.65);
+    rgb = mix(rgb, vec3(0.68, 0.86, 0.98), fogFactor);
+
+    finalColor = vec4(rgb, 0.95);
 }
 )";
 #endif
@@ -580,7 +748,7 @@ struct FrustumPlanes {
 
 static FrustumPlanes ExtractCameraFrustum(const Camera3D& cam, float aspect) {
     Matrix matView = MatrixLookAt(cam.position, cam.target, cam.up);
-    Matrix matProj = MatrixPerspective(cam.fovy * DEG2RAD, aspect, 0.2f, 220.0f);
+    Matrix matProj = MatrixPerspective(cam.fovy * DEG2RAD, aspect, 0.20f, 220.0f);
     Matrix vp      = MatrixMultiply(matView, matProj);
 
     FrustumPlanes fp;
@@ -880,11 +1048,16 @@ struct GasPhysicsConfig {
     float tapBurstForce     = 480.0f; // Force of quick tap burst (equalized with sustained)
     float sustainedMaxForce = 480.0f; // Max force of sustained gas hold
     float sustainedMinForce = 480.0f; // Min force of sustained gas hold
-    float steerTorque       = 6.0f;   // Steering torque
-    float boatMaxSpeed      = 14.0f;  // Maximum boat speed
+    float steerTorque       = 3.0f;   // Steering torque (Tuned down for realistic smooth control)
+    float steerScale        = 0.080f; // Steering scale factor (Tuned down so boat does not over-spin)
+    float boatMaxSpeed      = 12.0f;  // Maximum boat speed
     float waterLinearDrag   = 0.40f;  // Water linear drag/damping
-    float gasDrainRate      = 12.0f;  // Gas energy consumed per second
-    float gasRegenRate      = 18.0f;  // Gas energy regenerated per second
+    float gasDrainRate      = 6.50f;  // Gas energy consumed per second (>15s sustained hold)
+    float gasRegenRate      = 22.0f;  // Gas energy regenerated per second
+    float gasTapCost        = 3.50f;  // Energy cost per quick tap burst (~3.5% instead of 10%)
+    float gasTapThreshold   = 0.10f;  // Threshold in seconds between tap and sustained hold
+    float gasRegenDelay     = 0.50f;  // Delay before gas regeneration begins
+    float gasRampSeconds    = 2.50f;  // Time to ramp from min to max sustained force
 } gPhysCfg;
 
 static void SavePhysicsConfigJSON(const std::string& path = "physics_config.json") {
@@ -898,19 +1071,26 @@ static void SavePhysicsConfigJSON(const std::string& path = "physics_config.json
         "  \"sustainedMaxForce\": %.2f,\n"
         "  \"sustainedMinForce\": %.2f,\n"
         "  \"steerTorque\": %.2f,\n"
+        "  \"steerScale\": %.3f,\n"
         "  \"boatMaxSpeed\": %.2f,\n"
         "  \"waterLinearDrag\": %.3f,\n"
         "  \"gasDrainRate\": %.2f,\n"
-        "  \"gasRegenRate\": %.2f\n"
+        "  \"gasRegenRate\": %.2f,\n"
+        "  \"gasTapCost\": %.2f,\n"
+        "  \"gasTapThreshold\": %.2f,\n"
+        "  \"gasRegenDelay\": %.2f,\n"
+        "  \"gasRampSeconds\": %.2f\n"
         "}\n",
         gPhysCfg.tapBurstForce, gPhysCfg.sustainedMaxForce, gPhysCfg.sustainedMinForce,
-        gPhysCfg.steerTorque, gPhysCfg.boatMaxSpeed, gPhysCfg.waterLinearDrag,
-        gPhysCfg.gasDrainRate, gPhysCfg.gasRegenRate);
+        gPhysCfg.steerTorque, gPhysCfg.steerScale, gPhysCfg.boatMaxSpeed, gPhysCfg.waterLinearDrag,
+        gPhysCfg.gasDrainRate, gPhysCfg.gasRegenRate,
+        gPhysCfg.gasTapCost, gPhysCfg.gasTapThreshold, gPhysCfg.gasRegenDelay, gPhysCfg.gasRampSeconds);
     fclose(f);
 }
 
 static void LoadPhysicsConfigJSON(const std::string& path = "physics_config.json") {
-    std::string resolved = ResolveAsset(path);
+    std::string resolved = GetWritableSettingsPath(path);
+    if (!FileExists(resolved.c_str())) resolved = ResolveAsset(path);
     char* txt = LoadFileText(resolved.c_str());
     if (!txt) { SavePhysicsConfigJSON(path); return; }
     const char* end = txt + strlen(txt);
@@ -918,10 +1098,15 @@ static void LoadPhysicsConfigJSON(const std::string& path = "physics_config.json
     ParseJsonFloatField(txt, end, "\"sustainedMaxForce\"", gPhysCfg.sustainedMaxForce);
     ParseJsonFloatField(txt, end, "\"sustainedMinForce\"", gPhysCfg.sustainedMinForce);
     ParseJsonFloatField(txt, end, "\"steerTorque\"", gPhysCfg.steerTorque);
+    ParseJsonFloatField(txt, end, "\"steerScale\"", gPhysCfg.steerScale);
     ParseJsonFloatField(txt, end, "\"boatMaxSpeed\"", gPhysCfg.boatMaxSpeed);
     ParseJsonFloatField(txt, end, "\"waterLinearDrag\"", gPhysCfg.waterLinearDrag);
     ParseJsonFloatField(txt, end, "\"gasDrainRate\"", gPhysCfg.gasDrainRate);
     ParseJsonFloatField(txt, end, "\"gasRegenRate\"", gPhysCfg.gasRegenRate);
+    ParseJsonFloatField(txt, end, "\"gasTapCost\"", gPhysCfg.gasTapCost);
+    ParseJsonFloatField(txt, end, "\"gasTapThreshold\"", gPhysCfg.gasTapThreshold);
+    ParseJsonFloatField(txt, end, "\"gasRegenDelay\"", gPhysCfg.gasRegenDelay);
+    ParseJsonFloatField(txt, end, "\"gasRampSeconds\"", gPhysCfg.gasRampSeconds);
     UnloadFileText(txt);
 }
 
@@ -930,7 +1115,8 @@ enum AppScreenState {
     SCREEN_LAN_LOBBY  = 1,
     SCREEN_SETTINGS   = 2,
     SCREEN_GAMEPLAY   = 3,
-    SCREEN_FIND_LOBBY = 4
+    SCREEN_FIND_LOBBY = 4,
+    SCREEN_INTRO      = 5
 };
 
 
@@ -966,74 +1152,80 @@ struct ComicParticle {
 
 static const int MAX_PARTICLES = 400;
 
+struct RippleRing {
+    Vector3 position;
+    float   timer;    // 0.0 to 0.8s
+    bool    active;
+};
+static const int MAX_RIPPLES = 32;
+static RippleRing rippleRings[MAX_RIPPLES];
+
+static void EmitWaterRipple(Vector3 pos) {
+    float wY = 0.58f;
+    float dXZ = 0.0f;
+    Vector3 nearestW;
+    QueryActualWaterSurface(pos, wY, dXZ, nearestW);
+    for (int i = 0; i < MAX_RIPPLES; i++) {
+        if (!rippleRings[i].active) {
+            rippleRings[i].position = pos;
+            rippleRings[i].position.y = wY + 0.04f; // Sits visibly right on water surface
+            rippleRings[i].timer = 0.0f;
+            rippleRings[i].active = true;
+            break;
+        }
+    }
+}
+
 static ComicParticle particles[MAX_PARTICLES];
 
 static void EmitFartBurst(Vector3 pos, Vector3 thrustDir, float chargePercent, bool isSuperSync = false) {
-
-    int count = 10 + (int)(chargePercent * 16.0f);
-
+    int count = 3 + (int)(chargePercent * 3.0f);
     if (isSuperSync) count *= 2;
-
     for (int i = 0; i < count; i++) {
-
+        int chosenIdx = -1;
+        float oldestLife = -1.0f;
         for (int p = 0; p < MAX_PARTICLES; p++) {
-
             if (!particles[p].active) {
-
-                particles[p].active = true;
-
-                particles[p].position = pos + Vector3{
-
-                    ((float)rand() / RAND_MAX - 0.5f) * 0.35f,
-
-                    0.20f + ((float)rand() / RAND_MAX) * 0.25f,
-
-                    ((float)rand() / RAND_MAX - 0.5f) * 0.35f
-
-                };
-
-                Vector3 spread = Vector3{
-
-                    ((float)rand() / RAND_MAX - 0.5f) * 1.4f,
-
-                    1.2f + ((float)rand() / RAND_MAX) * 1.5f,
-
-                    ((float)rand() / RAND_MAX - 0.5f) * 1.4f
-
-                };
-
-                Vector3 hDir = Vector3Normalize(Vector3{ thrustDir.x + spread.x * 0.35f, 0.0f, thrustDir.z + spread.z * 0.35f });
-
-                float blastSpeed = 2.5f + chargePercent * 4.0f;
-
-                particles[p].velocity = Vector3{ hDir.x * blastSpeed, spread.y, hDir.z * blastSpeed };
-
-                particles[p].size = 0.45f + (chargePercent * 0.35f) + ((float)rand() / RAND_MAX) * 0.20f;
-
-                if (isSuperSync) particles[p].size *= 1.25f;
-
-                particles[p].alpha = 0.95f;
-
-                particles[p].rotation = ((float)rand() / RAND_MAX) * 360.0f;
-
-                particles[p].rotSpeed = ((float)rand() / RAND_MAX - 0.5f) * 90.0f;
-
-                particles[p].life = 0.0f;
-
-                particles[p].maxLife = 1.0f + chargePercent * 0.6f;
-
-                particles[p].spriteIndex = rand() % 4;
-
+                chosenIdx = p;
                 break;
-
             }
-
+            if (particles[p].life > oldestLife) {
+                oldestLife = particles[p].life;
+                chosenIdx = p;
+            }
         }
+        if (chosenIdx >= 0) {
+            int p = chosenIdx;
+            particles[p].active = true;
+            particles[p].position = pos + Vector3{
+                ((float)rand() / RAND_MAX - 0.5f) * 0.25f,
+                0.05f + ((float)rand() / RAND_MAX) * 0.15f,
+                ((float)rand() / RAND_MAX - 0.5f) * 0.25f
+            };
+            if (particles[p].position.y > 0.65f) particles[p].position.y = 0.65f;
 
+            Vector3 spread = Vector3{
+                ((float)rand() / RAND_MAX - 0.5f) * 0.8f,
+                0.25f + ((float)rand() / RAND_MAX) * 0.20f,
+                ((float)rand() / RAND_MAX - 0.5f) * 0.8f
+            };
+            Vector3 hDir = Vector3Normalize(Vector3{ thrustDir.x + spread.x * 0.35f, 0.0f, thrustDir.z + spread.z * 0.35f });
+            float horizSpeed = 1.5f + chargePercent * 2.0f;
+            float vertSpeed  = 0.25f + ((float)rand() / RAND_MAX) * 0.20f;
+            particles[p].velocity = Vector3{ hDir.x * horizSpeed, vertSpeed, hDir.z * horizSpeed };
+
+            particles[p].size = 0.90f + (chargePercent * 0.50f) + ((float)rand() / RAND_MAX) * 0.20f;
+            if (isSuperSync) particles[p].size *= 1.25f;
+            particles[p].alpha = 1.0f;
+            particles[p].rotation = ((float)rand() / RAND_MAX) * 360.0f;
+            particles[p].rotSpeed = ((float)rand() / RAND_MAX - 0.5f) * 45.0f;
+            particles[p].life = 0.0f;
+            particles[p].maxLife = 0.90f + chargePercent * 0.40f;
+            particles[p].spriteIndex = rand() % 4;
+        }
     }
-
+    EmitWaterRipple(pos);
 }
-
 // =============================================================================
 
 // 6. Camera Controller with Shake Trauma
@@ -1117,191 +1309,127 @@ static inline float WrapAnglePi(float a) {
 // Gas Energy State (Per Pirate)
 
 struct PirateGasState {
-
     float gasEnergy;
-
     bool  gasDepleted;
-
     float regenDelayTimer;
-
     float pressTimer;
-
     bool  isPressing;
-
     bool  isSustained;
-
     float sustainedCharge; // 0.0 to 1.0
-
     float releaseTimer;
-
     float releaseStartCharge;
 
+    // A2: Set in Update() at the exact instant pressTimer crosses threshold, reset at start of Update()
+    bool  crossedThreshold;
+
+    // A7 & B1: Physical strain and eye bulge model
+    float strain;
+    float eyeBulge;
+
     // Visual Butt State
-
     float boneScale;
-
     float trembleOffset;
-
     float redness;
-
     float jigglePhase;
 
     void Reset() {
-
         gasEnergy = GAS_MAX;
-
         gasDepleted = false;
-
         regenDelayTimer = 0.0f;
-
         pressTimer = 0.0f;
-
         isPressing = false;
-
         isSustained = false;
-
         sustainedCharge = 0.0f;
-
         releaseTimer = 0.0f;
-
         releaseStartCharge = 0.0f;
-
+        crossedThreshold = false;
+        strain = 0.0f;
+        eyeBulge = 0.0f;
         boneScale = 1.0f;
-
         trembleOffset = 0.0f;
-
         redness = 0.0f;
-
         jigglePhase = 0.0f;
-
     }
 
     void Update(float dt, bool inputDown, float runTime) {
-
+        crossedThreshold = false;
         jigglePhase += dt * 10.0f;
 
         if (inputDown && !gasDepleted) {
-
             isPressing = true;
-
+            float prevTimer = pressTimer;
             pressTimer += dt;
+            regenDelayTimer = gPhysCfg.gasRegenDelay;
 
-            regenDelayTimer = GAS_REGEN_DELAY;
-
-            if (pressTimer > GAS_TAP_THRESHOLD_SECONDS) {
-
-                // Sustained Hold
-
-                isSustained = true;
-
-                sustainedCharge = Clamp((pressTimer - GAS_TAP_THRESHOLD_SECONDS) / GAS_RAMP_SECONDS, 0.0f, 1.0f);
-
-                gasEnergy -= GAS_DRAIN_PER_SEC * dt;
-
-                if (gasEnergy <= 0.0f) {
-
-                    gasEnergy = 0.0f;
-
-                    gasDepleted = true;
-
-                    isSustained = false;
-
-                    isPressing = false;
-
-                    pressTimer = 0.0f;
-
-                }
-
+            float threshold = gPhysCfg.gasTapThreshold;
+            if (prevTimer <= threshold && pressTimer > threshold) {
+                crossedThreshold = true;
             }
 
-        } else {
-
-            // Released or depleted
-
-            if (isPressing) {
-
-                // If released after sustained hold, start release decay
-
-                if (isSustained) {
-
-                    releaseTimer = GAS_RELEASE_SECONDS;
-
-                    releaseStartCharge = sustainedCharge;
-
+            if (pressTimer > threshold) {
+                // Sustained Hold
+                isSustained = true;
+                sustainedCharge = Clamp((pressTimer - threshold) / gPhysCfg.gasRampSeconds, 0.0f, 1.0f);
+                gasEnergy -= gPhysCfg.gasDrainRate * dt;
+                if (gasEnergy <= 0.0f) {
+                    gasEnergy = 0.0f;
+                    gasDepleted = true;
+                    isSustained = false;
+                    isPressing = false;
+                    pressTimer = 0.0f;
                 }
-
+            }
+        } else {
+            // Released or depleted
+            if (isPressing) {
+                if (isSustained) {
+                    releaseTimer = GAS_RELEASE_SECONDS;
+                    releaseStartCharge = sustainedCharge;
+                }
                 isPressing = false;
-
                 isSustained = false;
-
                 pressTimer = 0.0f;
-
             }
 
             if (releaseTimer > 0.0f) {
-
                 releaseTimer -= dt;
-
                 if (releaseTimer < 0.0f) releaseTimer = 0.0f;
-
             }
 
             // Gas Regeneration
-
             if (regenDelayTimer > 0.0f) {
-
                 regenDelayTimer -= dt;
-
             } else {
-
-                gasEnergy += GAS_REGEN_PER_SEC * dt;
-
+                gasEnergy += gPhysCfg.gasRegenRate * dt;
                 if (gasEnergy >= GAS_MAX) {
-
                     gasEnergy = GAS_MAX;
-
                     gasDepleted = false;
-
                 } else if (gasDepleted && (gasEnergy / GAS_MAX) >= GAS_RECOVER_PERCENT) {
-
                     gasDepleted = false;
-
                 }
-
             }
 
             sustainedCharge = 0.0f;
-
         }
 
-        // Compute effective visual charge (starts immediately on press!)
-        float immediatePressCharge = isPressing ? Clamp(pressTimer / 1.2f, 0.18f, 1.0f) : 0.0f;
-        float visualCharge = fmaxf(sustainedCharge, immediatePressCharge);
-        if (releaseTimer > 0.0f) {
-            visualCharge = fmaxf(visualCharge, releaseStartCharge * (releaseTimer / GAS_RELEASE_SECONDS));
-        }
+        // B1 Strain & Eye Bulge model: persists during gasDepleted rest period!
+        float energyStrain = 1.0f - gasEnergy / GAS_MAX;
+        float holdStrain   = isPressing ? Clamp(pressTimer / 1.0f, 0.0f, 1.0f) : 0.0f;
+        float targetStrain = gasDepleted ? 1.0f : (isPressing ? fmaxf(holdStrain * 0.5f, energyStrain) : 0.0f);
+        float kStrain = (targetStrain > strain) ? 10.0f : 3.0f;
+        strain += (targetStrain - strain) * (1.0f - expf(-kStrain * dt));
 
-        // Gradual Butt Bone Swell (1.0x to 1.30x max)
-        boneScale = 1.0f + (BUTT_PEAK_SCALE - 1.0f) * visualCharge;
+        boneScale = 1.0f + 0.08f * strain;
+        redness   = Clamp((strain - 0.25f) / 0.75f, 0.0f, 1.0f);
+        eyeBulge  = Clamp((strain - 0.45f) / 0.55f, 0.0f, 1.0f) * 0.45f;
 
-        // Tremble vibration at 12Hz above 25% charge
-        if (visualCharge > 0.25f) {
-            float strength = (visualCharge - 0.25f) / 0.75f;
-            trembleOffset = sinf(2.0f * PI * BUTT_TREMBLE_FREQ * runTime) * BUTT_TREMBLE_AMP * strength;
+        if (strain > 0.5f) {
+            float strength = (strain - 0.5f) / 0.5f;
+            trembleOffset = fabsf(sinf(runTime * BUTT_TREMBLE_FREQ * 2.0f * PI)) * 0.015f * strength;
         } else {
             trembleOffset = 0.0f;
         }
-
-        // Smooth Gradual Vascular Redness (starts strictly at 60% charge!)
-        if (visualCharge >= 0.60f) {
-            float rFrac = Clamp((visualCharge - 0.60f) / 0.40f, 0.0f, 1.0f);
-            redness = rFrac * (0.65f + 0.35f * rFrac);
-        } else {
-            redness = 0.0f;
-        }
-
     }
-
 };
 
 // Unified Level Entity Architecture (Obstacles, Rocks, Trees, Checkpoints, Props, Custom Colliders)
@@ -1339,7 +1467,8 @@ enum EntityType {
     ENT_COL_WEDGE = 29,    // Wedge / Ramp
     ENT_COL_FALL_ZONE = 30,// Fall into abyss zone
     ENT_COL_KILL_ZONE = 31,// Explode / Kill boat zone
-    ENT_COUNT = 32
+    ENT_NAV_ARROW = 32,    // Directional Navigation Arrow (Chevron >>>)
+    ENT_COUNT = 33
 };
 
 static const char* ENTITY_TYPE_NAMES[] = {
@@ -1352,7 +1481,7 @@ static const char* ENTITY_TYPE_NAMES[] = {
     "COL_FLAT_WALL", "COL_FLAT_FLOOR",
     "COL_SQUARE", "COL_RECT_WALL", "COL_CIRCLE", "COL_CUBE",
     "COL_CYLINDER", "COL_CAPSULE", "COL_SPHERE", "COL_WEDGE",
-    "COL_FALL_ZONE", "COL_KILL_ZONE"
+    "COL_FALL_ZONE", "COL_KILL_ZONE", "NAV_ARROW_CHEVRON"
 };
 
 struct LevelEntity {
@@ -1820,7 +1949,7 @@ static bool TestBoatAgainstTriMesh(const ObstacleTriMesh& triMesh, const Matrix&
 static bool CheckObstacleTriangleMeshCollision(Vector3 raftPos, float raftRotY, const LevelEntity& ent,
                                                Vector3 animPos, float animYawDeg, float animPitchDeg, float animRollDeg,
                                                Vector3* outContactNormal = nullptr) {
-    if (ent.type == ENT_TREE_JUNGLE || ent.type == ENT_GUST || ent.type == ENT_CHECKPOINT) return false;
+    if (ent.type == ENT_TREE_JUNGLE || ent.type == ENT_GUST || ent.type == ENT_CHECKPOINT || ent.type == ENT_NAV_ARROW) return false;
     if (ent.type >= ENT_COL_FLAT_WALL) return false; // Handled by 12 custom shape colliders
 
     float s = (ent.scale > 0.01f) ? ent.scale : 1.0f;
@@ -1961,6 +2090,7 @@ void AssignEntityModelAndProps(LevelEntity& e) {
         case ENT_GUST:         e.model = nullptr;         e.radius = 4.50f * e.scale; break;
         case ENT_CHECKPOINT:   e.model = &gObsModels.mCP;  e.radius = 3.50f * e.scale; break;
         case ENT_TREE_JUNGLE:  e.model = &gObsModels.mTree;e.radius = 1.35f * e.scale; break;
+        case ENT_NAV_ARROW:    e.model = nullptr; e.radius = 1.80f * e.scale; e.sizeX = 1.20f; e.sizeY = 0.25f; e.sizeZ = 1.60f; e.isLethal = 0; break;
         // 12 Custom Collision Shapes
         case ENT_COL_FLAT_WALL:
             e.model = nullptr;
@@ -2299,10 +2429,103 @@ static void DrawColliderShapeIcon2D(int shapeIdx, Rectangle r, Color iconCol) {
     }
 }
 
-int main(int argc, char** argv) {
+// =============================================================================
+// Multiplayer Player Slot Tracking & Disconnect Detection (v8.6.1)
+// =============================================================================
+struct PlayerSlotState {
+    bool active = false;
+    bool isLocal = false;
+    char name[32] = { 0 };
+};
+static PlayerSlotState gMultiSlots[4] = {
+    { true,  true,  "Captain 1" },
+    { false, false, "Captain 2" },
+    { false, false, "Captain 3" },
+    { false, false, "Captain 4" }
+};
+static float gPeerActivityTimer = 0.0f;
+static float gDisconnectBannerTimer = 0.0f;
+static std::string gDisconnectBannerText = "";
 
+static uint32_t netSeqHost             = 0;
+static uint32_t netSeqClient           = 0;
+static uint16_t localClientTapSeq      = 0;
+static uint16_t localClientSuicideSeq  = 0;
+static uint16_t hostLastExecClientTap  = 0;
+static uint16_t hostLastExecSuicide    = 0;
+static uint16_t hostP1TapSeq           = 0;
+static uint16_t clientLastSeenP1Tap    = 0;
+static uint16_t clientLastSeenP2Tap    = 0;
+static LanInputPacket gLatchedClientIn = { 0 };
+static float    gClientInputHoldTimer  = 0.0f;
+static bool     s_prevLocalGasDown     = false;
+
+static void ResetMatchNetworkState(int connectedPlayers = 1) {
+    netSeqHost             = 0;
+    netSeqClient           = 0;
+    localClientTapSeq      = 0;
+    localClientSuicideSeq  = 0;
+    hostLastExecClientTap  = 0;
+    hostLastExecSuicide    = 0;
+    hostP1TapSeq           = 0;
+    clientLastSeenP1Tap    = 0;
+    clientLastSeenP2Tap    = 0;
+    memset(&gLatchedClientIn, 0, sizeof(gLatchedClientIn));
+    gClientInputHoldTimer  = 0.0f;
+    s_prevLocalGasDown     = false;
+    gPeerActivityTimer     = 0.0f;
+    gDisconnectBannerTimer = 0.0f;
+    gDisconnectBannerText  = "";
+
+    for (int i = 0; i < 4; i++) {
+        gMultiSlots[i].active = false;
+        gMultiSlots[i].isLocal = false;
+        memset(gMultiSlots[i].name, 0, sizeof(gMultiSlots[i].name));
+    }
+
+    if (connectedPlayers <= 1 || LanGetRole() == LAN_OFFLINE) {
+        gMultiSlots[0].active = true;
+        gMultiSlots[0].isLocal = true;
+        strncpy_s(gMultiSlots[0].name, LanGetLocalPlayerName(), sizeof(gMultiSlots[0].name) - 1);
+    } else if (LanGetRole() == LAN_CLIENT) {
+        gMultiSlots[0].active = true;
+        gMultiSlots[0].isLocal = false;
+        strncpy_s(gMultiSlots[0].name, LanGetRemotePlayerName(), sizeof(gMultiSlots[0].name) - 1);
+        gMultiSlots[1].active = true;
+        gMultiSlots[1].isLocal = true;
+        strncpy_s(gMultiSlots[1].name, LanGetLocalPlayerName(), sizeof(gMultiSlots[1].name) - 1);
+        for (int p = 2; p < connectedPlayers && p < 4; p++) {
+            gMultiSlots[p].active = true;
+            snprintf(gMultiSlots[p].name, sizeof(gMultiSlots[p].name), "Player %d", p + 1);
+        }
+    } else if (LanGetRole() == LAN_HOST) {
+        gMultiSlots[0].active = true;
+        gMultiSlots[0].isLocal = true;
+        strncpy_s(gMultiSlots[0].name, LanGetLocalPlayerName(), sizeof(gMultiSlots[0].name) - 1);
+        gMultiSlots[1].active = true;
+        gMultiSlots[1].isLocal = false;
+        strncpy_s(gMultiSlots[1].name, LanGetRemotePlayerName(), sizeof(gMultiSlots[1].name) - 1);
+        for (int p = 2; p < connectedPlayers && p < 4; p++) {
+            gMultiSlots[p].active = true;
+            snprintf(gMultiSlots[p].name, sizeof(gMultiSlots[p].name), "Player %d", p + 1);
+        }
+    } else {
+        gMultiSlots[0].active = true;
+        gMultiSlots[0].isLocal = true;
+        strncpy_s(gMultiSlots[0].name, LanGetLocalPlayerName(), sizeof(gMultiSlots[0].name) - 1);
+    }
+}
+
+int main(int argc, char** argv) {
+#if defined(_WIN32)
+    void* hConsole = GetConsoleWindow();
+    if (hConsole) ShowWindow(hConsole, 0); // SW_HIDE = 0
+#endif
+
+    bool skipIntroParam = false;
     bool testScreenshotMode = false;
     bool testEditorMode = false;
+    bool gPlacementTestMode = false;
     bool testDeathMode = false;
     bool testLanMode = false;
     bool testCatalogMode = false;
@@ -2310,6 +2533,9 @@ int main(int argc, char** argv) {
     bool useCustomTestCam = false;
     Vector3 customTestCamPos = { 0, 0, 0 };
     Vector3 customTestCamTarget = { 0, 0, 0 };
+    bool useCustomRaft = false;
+    Vector3 customRaftPos = { 15.55f, 0.58f, 90.80f };
+    float customRaftRotY = 3.14159f;
 
     std::string testShotName = "CustomEngine/scratch/active_gameplay.png";
 
@@ -2320,6 +2546,7 @@ int main(int argc, char** argv) {
 
     std::string testScreenArg = "";
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--no-intro") == 0) skipIntroParam = true;
         if (strcmp(argv[i], "--test-screen") == 0 && i + 1 < argc) testScreenArg = argv[++i];
         if (strcmp(argv[i], "--test-screenshot") == 0) testScreenshotMode = true;
         if (strcmp(argv[i], "--test-settings-tab") == 0 && i + 1 < argc) gTestSettingsTab = atoi(argv[++i]);
@@ -2328,6 +2555,7 @@ int main(int argc, char** argv) {
         if (strcmp(argv[i], "--test-death") == 0) testDeathMode = true;
         if (strcmp(argv[i], "--test-lan") == 0) testLanMode = true;
         if (strcmp(argv[i], "--test-select") == 0 && i + 1 < argc) testSelectIdx = atoi(argv[++i]);
+        if (strcmp(argv[i], "--placement-test") == 0) gPlacementTestMode = true;
 
         if (strcmp(argv[i], "--shot-name") == 0 && i + 1 < argc) {
             testShotName = argv[++i];
@@ -2364,6 +2592,14 @@ int main(int argc, char** argv) {
             customTestCamTarget.y = (float)atof(argv[++i]);
             customTestCamTarget.z = (float)atof(argv[++i]);
         }
+        if (strcmp(argv[i], "--test-raft") == 0 && i + 4 < argc) {
+            useCustomRaft = true;
+            testScreenshotMode = true;
+            customRaftPos.x = (float)atof(argv[++i]);
+            customRaftPos.y = (float)atof(argv[++i]);
+            customRaftPos.z = (float)atof(argv[++i]);
+            customRaftRotY  = (float)atof(argv[++i]) * DEG2RAD;
+        }
     }
 
     SetConfigFlags(FLAG_WINDOW_UNDECORATED | FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
@@ -2372,6 +2608,7 @@ int main(int argc, char** argv) {
     SetExitKey(KEY_NULL); // ESC key handled by in-game UI menu
 
     InitAudioDevice();
+    gJobSystem.Init(); // Activate all CPU cores on PC & Android!
 
     SetTargetFPS(60);
     // 3D Model Live Preview and Editor Inspector state
@@ -2395,10 +2632,13 @@ int main(int argc, char** argv) {
     int lightColLoc   = GetShaderLocation(shaderLighting, "lightColor");
 
     int ambColLoc     = GetShaderLocation(shaderLighting, "ambientColor");
+    int lightCamPosLoc   = GetShaderLocation(shaderLighting, "camPos");
+    int lightQualityLoc  = GetShaderLocation(shaderLighting, "uQualityLevel");
 
     int uRednessLoc   = GetShaderLocation(shaderLighting, "uRedness");
     int uButtSwellLoc = GetShaderLocation(shaderLighting, "uButtSwell");
     int uEyeBulgeLoc  = GetShaderLocation(shaderLighting, "uEyeBulge");
+    int uDebugEyesLoc = GetShaderLocation(shaderLighting, "uDebugEyes");
     int uSkinULoc     = GetShaderLocation(shaderLighting, "uSkinU");
     int uSkinVLoc     = GetShaderLocation(shaderLighting, "uSkinV");
     int uIsJungleTreeLoc = GetShaderLocation(shaderLighting, "uIsJungleTree");
@@ -2407,6 +2647,7 @@ int main(int argc, char** argv) {
     float zeroVal = 0.0f;
     SetShaderValue(shaderLighting, uButtSwellLoc, &zeroVal, SHADER_UNIFORM_FLOAT);
     SetShaderValue(shaderLighting, uEyeBulgeLoc,  &zeroVal, SHADER_UNIFORM_FLOAT);
+    if (uDebugEyesLoc != -1) SetShaderValue(shaderLighting, uDebugEyesLoc, &zeroVal, SHADER_UNIFORM_FLOAT);
     SetShaderValue(shaderLighting, uSkinULoc,     &zeroVal, SHADER_UNIFORM_FLOAT);
     SetShaderValue(shaderLighting, uSkinVLoc,     &zeroVal, SHADER_UNIFORM_FLOAT);
 
@@ -2500,6 +2741,8 @@ int main(int argc, char** argv) {
     Texture2D texCrashed    = LoadTexture(ResolveAsset("extracted_assets/ui/Icon_RaftCrashed.png").c_str());
     Texture2D texRaftPin    = LoadTexture(ResolveAsset("extracted_assets/ui/Icon_RaftS.png").c_str());
     Texture2D texFinish     = LoadTexture(ResolveAsset("extracted_assets/ui/Icon_Finish.png").c_str());
+    Texture2D texArrowM     = LoadTexture(ResolveAsset("extracted_assets/textures/Icon_ArrowM.png").c_str());
+    SetTextureFilter(texArrowM, TEXTURE_FILTER_BILINEAR);
     Texture2D texEsc        = LoadTexture(ResolveAsset("extracted_assets/ui/keyboard_escape.png").c_str());
     SetTextureFilter(texHipo, TEXTURE_FILTER_BILINEAR);
     SetTextureFilter(texClock, TEXTURE_FILTER_BILINEAR);
@@ -2528,8 +2771,41 @@ int main(int argc, char** argv) {
     Model cp2Model     = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_CheckPointV2.obj").c_str());
     Model cp3Model     = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_CheckPointV3.obj").c_str());
     Model boatModel    = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_BoatMain_ThreeP.obj").c_str());
-    Model charA        = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_Character_SeatedA.obj").c_str());
-    Model charB        = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_Character_SeatedB.obj").c_str());
+    std::string charAGripPath = ResolveAsset("extracted_assets/meshes/GM_3D_Character_SeatedA_Grip.obj");
+    if (!FileExists(charAGripPath.c_str())) charAGripPath = ResolveAsset("extracted_assets/meshes/Pirate_SeatedA_Grip.obj");
+    if (!FileExists(charAGripPath.c_str())) charAGripPath = ResolveAsset("extracted_assets/meshes/GM_3D_Character_SeatedA.obj");
+
+    std::string charBGripPath = ResolveAsset("extracted_assets/meshes/GM_3D_Character_SeatedB_Grip.obj");
+    if (!FileExists(charBGripPath.c_str())) charBGripPath = ResolveAsset("extracted_assets/meshes/Pirate_SeatedB_Grip.obj");
+    if (!FileExists(charBGripPath.c_str())) charBGripPath = ResolveAsset("extracted_assets/meshes/GM_3D_Character_SeatedB.obj");
+
+    Model charA        = LoadModel(charAGripPath.c_str());
+    Model charB        = LoadModel(charBGripPath.c_str());
+
+    // Extract unique eye vertices for placement test verification
+    sEyeVertsLocal.clear();
+    if (charA.meshCount > 0 && charA.meshes[0].vertices != nullptr && charA.meshes[0].texcoords != nullptr) {
+        std::set<std::tuple<int, int, int>> uniquePts;
+        for (int k = 0; k < charA.meshes[0].vertexCount; k++) {
+            float vx = charA.meshes[0].vertices[k * 3 + 0];
+            float vy = charA.meshes[0].vertices[k * 3 + 1];
+            float vz = charA.meshes[0].vertices[k * 3 + 2];
+            float u  = charA.meshes[0].texcoords[k * 2 + 0];
+            float v  = charA.meshes[0].texcoords[k * 2 + 1];
+            bool isPupil  = (u < 0.08f) && (v < 0.12f || v > 0.88f);
+            bool isSclera = (u > 0.68f && u < 0.75f) && (v < 0.05f || v > 0.95f);
+            if (((vy > 0.68f && vz > 0.40f) || (vy > 0.88f && vz > 0.20f)) && (isPupil || isSclera)) {
+                int qx = (int)roundf(vx * 10000.0f);
+                int qy = (int)roundf(vy * 10000.0f);
+                int qz = (int)roundf(vz * 10000.0f);
+                if (uniquePts.find({ qx, qy, qz }) == uniquePts.end()) {
+                    uniquePts.insert({ qx, qy, qz });
+                    sEyeVertsLocal.push_back(Vector3{ vx, vy, vz });
+                }
+            }
+        }
+        TraceLog(LOG_INFO, "[PLACEMENT TEST] Extracted %d unique eye vertices from Pirate_Seated mesh.", (int)sEyeVertsLocal.size());
+    }
 
     // Authentic Obstacle Models (All 16 Types + Tree)
     gObsModels.mA1  = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_ObstacleA1.obj").c_str());
@@ -2578,10 +2854,15 @@ int main(int argc, char** argv) {
     Model crocModel = LoadModel(ResolveAsset("extracted_assets/meshes/GM_3D_Crocodile.obj").c_str());
     Model sharkModel= LoadModel(ResolveAsset("extracted_assets/meshes/Shark.obj").c_str());
 
-    // Canyon Environment Clustered Sectors (scene_2..15, 14 sectors fully loaded on PC & Android!)
+    Vector3 trackOffset  = Vector3{ 38.44f, 0.57f, 156.14f };
+
+    // Canyon Environment Clustered Sectors (scene_2..15, 14 sectors with tight clamped AABBs!)
     static const int ENV_SECTOR_COUNT = 14;
     Model envSectors[ENV_SECTOR_COUNT];
     BoundingBox envSectorBounds[ENV_SECTOR_COUNT];
+    Vector2 envSectorCenterXZ[ENV_SECTOR_COUNT];
+    float   envSectorRadiusXZ[ENV_SECTOR_COUNT];
+
     for (int s = 0; s < ENV_SECTOR_COUNT; s++) {
         std::string secName = "extracted_assets/meshes/Combined_Mesh_root__scene_" + std::to_string(s + 2) + ".obj";
         envSectors[s] = LoadModel(ResolveAsset(secName).c_str());
@@ -2596,7 +2877,26 @@ int main(int argc, char** argv) {
                 envSectorBounds[s].max.y = fmaxf(envSectorBounds[s].max.y, mb.max.y);
                 envSectorBounds[s].max.z = fmaxf(envSectorBounds[s].max.z, mb.max.z);
             }
+            // Clamp corrupted underground Y (-1557m) so Frustum Culling works with 100% precision!
+            envSectorBounds[s].min.y = fmaxf(envSectorBounds[s].min.y, -12.0f);
+            envSectorBounds[s].max.y = fminf(envSectorBounds[s].max.y,  35.0f);
+            envSectorCenterXZ[s] = Vector2{
+                0.5f * (envSectorBounds[s].min.x + envSectorBounds[s].max.x),
+                0.5f * (envSectorBounds[s].min.z + envSectorBounds[s].max.z)
+            };
+            float rx = 0.5f * (envSectorBounds[s].max.x - envSectorBounds[s].min.x);
+            float rz = 0.5f * (envSectorBounds[s].max.z - envSectorBounds[s].min.z);
+            envSectorRadiusXZ[s] = sqrtf(rx * rx + rz * rz);
         }
+    }
+
+    // Compute world-space BoundingBoxes for each spatial chunk of wallModel
+    std::vector<BoundingBox> wallChunkBounds(wallModel.meshCount);
+    for (int m = 0; m < wallModel.meshCount; m++) {
+        BoundingBox wb = GetMeshBoundingBox(wallModel.meshes[m]);
+        wb.min = Vector3Add(wb.min, trackOffset);
+        wb.max = Vector3Add(wb.max, trackOffset);
+        wallChunkBounds[m] = wb;
     }
 
     auto ApplyMat = [&](Model& m) {
@@ -2646,6 +2946,15 @@ int main(int argc, char** argv) {
     ApplyCharMat(boatModel);
     ApplyCharMat(charA);
     ApplyCharMat(charB);
+
+    // Step 0: Discovered placement and model parameters
+    TraceLog(LOG_INFO, "[PLACEMENT] Pirate Mesh: %s / %s (Grip). Boat Mesh: GM_3D_BoatMain_ThreeP.obj",
+             GetFileName(charAGripPath.c_str()), GetFileName(charBGripPath.c_str()));
+    TraceLog(LOG_INFO, "[PLACEMENT] Scalings: boatScale=(%.2f, %.2f, %.2f), pirateScale=%.2f, model.transform=Identity",
+             gCartoonFX.boatScale.x, gCartoonFX.boatScale.y, gCartoonFX.boatScale.z, kPirateScale);
+    TraceLog(LOG_INFO, "[PLACEMENT] Constants: kRimSeatRadius=%.2f, kRimSeatHeight=%.2f, kBoatMeshYawDeg=%.1f, floorY=0.518 (cushion surface)",
+             kRimSeatRadius, kRimSeatHeight, kBoatMeshYawDeg);
+    TraceLog(LOG_INFO, "[PLACEMENT] Transform Order: boatWorld -> rlScalef(boatScale) -> DrawBoat(rotY(45)) -> rlTranslatef(seatPos) -> rotY(rimAngle+180) -> leanHip(0,0.34,0) -> DrawPirate(scale=1.0)");
 
     // Crocodile uses Gradient_Pallete -> Authentic Olive Green!
     ApplyCharMat(crocModel);
@@ -2737,6 +3046,17 @@ int main(int argc, char** argv) {
     SetTextureFilter(texMenuOasisFull, TEXTURE_FILTER_BILINEAR);
     SetTextureFilter(texMenuOasisClean, TEXTURE_FILTER_BILINEAR);
     SetTextureFilter(texMenuRaftSleep, TEXTURE_FILTER_BILINEAR);
+
+    // Studio & Publisher Intro Splash Screen Assets (Redrawn Ultra-HD Cartoon Sequence)
+    Texture2D texIntroLogo = LoadTexture(ResolveAsset("extracted_assets/textures/intro_mgh_logo_hd.png").c_str());
+    SetTextureFilter(texIntroLogo, TEXTURE_FILTER_BILINEAR);
+
+    Texture2D texIntroAnim = { 0 }; // 1280x720 Streamed HD Cartoon Texture (Only 1 texture in VRAM!)
+    int currentIntroFrameIdx = -1;
+
+    Sound sndIntroFull = LoadSound(ResolveAudioFile("intro_full.wav").c_str());
+    float introTimer = 0.0f;
+    bool introAssetsLoaded = true;
 
     // Load authentic UI textures for Main Menu, Lobby, and Settings (Plan v7.0 Task 4)
     Texture2D texMainLogo        = LoadTexture(ResolveAsset("extracted_assets/textures/Icon_Logo.png").c_str());
@@ -2834,7 +3154,7 @@ int main(int argc, char** argv) {
 
     // World Transforms
 
-    Vector3 trackOffset  = Vector3{ 38.44f, 0.57f, 156.14f };
+    // trackOffset defined above
     // Task 4: Build actual 2D water triangle grid from GM_3D_Demo_Water.obj + trackOffset
     BuildWaterTriangleGrid(waterModel, trackOffset);
 
@@ -2947,8 +3267,8 @@ int main(int argc, char** argv) {
 
     camCtrl.yaw = 3.14159f;
     camCtrl.pitch = 0.26f;
-    camCtrl.distance = 5.8f;
-    camCtrl.targetDist = 5.8f;
+    camCtrl.distance = 5.0f; // B7: 15% closer camera
+    camCtrl.targetDist = 5.0f; // B7: 15% closer camera
     camCtrl.freeLookMode = false;
     camCtrl.pirateEyeLock = false;
     camCtrl.eyeBlinkTimer = 0.0f;
@@ -2970,17 +3290,22 @@ int main(int argc, char** argv) {
     // Left Pirate starts at rear-left (-152 deg), Right Pirate starts at rear-right (+152 deg)
     float p1RimAngle =  2.45f;
     float p2RimAngle = -2.45f;
+    float p3RimAngle =  1.5707963f;  // 90 deg (left/right)
+    float p4RimAngle = -1.5707963f; // 270 deg (-90 deg)
 
     float raceTimer = 0.0f;
     int totalDeaths = 0;
 
     // Interactive Level & Obstacle Editor (Unity / Godot style)
     bool singlePirateMode = (LanGetRole() == LAN_OFFLINE);
-    AppScreenState currentScreen = SCREEN_MAIN_MENU;
-    if (testScreenshotMode || testEditorMode || testDeathMode || testLanMode || useCustomTestCam) {
-        currentScreen = SCREEN_GAMEPLAY;
+    AppScreenState currentScreen = SCREEN_INTRO;
+    if (testScreenshotMode || testEditorMode || testDeathMode || testLanMode || useCustomTestCam || skipIntroParam || gPlacementTestMode) {
+        currentScreen = (skipIntroParam && !testScreenshotMode && !gPlacementTestMode) ? SCREEN_MAIN_MENU : SCREEN_GAMEPLAY;
     }
-    if (testScreenArg == "menu") {
+    if (testScreenArg == "intro") {
+        currentScreen = SCREEN_INTRO;
+        testScreenshotMode = true;
+    } else if (testScreenArg == "menu") {
         currentScreen = SCREEN_MAIN_MENU;
         testScreenshotMode = true;
     } else if (testScreenArg == "lobby") {
@@ -2994,6 +3319,15 @@ int main(int argc, char** argv) {
         LanStartDiscoveryListener(7778);
         currentScreen = SCREEN_FIND_LOBBY;
         testScreenshotMode = true;
+    } else if (testScreenArg == "disconnect") {
+        currentScreen = SCREEN_GAMEPLAY;
+        ResetMatchNetworkState(2);
+        gMultiSlots[1].active = false;
+        std::string rawMsg = (gCurrentLanguage == LANG_AR) ? "غادر اللاعب القرصان2 اللعبة - استمر وأكمل السباق بمفردك!" : "Player Pirate2 disconnected - Finish the race solo!";
+        gDisconnectBannerText = (gCurrentLanguage == LANG_AR) ? ArabicShaper::Reshape(rawMsg) : rawMsg;
+        gDisconnectBannerTimer = 5.0f;
+        singlePirateMode = true;
+        testScreenshotMode = true;
     } else if (testScreenArg == "mobile") {
         currentScreen = SCREEN_GAMEPLAY;
         gSettings.deviceMode = 2;
@@ -3005,6 +3339,13 @@ int main(int argc, char** argv) {
         raft.position = Vector3{ 16.5f, 0.45f, 64.0f };
         raft.velocity = Vector3{ 0.0f, 0.0f, -4.5f };
         raft.currentCP = 1;
+        testScreenshotMode = true;
+    }
+    if (useCustomRaft) {
+        currentScreen = SCREEN_GAMEPLAY;
+        raft.position = customRaftPos;
+        raft.rotationY = customRaftRotY;
+        raft.velocity = Vector3{ 0.0f, 0.0f, 0.0f };
         testScreenshotMode = true;
     }
 
@@ -3029,6 +3370,8 @@ int main(int argc, char** argv) {
     bool raceFinished = false;
 
     int testFrameCount = 0;
+    static int sPlacementStep = 0;
+    static int sStepFrame = 0;
 
     float runTime = 0.0f;
 
@@ -3105,7 +3448,7 @@ int main(int argc, char** argv) {
 
     while (!WindowShouldClose()) {
 
-        float dt = GetFrameTime();
+        float dt = testScreenshotMode ? (1.0f / 60.0f) : GetFrameTime();
 
         if (dt > 0.05f) dt = 0.05f;
         if (testDeathMode && testFrameCount == 20) {
@@ -3139,7 +3482,7 @@ int main(int argc, char** argv) {
         // Ambient coastal soundscape & OST management (Plan v8.0 Task 2)
         static float seagullTimer = 4.0f;
         static float shipHornTimer = 10.0f;
-        if (currentScreen != SCREEN_GAMEPLAY) {
+        if (currentScreen != SCREEN_GAMEPLAY && currentScreen != SCREEN_INTRO) {
             if (!IsSoundPlaying(sndMenuBeachOst)) PlaySound(sndMenuBeachOst);
             seagullTimer -= dt;
             if (seagullTimer <= 0.0f) {
@@ -3155,7 +3498,86 @@ int main(int argc, char** argv) {
             if (IsSoundPlaying(sndMenuBeachOst)) StopSound(sndMenuBeachOst);
         }
 
-                // LAN Networking Hotkeys (F2: Host | F3: Join | F4: Offline)
+                // Intro Splash Sequence Update & Transition
+        if (currentScreen == SCREEN_INTRO) {
+            if (introAssetsLoaded && sndIntroFull.frameCount > 0 && !IsSoundPlaying(sndIntroFull)) {
+                PlaySound(sndIntroFull);
+            }
+
+            introTimer += dt;
+
+            // Stream next HD cartoon frame if in Phase 2 or 3 (1.8s to 6.8s)
+            if (introTimer >= 1.8f && introTimer < 6.8f) {
+                float animTime = introTimer - 1.8f; // 0.0s to 5.0s
+                int targetFrame = (int)(animTime * 16.0f); // 0 to 79 (80 frames at 16 fps)
+                if (targetFrame < 0) targetFrame = 0;
+                if (targetFrame > 79) targetFrame = 79;
+
+                if (targetFrame != currentIntroFrameIdx) {
+                    currentIntroFrameIdx = targetFrame;
+                    char framePath[128];
+                    snprintf(framePath, sizeof(framePath), "extracted_assets/textures/intro_seq/f_%03d.png", currentIntroFrameIdx + 1);
+                    std::string resolved = ResolveAsset(framePath);
+                    if (FileExists(resolved.c_str())) {
+                        Image img = LoadImage(resolved.c_str());
+                        if (img.data != NULL) {
+                            ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+                            if (texIntroAnim.id == 0) {
+                                texIntroAnim = LoadTextureFromImage(img);
+                                SetTextureFilter(texIntroAnim, TEXTURE_FILTER_BILINEAR);
+                            } else {
+                                UpdateTexture(texIntroAnim, img.data);
+                            }
+                            UnloadImage(img);
+                        }
+                    }
+                }
+            }
+
+            // Allow skipping via Space, Enter, Escape, Mouse Click, or Screen Tap
+            bool skipPressed = (IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_ENTER) || 
+                                IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || 
+                                (GetTouchPointCount() > 0 && introTimer > 0.3f));
+
+            if (introTimer >= 6.8f || skipPressed) {
+                currentScreen = SCREEN_MAIN_MENU;
+                if (introAssetsLoaded) {
+                    if (IsSoundPlaying(sndIntroFull)) StopSound(sndIntroFull);
+                    if (texIntroLogo.id != 0) UnloadTexture(texIntroLogo);
+                    if (texIntroAnim.id != 0) UnloadTexture(texIntroAnim);
+                    if (sndIntroFull.frameCount > 0) UnloadSound(sndIntroFull);
+                    texIntroLogo.id = 0;
+                    texIntroAnim.id = 0;
+                    sndIntroFull.frameCount = 0;
+                    introAssetsLoaded = false;
+                }
+            }
+        }
+
+#if !defined(__ANDROID__)
+        // F1 Hotkey: Level Editor Toggle (Keyboard F1 from ANY screen: Gameplay, Menu, Intro, etc.)
+        if (IsKeyPressed(KEY_F1)) {
+            if (currentScreen != SCREEN_GAMEPLAY) {
+                currentScreen = SCREEN_GAMEPLAY;
+                editorMode = true;
+            } else {
+                editorMode = !editorMode;
+            }
+            if (editorMode) {
+                editorCamPos = Vector3Add(raft.position, Vector3{ 0.0f, 4.5f, 6.0f });
+                editorCamYaw = raft.rotationY;
+                editorCamPitch = 0.35f;
+                editorMsg = "LEVEL EDITOR ACTIVE - GAMEPLAY FROZEN";
+                editorMsgTimer = 3.0f;
+                raft.velocity = Vector3Zero();
+                raft.angularVelocityY = 0.0f;
+                gasP1.isSustained = false; gasP1.pressTimer = 0.0f;
+                gasP2.isSustained = false; gasP2.pressTimer = 0.0f;
+            }
+        }
+#endif
+
+        // LAN Networking Hotkeys (F2: Host | F3: Join | F4: Offline)
         if (IsKeyPressed(KEY_F2)) {
             if (LanGetRole() == LAN_HOST) LanShutdown();
             else LanInitHost(7777);
@@ -3356,54 +3778,105 @@ int main(int argc, char** argv) {
         // AAA LAN Co-op Synchronization & Dual-Pirate Input Routing (v8.4.0)
         // User Rim Rule: 1 Player = 360°, 2 Players = 1/2 each, 3 = 1/3, 4 = 1/4
         // =====================================================================
-        static uint32_t netSeqHost             = 0;
-        static uint32_t netSeqClient           = 0;
-        static uint16_t localClientTapSeq      = 0;
-        static uint16_t localClientSuicideSeq  = 0;
-        static uint16_t hostLastExecClientTap  = 0;
-        static uint16_t hostLastExecSuicide    = 0;
-        static uint16_t hostP1TapSeq           = 0;
-        static uint16_t clientLastSeenP1Tap    = 0;
-        static uint16_t clientLastSeenP2Tap    = 0;
-        static LanInputPacket gLatchedClientIn = { 0 };
-        static float    gClientInputHoldTimer  = 0.0f;
-        static bool     s_prevLocalGasDown     = false;
+        // Network sequence and latched input variables are managed globally and reset cleanly per match
 
+        static float s_rimAngVel[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         auto ApplyPirateRimMovement = [](float& angle, float moveInput, float dtStep, int playerIndex, int totalPlayers) {
+            if (playerIndex < 0 || playerIndex >= 4) return;
+
+            // Smooth angular acceleration / deceleration (A5)
+            float targetSpeed = moveInput * 2.60f;
+            float accelRate = (fabsf(moveInput) > 0.01f) ? 14.0f : 18.0f;
+            s_rimAngVel[playerIndex] += (targetSpeed - s_rimAngVel[playerIndex]) * (1.0f - expf(-accelRate * dtStep));
+            angle += s_rimAngVel[playerIndex] * dtStep;
+
             if (totalPlayers <= 1) {
                 // 1 Player: 360 degrees full rotation around rim
-                angle += moveInput * 2.60f * dtStep;
                 while (angle >  PI) angle -= 2.0f * PI;
                 while (angle < -PI) angle += 2.0f * PI;
                 return;
             }
-            angle += moveInput * 2.50f * dtStep;
+
+            // Minimum separation between adjacent pirates (A5): 0.40 rad
             if (totalPlayers == 2) {
-                // 2 Players: Half boat each (P1 left [0.05f, 3.10f], P2 right [-3.10f, -0.05f])
+                // 2 Players: P1 on left [0.20f, 2.94f], P2 on right [-2.94f, -0.20f]
+                // 0.40 rad separation at front (0.0 rad) and at rear (+/- PI)
+                const float minSepHalf = 0.20f;
                 if (playerIndex == 0) {
-                    angle = Clamp(angle,  0.05f,  3.10f);
+                    if (angle < minSepHalf) { angle = minSepHalf; s_rimAngVel[playerIndex] = 0.0f; }
+                    if (angle > PI - minSepHalf) { angle = PI - minSepHalf; s_rimAngVel[playerIndex] = 0.0f; }
                 } else {
-                    angle = Clamp(angle, -3.10f, -0.05f);
+                    if (angle > -minSepHalf) { angle = -minSepHalf; s_rimAngVel[playerIndex] = 0.0f; }
+                    if (angle < -(PI - minSepHalf)) { angle = -(PI - minSepHalf); s_rimAngVel[playerIndex] = 0.0f; }
                 }
             } else if (totalPlayers == 3) {
-                // 3 Players: Third of boat each
+                // 3 Players: 0.40 rad separation between all 3 sectors
                 if (playerIndex == 0) {
-                    angle = Clamp(angle,  1.08f,  3.10f);
+                    angle = Clamp(angle,  1.25f,  2.94f);
                 } else if (playerIndex == 1) {
-                    angle = Clamp(angle, -1.02f,  1.02f);
+                    angle = Clamp(angle, -0.85f,  0.85f);
                 } else {
-                    angle = Clamp(angle, -3.10f, -1.08f);
+                    angle = Clamp(angle, -2.94f, -1.25f);
                 }
             } else if (totalPlayers >= 4) {
-                // 4 Players: Quarter of boat each
+                // 4 Players: 0.40 rad separation between all 4 sectors
                 if (playerIndex == 0) {
-                    angle = Clamp(angle,  1.60f,  3.10f);
+                    angle = Clamp(angle,  1.77f,  2.94f);
                 } else if (playerIndex == 1) {
-                    angle = Clamp(angle,  0.05f,  1.54f);
+                    angle = Clamp(angle,  0.20f,  1.37f);
                 } else if (playerIndex == 2) {
-                    angle = Clamp(angle, -1.54f, -0.05f);
+                    angle = Clamp(angle, -1.37f, -0.20f);
                 } else {
-                    angle = Clamp(angle, -3.10f, -1.60f);
+                    angle = Clamp(angle, -2.94f, -1.77f);
+                }
+            }
+        };
+
+        enum GasThrustType {
+            GAS_THRUST_TAP,
+            GAS_THRUST_SUSTAINED
+        };
+
+        auto ApplyGasThrust = [&](
+            PirateGasState& gas,
+            float rimAngle,
+            int pirateIndex,
+            GasThrustType thrustType,
+            float dtStep,
+            const Matrix& rotM,
+            Sound* sndTapArray = nullptr
+        ) {
+            if (raft.isDestroyed) return;
+
+            Vector3 outLocal    = Vector3{ sinf(rimAngle), 0.0f, cosf(rimAngle) };
+            Vector3 thrustLocal = Vector3Scale(outLocal, -1.0f);
+            Vector3 thrustWorld = Vector3Transform(thrustLocal, rotM);
+            Vector3 outWorld    = Vector3Transform(outLocal, rotM);
+            Vector3 posWorld    = Vector3Add(raft.position, Vector3Transform(Vector3Scale(outLocal, kRimSeatRadius + 0.30f), rotM));
+            posWorld.y += (kRimSeatHeight + 0.34f);
+
+            // A1: Steer torque depends on seat angle: steerTq = -sinf(rimAngle)
+            // Left seat (rimAngle > 0) -> steerTq < 0 -> angularVelocityY decreases -> boat turns RIGHT
+            // Right seat (rimAngle < 0) -> steerTq > 0 -> angularVelocityY increases -> boat turns LEFT
+            float steerTq = -sinf(rimAngle);
+
+            if (thrustType == GAS_THRUST_TAP) {
+                float tapDt = (dtStep > 0.001f) ? dtStep : 0.085f;
+                float tapAccel = (gPhysCfg.tapBurstForce / BOAT_MASS) * tapDt;
+                raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(thrustWorld, tapAccel));
+                raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque * gPhysCfg.steerScale) * tapDt;
+                gas.strain = fmaxf(gas.strain, 0.35f);
+                EmitFartBurst(posWorld, outWorld, 0.40f, isSuperSync);
+                if (sndTapArray) {
+                    PlaySound(sndTapArray[rand() % 3]);
+                }
+            } else if (thrustType == GAS_THRUST_SUSTAINED) {
+                float curForce = gPhysCfg.sustainedMinForce + (gPhysCfg.sustainedMaxForce - gPhysCfg.sustainedMinForce) * gas.sustainedCharge;
+                float accel    = (curForce / BOAT_MASS) * dtStep;
+                raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(thrustWorld, accel));
+                raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque * gPhysCfg.steerScale) * dtStep;
+                if (rand() % 4 == 0) {
+                    EmitFartBurst(posWorld, outWorld, gas.sustainedCharge, isSuperSync);
                 }
             }
         };
@@ -3434,8 +3907,7 @@ int main(int argc, char** argv) {
         bool localGasReleased = (s_prevLocalGasDown && !localGasDown);
         s_prevLocalGasDown = localGasDown;
 
-        float rimRadius = 0.94f;
-        Matrix boatRotM = MatrixRotateY(raft.rotationY);
+                Matrix boatRotM = MatrixRotateY(raft.rotationY);
 
         if (LanGetRole() == LAN_CLIENT) {
             // -----------------------------------------------------------------
@@ -3448,41 +3920,30 @@ int main(int argc, char** argv) {
                 ApplyPirateRimMovement(p2RimAngle, localRimMove, dt, 1, activeTotalPlayers);
             }
 
-            Vector3 p2OutwardLocal = Vector3{ sinf(p2RimAngle), 0.0f, cosf(p2RimAngle) };
-            Vector3 p2ThrustLocal  = Vector3Scale(p2OutwardLocal, -1.0f);
-            Vector3 p2ThrustWorld  = Vector3Transform(p2ThrustLocal, boatRotM);
-            Vector3 p2OutwardWorld = Vector3Transform(p2OutwardLocal, boatRotM);
-            Vector3 p2PosWorld     = Vector3Add(raft.position, Vector3Transform(Vector3Scale(p2OutwardLocal, rimRadius), boatRotM));
-            p2PosWorld.y += 0.55f;
-
-            // Detect Client Tap Burst BEFORE gasP2.Update resets pressTimer!
-            if (localGasReleased && gasP2.pressTimer <= GAS_TAP_THRESHOLD_SECONDS && gasP2.pressTimer > 0.01f && !gasP2.gasDepleted && !raft.isDestroyed) {
-                if (gasP2.gasEnergy >= GAS_TAP_COST) {
-                    gasP2.gasEnergy -= GAS_TAP_COST;
+            // Detect Client Tap Burst (released before threshold)
+            if (localGasReleased && gasP2.pressTimer <= gPhysCfg.gasTapThreshold && gasP2.pressTimer > 0.01f && !gasP2.gasDepleted && !raft.isDestroyed) {
+                if (gasP2.gasEnergy >= gPhysCfg.gasTapCost) {
+                    gasP2.gasEnergy -= gPhysCfg.gasTapCost;
                     localClientTapSeq++;
-                    // Client-Side Immediate Impulse Prediction
-                    float tapDt    = Clamp(gasP2.pressTimer, 0.06f, 0.10f);
-                    float tapAccel = (gPhysCfg.tapBurstForce / BOAT_MASS) * tapDt;
-                    raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p2ThrustWorld, tapAccel));
-                    float steerTq  = (p2OutwardLocal.x * p2ThrustLocal.z - p2OutwardLocal.z * p2ThrustLocal.x);
-                    raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * tapDt;
-                    EmitFartBurst(p2PosWorld, p2OutwardWorld, 0.4f);
-                    PlaySound(sndTap[rand() % 3]);
+                    float tapDt = Clamp(gasP2.pressTimer, 0.06f, 0.10f);
+                    ApplyGasThrust(gasP2, p2RimAngle, 1, GAS_THRUST_TAP, tapDt, boatRotM, sndTap);
                 }
             }
 
             gasP2.Update(dt, localGasDown, runTime);
 
+            // A2: Trigger tap burst immediately on crossing threshold while holding
+            if (gasP2.crossedThreshold && !gasP2.gasDepleted && !raft.isDestroyed) {
+                if (gasP2.gasEnergy >= gPhysCfg.gasTapCost) {
+                    gasP2.gasEnergy -= gPhysCfg.gasTapCost;
+                    localClientTapSeq++;
+                    ApplyGasThrust(gasP2, p2RimAngle, 1, GAS_THRUST_TAP, 0.085f, boatRotM, sndTap);
+                }
+            }
+
             // Client-Side Immediate Sustained Thrust Prediction for Pirate 2
             if (gasP2.isSustained && !raft.isDestroyed) {
-                float curForce = gPhysCfg.sustainedMinForce + (gPhysCfg.sustainedMaxForce - gPhysCfg.sustainedMinForce) * gasP2.sustainedCharge;
-                float accel    = (curForce / BOAT_MASS) * dt;
-                raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p2ThrustWorld, accel));
-                float steerTq  = (p2OutwardLocal.x * p2ThrustLocal.z - p2OutwardLocal.z * p2ThrustLocal.x);
-                raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * dt;
-                if (rand() % 4 == 0) {
-                    EmitFartBurst(p2PosWorld, p2OutwardWorld, gasP2.sustainedCharge);
-                }
+                ApplyGasThrust(gasP2, p2RimAngle, 1, GAS_THRUST_SUSTAINED, dt, boatRotM);
             }
 
             if (IsKeyPressed(KEY_R) || s_clientSuicideRequested) {
@@ -3503,23 +3964,45 @@ int main(int argc, char** argv) {
             inPkt.suicideSeq     = localClientSuicideSeq;
             LanClientSendInput(inPkt);
 
-            // Poll Authoritative State from Host & Reconcile Smoothly
+            // Poll Authoritative State from Host & Reconcile Smoothly (A7: dt-based exponential smoothing)
             LanStatePacket sp{};
-            if (LanClientPollState(sp)) {
+            bool gotState = LanClientPollState(sp);
+            if (gotState) {
+                gPeerActivityTimer = 0.0f;
+            } else if (gMultiSlots[0].active) {
+                gPeerActivityTimer += dt;
+                // Host Disconnected during match!
+                if (gPeerActivityTimer > 2.5f) {
+                    gMultiSlots[0].active = false; // Host's pirate model disappears!
+                    std::string dcName = (strlen(gMultiSlots[0].name) > 0) ? gMultiSlots[0].name : "Host";
+                    std::string rawMsg = (gCurrentLanguage == LANG_AR) ? ("غادر المضيف " + dcName + " - أصبحت القبطان الوحيد، أكمل السباق!") : ("Host " + dcName + " disconnected - You are now solo captain, finish the race!");
+                    gDisconnectBannerText = (gCurrentLanguage == LANG_AR) ? ArabicShaper::Reshape(rawMsg) : rawMsg;
+                    gDisconnectBannerTimer = 5.0f;
+                    LanShutdown();
+                    singlePirateMode = true;
+                    gConnectedPlayers = 1;
+                    PlaySound(sndShipHorn);
+                }
+            }
+
+            if (gotState) {
                 Vector3 authPos = Vector3{ sp.raftX, sp.raftY, sp.raftZ };
                 float posErr = Vector3Distance(raft.position, authPos);
                 if (posErr > 3.0f) {
                     raft.position = authPos;
                 } else {
-                    raft.position = Vector3Lerp(raft.position, authPos, 0.65f);
+                    float aPos = 1.0f - expf(-16.0f * dt);
+                    raft.position = Vector3Lerp(raft.position, authPos, aPos);
                 }
-                raft.velocity = Vector3Lerp(raft.velocity, Vector3{ sp.velX, sp.velY, sp.velZ }, 0.75f);
+                float aVel = 1.0f - expf(-20.0f * dt);
+                raft.velocity = Vector3Lerp(raft.velocity, Vector3{ sp.velX, sp.velY, sp.velZ }, aVel);
 
-                // Shortest-arc angular reconciliation
+                // Shortest-arc angular reconciliation (exponential smoothing)
                 float rotDiff = sp.rotY - raft.rotationY;
                 while (rotDiff >  PI) rotDiff -= 2.0f * PI;
                 while (rotDiff < -PI) rotDiff += 2.0f * PI;
-                raft.rotationY += rotDiff * 0.45f;
+                float aRot = 1.0f - expf(-12.0f * dt);
+                raft.rotationY += rotDiff * aRot;
                 raft.angularVelocityY = sp.angVelY;
                 raft.pitch = sp.pitch;
                 raft.roll  = sp.roll;
@@ -3533,37 +4016,44 @@ int main(int argc, char** argv) {
                 gasP1.gasDepleted      = (sp.p1Depleted != 0);
                 gasP1.redness          = sp.p1Redness;
                 gasP1.boneScale        = 1.0f + sp.p1Swell;
+                gasP1.eyeBulge         = sp.p1Eye; // A7: Client assigns eyeBulge from state packet
+                gasP1.strain           = sp.p1Redness;
 
                 // Reconcile Pirate 2 energy from Host
                 gasP2.gasEnergy        = sp.p2Energy;
                 gasP2.gasDepleted      = (sp.p2Depleted != 0);
 
-                // Trigger Host P1 Tap Burst VFX/Sound on Client when hostP1TapSeq increments
-                if (sp.p1TapSeq != clientLastSeenP1Tap) {
+                // Trigger Host P1 Tap Burst VFX/Sound on Client when hostP1TapSeq increments (A7: signed diff)
+                if ((int16_t)(sp.p1TapSeq - clientLastSeenP1Tap) > 0) {
                     clientLastSeenP1Tap = sp.p1TapSeq;
                     Vector3 p1OutL = Vector3{ sinf(p1RimAngle), 0.0f, cosf(p1RimAngle) };
                     Vector3 p1OutW = Vector3Transform(p1OutL, boatRotM);
-                    Vector3 p1PosW = Vector3Add(raft.position, Vector3Transform(Vector3Scale(p1OutL, rimRadius), boatRotM));
-                    p1PosW.y += 0.55f;
-                    EmitFartBurst(p1PosW, p1OutW, 0.4f);
+                    Vector3 p1PosW = Vector3Add(raft.position, Vector3Transform(Vector3Scale(p1OutL, kRimSeatRadius + 0.30f), boatRotM));
+                    p1PosW.y += (kRimSeatHeight + 0.34f);
+                    gasP1.strain = fmaxf(gasP1.strain, 0.35f);
+                    EmitFartBurst(p1PosW, p1OutW, 0.40f, isSuperSync);
                     PlaySound(sndTap[rand() % 3]);
                 }
 
                 if (gasP1.isSustained && !raft.isDestroyed && (rand() % 4 == 0)) {
                     Vector3 p1OutL = Vector3{ sinf(p1RimAngle), 0.0f, cosf(p1RimAngle) };
                     Vector3 p1OutW = Vector3Transform(p1OutL, boatRotM);
-                    Vector3 p1PosW = Vector3Add(raft.position, Vector3Transform(Vector3Scale(p1OutL, rimRadius), boatRotM));
-                    p1PosW.y += 0.55f;
-                    EmitFartBurst(p1PosW, p1OutW, gasP1.sustainedCharge);
+                    Vector3 p1PosW = Vector3Add(raft.position, Vector3Transform(Vector3Scale(p1OutL, kRimSeatRadius + 0.30f), boatRotM));
+                    p1PosW.y += (kRimSeatHeight + 0.34f);
+                    EmitFartBurst(p1PosW, p1OutW, gasP1.sustainedCharge, isSuperSync);
                 }
 
                 raceTimer      = sp.raceTimer;
                 totalDeaths    = sp.totalDeaths;
                 raft.deaths    = sp.totalDeaths;
                 raft.currentCP = sp.currentCP;
-                if (sp.isDestroyed && !raft.isDestroyed) {
-                    TriggerBoatDeath(DEATH_OBSTACLE);
-                } else if (!sp.isDestroyed && raft.isDestroyed) {
+                if ((sp.isDestroyed & 2) != 0 && !raceFinished) {
+                    raceFinished = true;
+                    PlaySound(fartSounds[0]);
+                }
+                if ((sp.isDestroyed & 1) != 0) {
+                    if (!raft.isDestroyed) TriggerBoatDeath(DEATH_OBSTACLE);
+                } else if (raft.isDestroyed) {
                     raft.isDestroyed = false;
                     ragdollA.active  = false;
                     ragdollB.active  = false;
@@ -3592,38 +4082,28 @@ int main(int argc, char** argv) {
                 ApplyPirateRimMovement(p1RimAngle, localRimMove, dt, 0, activeTotalPlayers);
             }
 
-            Vector3 p1OutwardLocal = Vector3{ sinf(p1RimAngle), 0.0f, cosf(p1RimAngle) };
-            Vector3 p1ThrustLocal  = Vector3Scale(p1OutwardLocal, -1.0f);
-            Vector3 p1ThrustWorld  = Vector3Transform(p1ThrustLocal, boatRotM);
-            Vector3 p1OutwardWorld = Vector3Transform(p1OutwardLocal, boatRotM);
-            Vector3 p1PosWorld     = Vector3Add(raft.position, Vector3Transform(Vector3Scale(p1OutwardLocal, rimRadius), boatRotM));
-            p1PosWorld.y += 0.55f;
-
-            if (localGasReleased && gasP1.pressTimer <= GAS_TAP_THRESHOLD_SECONDS && gasP1.pressTimer > 0.01f && !gasP1.gasDepleted && !raft.isDestroyed) {
-                if (gasP1.gasEnergy >= GAS_TAP_COST) {
-                    gasP1.gasEnergy -= GAS_TAP_COST;
+            if (localGasReleased && gasP1.pressTimer <= gPhysCfg.gasTapThreshold && gasP1.pressTimer > 0.01f && !gasP1.gasDepleted && !raft.isDestroyed) {
+                if (gasP1.gasEnergy >= gPhysCfg.gasTapCost) {
+                    gasP1.gasEnergy -= gPhysCfg.gasTapCost;
                     hostP1TapSeq++;
-                    float tapDt    = Clamp(gasP1.pressTimer, 0.06f, 0.10f);
-                    float tapAccel = (gPhysCfg.tapBurstForce / BOAT_MASS) * tapDt;
-                    raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p1ThrustWorld, tapAccel));
-                    float steerTq  = (p1OutwardLocal.x * p1ThrustLocal.z - p1OutwardLocal.z * p1ThrustLocal.x);
-                    raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * tapDt;
-                    EmitFartBurst(p1PosWorld, p1OutwardWorld, 0.4f);
-                    PlaySound(sndTap[rand() % 3]);
+                    float tapDt = Clamp(gasP1.pressTimer, 0.06f, 0.10f);
+                    ApplyGasThrust(gasP1, p1RimAngle, 0, GAS_THRUST_TAP, tapDt, boatRotM, sndTap);
                 }
             }
 
             gasP1.Update(dt, localGasDown, runTime);
 
-            if (gasP1.isSustained && !raft.isDestroyed) {
-                float curForce = gPhysCfg.sustainedMinForce + (gPhysCfg.sustainedMaxForce - gPhysCfg.sustainedMinForce) * gasP1.sustainedCharge;
-                float accel    = (curForce / BOAT_MASS) * dt;
-                raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p1ThrustWorld, accel));
-                float steerTq  = (p1OutwardLocal.x * p1ThrustLocal.z - p1OutwardLocal.z * p1ThrustLocal.x);
-                raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * dt;
-                if (rand() % 4 == 0) {
-                    EmitFartBurst(p1PosWorld, p1OutwardWorld, gasP1.sustainedCharge);
+            // A2: Trigger tap burst immediately on crossing threshold while holding
+            if (gasP1.crossedThreshold && !gasP1.gasDepleted && !raft.isDestroyed) {
+                if (gasP1.gasEnergy >= gPhysCfg.gasTapCost) {
+                    gasP1.gasEnergy -= gPhysCfg.gasTapCost;
+                    hostP1TapSeq++;
+                    ApplyGasThrust(gasP1, p1RimAngle, 0, GAS_THRUST_TAP, 0.085f, boatRotM, sndTap);
                 }
+            }
+
+            if (gasP1.isSustained && !raft.isDestroyed) {
+                ApplyGasThrust(gasP1, p1RimAngle, 0, GAS_THRUST_SUSTAINED, dt, boatRotM);
             }
 
             // Process Remote Client (Pirate 2) in LAN_HOST Mode!
@@ -3638,7 +4118,6 @@ int main(int argc, char** argv) {
                     while (angDiff >  PI) angDiff -= 2.0f * PI;
                     while (angDiff < -PI) angDiff += 2.0f * PI;
                     p2RimAngle += angDiff * 0.65f;
-                    ApplyPirateRimMovement(p2RimAngle, 0.0f, dt, 1, activeTotalPlayers);
                 } else {
                     if (gClientInputHoldTimer > 0.0f) {
                         gClientInputHoldTimer -= dt;
@@ -3652,30 +4131,17 @@ int main(int argc, char** argv) {
                     ApplyPirateRimMovement(p2RimAngle, Clamp(gLatchedClientIn.rimMove, -1.0f, 1.0f), dt, 1, activeTotalPlayers);
                 }
 
-                Vector3 p2OutwardLocal = Vector3{ sinf(p2RimAngle), 0.0f, cosf(p2RimAngle) };
-                Vector3 p2ThrustLocal  = Vector3Scale(p2OutwardLocal, -1.0f);
-                Vector3 p2ThrustWorld  = Vector3Transform(p2ThrustLocal, boatRotM);
-                Vector3 p2OutwardWorld = Vector3Transform(p2OutwardLocal, boatRotM);
-                Vector3 p2PosWorld     = Vector3Add(raft.position, Vector3Transform(Vector3Scale(p2OutwardLocal, rimRadius), boatRotM));
-                p2PosWorld.y += 0.55f;
-
-                // Execute Reliable Client Tap Burst when tapBurstSeq increments!
-                if (gLatchedClientIn.tapBurstSeq != hostLastExecClientTap && !raft.isDestroyed) {
+                // Execute Reliable Client Tap Burst when tapBurstSeq increments! (A7: signed 16-bit diff)
+                if ((int16_t)(gLatchedClientIn.tapBurstSeq - hostLastExecClientTap) > 0 && !raft.isDestroyed) {
                     hostLastExecClientTap = gLatchedClientIn.tapBurstSeq;
-                    if (gasP2.gasEnergy >= GAS_TAP_COST) {
-                        gasP2.gasEnergy -= GAS_TAP_COST;
+                    if (gasP2.gasEnergy >= gPhysCfg.gasTapCost) {
+                        gasP2.gasEnergy -= gPhysCfg.gasTapCost;
                     }
-                    float tapDt    = 0.085f;
-                    float tapAccel = (gPhysCfg.tapBurstForce / BOAT_MASS) * tapDt;
-                    raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p2ThrustWorld, tapAccel));
-                    float steerTq  = (p2OutwardLocal.x * p2ThrustLocal.z - p2OutwardLocal.z * p2ThrustLocal.x);
-                    raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * tapDt;
-                    EmitFartBurst(p2PosWorld, p2OutwardWorld, 0.4f);
-                    PlaySound(sndTap[rand() % 3]);
+                    ApplyGasThrust(gasP2, p2RimAngle, 1, GAS_THRUST_TAP, 0.085f, boatRotM, sndTap);
                 }
 
-                // Execute Client Suicide Request if suicideSeq incremented
-                if (gLatchedClientIn.suicideSeq != hostLastExecSuicide) {
+                // Execute Client Suicide Request if suicideSeq incremented (A7: signed 16-bit diff)
+                if ((int16_t)(gLatchedClientIn.suicideSeq - hostLastExecSuicide) > 0) {
                     hostLastExecSuicide = gLatchedClientIn.suicideSeq;
                     if (!raft.isDestroyed) TriggerBoatDeath(DEATH_SUICIDE);
                 }
@@ -3685,14 +4151,7 @@ int main(int argc, char** argv) {
 
                 // Apply Client Sustained Thrust to Boat Physics on Host!
                 if (gasP2.isSustained && !raft.isDestroyed) {
-                    float curForce = gPhysCfg.sustainedMinForce + (gPhysCfg.sustainedMaxForce - gPhysCfg.sustainedMinForce) * gasP2.sustainedCharge;
-                    float accel    = (curForce / BOAT_MASS) * dt;
-                    raft.velocity  = Vector3Add(raft.velocity, Vector3Scale(p2ThrustWorld, accel));
-                    float steerTq  = (p2OutwardLocal.x * p2ThrustLocal.z - p2OutwardLocal.z * p2ThrustLocal.x);
-                    raft.angularVelocityY += steerTq * (gPhysCfg.steerTorque / BOAT_MASS) * 22.0f * dt;
-                    if (rand() % 4 == 0) {
-                        EmitFartBurst(p2PosWorld, p2OutwardWorld, gasP2.sustainedCharge);
-                    }
+                    ApplyGasThrust(gasP2, p2RimAngle, 1, GAS_THRUST_SUSTAINED, dt, boatRotM);
                 }
             }
 
@@ -3818,7 +4277,7 @@ int main(int argc, char** argv) {
             raft.velocity.y += (heave * 45.0f - raft.velocity.y * 8.0f) * dt;
         } else if (!overWater) {
             raft.velocity.y -= 32.0f * dt;
-            if (raft.position.y < (actualWaterY - 6.5f) && !raft.isDestroyed) {
+            if (raft.position.y < (actualWaterY - 6.5f) && !raft.isDestroyed && LanGetRole() != LAN_CLIENT) {
                 TriggerBoatDeath(DEATH_VOID);
             }
         }
@@ -3836,9 +4295,39 @@ int main(int argc, char** argv) {
             raft.velocity.z *= ratio;
         }
 
-        // Boat is 100% Flat on Water (Fixes Image 1 Tilt!)
-        raft.pitch = Lerp(raft.pitch, 0.0f, 10.0f * dt);
-        raft.roll  = Lerp(raft.roll, Clamp(raft.angularVelocityY * 0.025f, -0.08f, 0.08f), 10.0f * dt);
+        // Boat Terrain & Water Slope Tilt (Aligns boat pitch & roll with hills/water slides)
+        Vector3 boatFwd   = Vector3{ sinf(raft.rotationY), 0.0f, cosf(raft.rotationY) };
+        Vector3 boatRight = Vector3{ cosf(raft.rotationY), 0.0f, -sinf(raft.rotationY) };
+
+        float sampleDist = 1.10f;
+        float yFwd = actualWaterY, yBack = actualWaterY, yR = actualWaterY, yL = actualWaterY;
+        float dDummy; Vector3 ptDummy;
+        QueryActualWaterSurface(Vector3Add(raft.position, Vector3Scale(boatFwd, sampleDist)),      yFwd,  dDummy, ptDummy);
+        QueryActualWaterSurface(Vector3Subtract(raft.position, Vector3Scale(boatFwd, sampleDist)), yBack, dDummy, ptDummy);
+        QueryActualWaterSurface(Vector3Add(raft.position, Vector3Scale(boatRight, sampleDist)),    yR,    dDummy, ptDummy);
+        QueryActualWaterSurface(Vector3Subtract(raft.position, Vector3Scale(boatRight, sampleDist)), yL, dDummy, ptDummy);
+
+        // Slope pitch (positive tilts nose down along slide, negative tilts nose up)
+        float slopePitch = atan2f(yBack - yFwd, sampleDist * 2.0f);
+        // Slope roll (positive rolls left, negative rolls right)
+        float slopeRoll  = atan2f(yR - yL, sampleDist * 2.0f);
+
+        // Dynamic spring tilt (pirate rim seating + acceleration dip)
+        float dynRoll = -sinf(p1RimAngle) * 0.05f;
+        if (!singlePirateMode) dynRoll += -sinf(p2RimAngle) * 0.05f;
+        dynRoll += Clamp(raft.angularVelocityY * 0.015f, -0.04f, 0.04f);
+
+        float fwdVel = Vector3DotProduct(raft.velocity, boatFwd);
+        static float s_prevFwdVel = 0.0f;
+        float fwdAccel = (dt > 0.0001f) ? (fwdVel - s_prevFwdVel) / dt : 0.0f;
+        s_prevFwdVel = fwdVel;
+        float dynPitch = Clamp(fwdAccel * 0.008f, -0.08f, 0.08f);
+
+        float targetPitch = Clamp(slopePitch + dynPitch, -1.05f, 1.05f); // up to ~60 deg slope
+        float targetRoll  = Clamp(slopeRoll  + dynRoll,  -0.70f, 0.70f); // up to ~40 deg bank
+
+        raft.pitch = Lerp(raft.pitch, targetPitch, 10.0f * dt);
+        raft.roll  = Lerp(raft.roll,  targetRoll,  10.0f * dt);
         raft.speed = horizSpeed;
 
         // Broadcast authoritative state from Host (Plan v8.4.0)
@@ -3867,8 +4356,8 @@ int main(int argc, char** argv) {
             sp.p2Redness   = gasP2.redness;
             sp.p1Swell     = gasP1.boneScale - 1.0f;
             sp.p2Swell     = gasP2.boneScale - 1.0f;
-            sp.p1Eye       = gasP1.isPressing ? Clamp(gasP1.pressTimer / 0.45f, 0.0f, 1.0f) : 0.0f;
-            sp.p2Eye       = gasP2.isPressing ? Clamp(gasP2.pressTimer / 0.45f, 0.0f, 1.0f) : 0.0f;
+            sp.p1Eye       = gasP1.eyeBulge;
+            sp.p2Eye       = gasP2.eyeBulge;
             sp.p1Sustained = gasP1.isSustained ? 1 : 0;
             sp.p2Sustained = gasP2.isSustained ? 1 : 0;
             sp.p1Depleted  = gasP1.gasDepleted ? 1 : 0;
@@ -3878,7 +4367,7 @@ int main(int argc, char** argv) {
             sp.raceTimer   = raceTimer;
             sp.totalDeaths = raft.deaths;
             sp.currentCP   = raft.currentCP;
-            sp.isDestroyed = raft.isDestroyed ? 1 : 0;
+            sp.isDestroyed = (raft.isDestroyed ? 1 : 0) | (raceFinished ? 2 : 0);
             LanHostBroadcastState(sp);
         }
 
@@ -3917,7 +4406,7 @@ int main(int argc, char** argv) {
                     } else if (ent.colBehavior == 1 || ent.type == ENT_COL_FALL_ZONE) {
                         overWater = false;
                     } else if (ent.colBehavior == 2 || ent.type == ENT_COL_KILL_ZONE) {
-                        if (!raft.isDestroyed && raft.invulnerableTimer <= 0.0f) {
+                        if (!raft.isDestroyed && raft.invulnerableTimer <= 0.0f && LanGetRole() != LAN_CLIENT) {
                             TriggerBoatDeath(DEATH_OBSTACLE);
                         }
                     } else if (ent.colBehavior == 3) {
@@ -3948,10 +4437,40 @@ int main(int argc, char** argv) {
         }
 
         // 5. Check Obstacle & Hazard Collisions with Exact 3D Triangle Mesh Precision ("تقنية المثلثات")
-        for (auto& ent : levelEntities) {
+        struct ParallelEntEval {
             Vector3 animPos;
-            float animYaw, animPitch, animRoll;
-            GetEntityAnimatedTransform(ent, animPos, animYaw, animPitch, animRoll);
+            float   animYaw, animPitch, animRoll;
+            Vector3 contactNormal;
+            bool    hit;
+        };
+        static std::vector<ParallelEntEval> s_entEval;
+        if (s_entEval.size() != levelEntities.size()) s_entEval.resize(levelEntities.size());
+
+        // Run heavy 3D triangle mesh collision & animation transforms in parallel across ALL CPU cores!
+        gJobSystem.ParallelFor((int)levelEntities.size(), 8, [&](int idx) {
+            const LevelEntity& ent = levelEntities[idx];
+            ParallelEntEval& ev = s_entEval[idx];
+            GetEntityAnimatedTransform(ent, ev.animPos, ev.animYaw, ev.animPitch, ev.animRoll);
+            ev.contactNormal = Vector3{ 0.0f, 1.0f, 0.0f };
+            ev.hit = false;
+            if (ent.type != ENT_GUST && ent.type != ENT_TREE_JUNGLE && ent.type != ENT_CHECKPOINT && ent.type != ENT_NAV_ARROW && ent.type < ENT_COL_FLAT_WALL) {
+                float dx = raft.position.x - ev.animPos.x;
+                float dz = raft.position.z - ev.animPos.z;
+                if (dx * dx + dz * dz <= (18.0f * 18.0f)) {
+                    ev.hit = CheckObstacleTriangleMeshCollision(
+                        raft.position, raft.rotationY, ent,
+                        ev.animPos, ev.animYaw, ev.animPitch, ev.animRoll, &ev.contactNormal
+                    );
+                }
+            }
+        });
+
+        for (size_t i = 0; i < levelEntities.size(); i++) {
+            auto& ent = levelEntities[i];
+            Vector3 animPos = s_entEval[i].animPos;
+            float animYaw = s_entEval[i].animYaw;
+            float animPitch = s_entEval[i].animPitch;
+            float animRoll = s_entEval[i].animRoll;
 
             if (ent.type == ENT_GUST) {
                 float d = Vector3Distance(raft.position, ent.position);
@@ -3965,8 +4484,8 @@ int main(int argc, char** argv) {
                 continue;
             }
 
-            Vector3 contactNormal = { 0, 1, 0 };
-            bool hit = CheckObstacleTriangleMeshCollision(raft.position, raft.rotationY, ent, animPos, animYaw, animPitch, animRoll, &contactNormal);
+            Vector3 contactNormal = s_entEval[i].contactNormal;
+            bool hit = s_entEval[i].hit;
 
             if (hit) {
                 if (ent.type == ENT_ROCK_1 || ent.type == ENT_ROCK_2) {
@@ -4041,7 +4560,7 @@ float crocWaterY = 0.55f, crocDist = 0.0f;
                     camCtrl.shakeTrauma = 0.7f;
                     PlaySound(fartSounds[1]);
                     EmitFartBurst(croc.position, toRaft, 0.9f);
-                    if (raft.health <= 0.0f) {
+                    if (raft.health <= 0.0f && LanGetRole() != LAN_CLIENT) {
                         TriggerBoatDeath(DEATH_CROCODILE);
                     }
                 }
@@ -4082,7 +4601,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                     camCtrl.shakeTrauma = 0.8f;
                     PlaySound(fartSounds[2]);
                     EmitFartBurst(shark.position, toRaft, 1.0f);
-                    if (raft.health <= 0.0f) {
+                    if (raft.health <= 0.0f && LanGetRole() != LAN_CLIENT) {
                         TriggerBoatDeath(DEATH_SHARK);
                     }
                 }
@@ -4156,11 +4675,12 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
         if (raft.invulnerableTimer > 0.0f) raft.invulnerableTimer -= dt;
 
         // Checkpoints & Finish Check (Plan v6.0 Task 2)
-        if (!editorMode && !raft.isDestroyed) {
+        if (!editorMode && !raft.isDestroyed && !gPlacementTestMode) {
             for (auto& ent : levelEntities) {
                 if (ent.type == ENT_CHECKPOINT) {
                     float dist = Vector3Distance(raft.position, ent.position);
-                    if (dist < 6.5f * ent.scale && !ent.cpPassed) {
+                    float triggerRadius = 2.0f * fmaxf(ent.scale, 0.8f);
+                    if (dist < triggerRadius && !ent.cpPassed) {
                         ent.cpPassed = true;
                         raft.lastCheckpointPos  = Vector3{ ent.position.x, ent.position.y + 0.25f, ent.position.z };
                         float cpSplineT = FindClosestSplineT(ent.position);
@@ -4178,32 +4698,48 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             }
         }
 
-        // Particle Updates
-
-        for (int p = 0; p < MAX_PARTICLES; p++) {
-
-            if (particles[p].active) {
-
-                particles[p].life += dt;
-
-                if (particles[p].life >= particles[p].maxLife) {
-
-                    particles[p].active = false;
-
-                } else {
-
-                    particles[p].position = Vector3Add(particles[p].position, Vector3Scale(particles[p].velocity, dt));
-
-                    particles[p].rotation += particles[p].rotSpeed * dt;
-
-                    particles[p].alpha = 1.0f - (particles[p].life / particles[p].maxLife);
-
-                    particles[p].size += dt * 0.6f;
-
-                }
-
+        // Boat cruising water ripples (ripples expand on surface when moving)
+        static float s_boatWakeTimer = 0.0f;
+        if (!raft.isDestroyed && raft.speed > 0.6f && overWater) {
+            s_boatWakeTimer += dt;
+            float wakeInterval = Clamp(0.28f - raft.speed * 0.012f, 0.08f, 0.25f);
+            if (s_boatWakeTimer >= wakeInterval) {
+                s_boatWakeTimer = 0.0f;
+                EmitWaterRipple(raft.position);
             }
+        }
 
+        // Particle Updates (B5: Clung to water, smooth drag & shrink)
+        gJobSystem.ParallelFor(MAX_PARTICLES, 64, [&](int p) {
+            if (particles[p].active) {
+                particles[p].life += dt;
+                if (particles[p].life >= particles[p].maxLife) {
+                    particles[p].active = false;
+                } else {
+                    particles[p].position = Vector3Add(particles[p].position, Vector3Scale(particles[p].velocity, dt));
+                    if (particles[p].position.y > 0.70f) particles[p].position.y = 0.70f;
+                    particles[p].velocity = Vector3Scale(particles[p].velocity, fmaxf(0.0f, 1.0f - 4.0f * dt));
+                    particles[p].rotation += particles[p].rotSpeed * dt;
+                    float progress = particles[p].life / particles[p].maxLife;
+                    if (progress < 0.70f) {
+                        particles[p].alpha = 1.0f;
+                    } else {
+                        float fade = (progress - 0.70f) / 0.30f;
+                        particles[p].alpha = 1.0f - fade;
+                        particles[p].size = fmaxf(0.2f, particles[p].size * (1.0f - dt * 1.5f));
+                    }
+                }
+            }
+        });
+
+        // Water Ripple Rings Update (B5)
+        for (int r = 0; r < MAX_RIPPLES; r++) {
+            if (rippleRings[r].active) {
+                rippleRings[r].timer += dt;
+                if (rippleRings[r].timer >= 0.80f) {
+                    rippleRings[r].active = false;
+                }
+            }
         }
 
         
@@ -4460,6 +4996,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             Vector3 desiredCamPos    = Vector3Add(Vector3Add(lookAnchor, camOffset), shakeOffset);
             Vector3 desiredCamTarget = Vector3Add(lookAnchor, Vector3{ sinf(camCtrl.yaw) * 4.2f, 0.90f, cosf(camCtrl.yaw) * 4.2f });
 
+
             camera.position = Vector3Lerp(camera.position, desiredCamPos, 14.0f * dt);
             camera.target   = Vector3Lerp(camera.target, desiredCamTarget, 14.0f * dt);
         }
@@ -4484,11 +5021,180 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             camera.fovy     = 55.0f;
         }
 
+        // Step 3b: Placement Test Automated Camera Sequencer
+        if (gPlacementTestMode) {
+            // Setup static raft state
+            raft.position = Vector3{ 15.55f, 0.58f, 90.80f };
+            raft.rotationY = 0.0f;
+            raft.pitch = 0.0f;
+            raft.roll = 0.0f;
+            raft.velocity = Vector3Zero();
+            raft.angularVelocityY = 0.0f;
+            camera.fovy = 50.0f;
+            camera.up = Vector3{ 0.0f, 1.0f, 0.0f };
+
+            Vector3 raftCenter = Vector3{ raft.position.x, raft.position.y + 0.15f, raft.position.z };
+
+            // Angle sequence: 0, 90, 180, 270 (modes: 0=side, 1=top, 2=chase)
+            int seatIdx = sPlacementStep / 3;
+            int camMode = sPlacementStep % 3;
+
+            float testAngles[4] = { 0.0f, 90.0f * DEG2RAD, 180.0f * DEG2RAD, 270.0f * DEG2RAD };
+
+            if (sPlacementStep < 12) {
+                float a = testAngles[seatIdx];
+                p1RimAngle = a;
+                gMultiSlots[0].active = true;
+                gMultiSlots[1].active = false;
+                gMultiSlots[2].active = false;
+                gMultiSlots[3].active = false;
+                gCartoonFX.boatScale = Vector3{ 1.0f, 1.0f, 1.0f };
+
+                Vector3 sPos = Vector3Add(raftCenter, Vector3{ sinf(a) * kRimSeatRadius, kRimSeatHeight, cosf(a) * kRimSeatRadius });
+                Vector3 tanDir = Vector3{ cosf(a), 0.0f, -sinf(a) };
+                Vector3 outDir = Vector3{ sinf(a), 0.0f, cosf(a) };
+
+                if (camMode == 0) { // Side view (tangential cross-section at seat)
+                    camera.position = Vector3Add(sPos, Vector3{ tanDir.x * 2.2f, 0.15f, tanDir.z * 2.2f });
+                    camera.target   = Vector3Add(sPos, Vector3{ 0.0f, 0.15f, 0.0f });
+                } else if (camMode == 1) { // Top view
+                    camera.position = Vector3Add(raftCenter, Vector3{ outDir.x * 0.3f, 3.8f, outDir.z * 0.3f });
+                    camera.target   = sPos;
+                } else { // Chase view
+                    camera.position = Vector3Add(sPos, Vector3{ outDir.x * 2.4f, 1.15f, outDir.z * 2.4f });
+                    camera.target   = Vector3Add(raftCenter, Vector3{ 0.0f, 0.25f, 0.0f });
+                }
+            } else if (sPlacementStep == 12) {
+                // All 4 pirates together
+                gMultiSlots[0].active = true; p1RimAngle = 0.0f;
+                gMultiSlots[1].active = true; p2RimAngle = 180.0f * DEG2RAD;
+                gMultiSlots[2].active = true; p3RimAngle = 90.0f * DEG2RAD;
+                gMultiSlots[3].active = true; p4RimAngle = 270.0f * DEG2RAD;
+                gCartoonFX.boatScale = Vector3{ 1.0f, 1.0f, 1.0f };
+
+                camera.position = Vector3Add(raftCenter, Vector3{ 0.0f, 4.6f, 0.20f });
+                camera.target   = raftCenter;
+            } else if (sPlacementStep == 13) {
+                // Maximum Cartoon Squash Side View
+                gMultiSlots[0].active = true; p1RimAngle = 0.0f;
+                gMultiSlots[1].active = false;
+                gMultiSlots[2].active = false;
+                gMultiSlots[3].active = false;
+                gCartoonFX.boatScale = Vector3{ 1.25f, 0.65f, 1.25f }; // Max squash
+                gasP1.strain = 0.0f; gasP1.eyeBulge = 0.0f;
+
+                Vector3 sPos = Vector3Add(raftCenter, Vector3{ 0.0f, kRimSeatHeight * 0.65f, kRimSeatRadius * 1.25f });
+                camera.position = Vector3Add(sPos, Vector3{ 2.2f, 0.15f, 0.0f });
+                camera.target   = Vector3Add(sPos, Vector3{ 0.0f, 0.15f, 0.0f });
+            } else if (sPlacementStep == 14) {
+                // Exact Side View: strain = 0.0 (Unsquashed boatScale 1.0)
+                gMultiSlots[0].active = true; p1RimAngle = 0.0f;
+                gMultiSlots[1].active = false; gMultiSlots[2].active = false; gMultiSlots[3].active = false;
+                gCartoonFX.boatScale = Vector3{ 1.0f, 1.0f, 1.0f };
+                gasP1.strain = 0.0f; gasP1.eyeBulge = 0.0f;
+
+                Vector3 sPos = Vector3Add(raftCenter, Vector3{ 0.0f, kRimSeatHeight, kRimSeatRadius });
+                camera.position = Vector3Add(sPos, Vector3{ 2.2f, 0.15f, 0.0f });
+                camera.target   = Vector3Add(sPos, Vector3{ 0.0f, 0.15f, 0.0f });
+            } else if (sPlacementStep == 15) {
+                // Exact Side View: strain = 1.0 (lean = 10 deg, boatScale 1.0)
+                gMultiSlots[0].active = true; p1RimAngle = 0.0f;
+                gMultiSlots[1].active = false; gMultiSlots[2].active = false; gMultiSlots[3].active = false;
+                gCartoonFX.boatScale = Vector3{ 1.0f, 1.0f, 1.0f };
+                gasP1.strain = 1.0f; gasP1.eyeBulge = 1.0f;
+
+                Vector3 sPos = Vector3Add(raftCenter, Vector3{ 0.0f, kRimSeatHeight, kRimSeatRadius });
+                camera.position = Vector3Add(sPos, Vector3{ 2.2f, 0.15f, 0.0f });
+                camera.target   = Vector3Add(sPos, Vector3{ 0.0f, 0.15f, 0.0f });
+            } else if (sPlacementStep == 16) {
+                // Front Close-Up of Face with Magenta Eye Vertices
+                gMultiSlots[0].active = true; p1RimAngle = 0.0f;
+                gMultiSlots[1].active = false; gMultiSlots[2].active = false; gMultiSlots[3].active = false;
+                gCartoonFX.boatScale = Vector3{ 1.0f, 1.0f, 1.0f };
+                gasP1.strain = 0.0f; gasP1.eyeBulge = 0.0f;
+                gPlacementDebugEyes = true;
+
+                Vector3 headCenter = Vector3{ raftCenter.x, raftCenter.y + kRimSeatHeight + 0.761f, raftCenter.z + kRimSeatRadius - 0.524f };
+                camera.position = Vector3{ headCenter.x, headCenter.y, headCenter.z - 0.48f };
+                camera.target   = headCenter;
+                camera.fovy     = 26.0f;
+            } else if (sPlacementStep == 17) {
+                // Side Close-Up of Head with Magenta Eye Vertices
+                gMultiSlots[0].active = true; p1RimAngle = 0.0f;
+                gMultiSlots[1].active = false; gMultiSlots[2].active = false; gMultiSlots[3].active = false;
+                gCartoonFX.boatScale = Vector3{ 1.0f, 1.0f, 1.0f };
+                gasP1.strain = 0.0f; gasP1.eyeBulge = 0.0f;
+                gPlacementDebugEyes = true;
+
+                Vector3 headCenter = Vector3{ raftCenter.x, raftCenter.y + kRimSeatHeight + 0.761f, raftCenter.z + kRimSeatRadius - 0.524f };
+                camera.position = Vector3{ headCenter.x + 0.52f, headCenter.y, headCenter.z };
+                camera.target   = headCenter;
+                camera.fovy     = 26.0f;
+            } else if (sPlacementStep == 18) {
+                // Rear Close-Up of Head with Bulge = 1.0 (Showing lateral, upward, and backward protrusion < 0.06m)
+                gMultiSlots[0].active = true; p1RimAngle = 0.0f;
+                gMultiSlots[1].active = false; gMultiSlots[2].active = false; gMultiSlots[3].active = false;
+                gCartoonFX.boatScale = Vector3{ 1.0f, 1.0f, 1.0f };
+                gasP1.strain = 1.0f; gasP1.eyeBulge = 1.0f;
+                gPlacementDebugEyes = false;
+
+                Vector3 headCenter = Vector3{ raftCenter.x, raftCenter.y + kRimSeatHeight + 0.761f, raftCenter.z + kRimSeatRadius - 0.524f };
+                camera.position = Vector3{ headCenter.x, headCenter.y + 0.05f, headCenter.z + 0.55f };
+                camera.target   = Vector3{ headCenter.x, headCenter.y + 0.02f, headCenter.z };
+                camera.fovy     = 28.0f;
+            } else if (sPlacementStep == 19) {
+                // HUD: Strain = 0.0 view
+                gMultiSlots[0].active = true; p1RimAngle = 0.0f;
+                gCartoonFX.boatScale = Vector3{ 1.0f, 1.0f, 1.0f };
+                gasP1.strain = 0.0f; gasP1.eyeBulge = 0.0f;
+                gPlacementDebugEyes = false;
+                camera.position = Vector3{ raftCenter.x, raftCenter.y + 1.5f, raftCenter.z + 3.0f };
+                camera.target   = raftCenter;
+                camera.fovy     = 50.0f;
+            } else if (sPlacementStep == 20) {
+                // HUD: Strain = 1.0 view (Bulging & red eyes on HUD icon)
+                gMultiSlots[0].active = true; p1RimAngle = 0.0f;
+                gCartoonFX.boatScale = Vector3{ 1.0f, 1.0f, 1.0f };
+                gasP1.strain = 1.0f; gasP1.eyeBulge = 1.0f;
+                gPlacementDebugEyes = false;
+                camera.position = Vector3{ raftCenter.x, raftCenter.y + 1.5f, raftCenter.z + 3.0f };
+                camera.target   = raftCenter;
+                camera.fovy     = 50.0f;
+            } else if (sPlacementStep == 21) {
+                // Close-Up at Hands Level from Side showing Deck Contact
+                gMultiSlots[0].active = true; p1RimAngle = 0.0f;
+                gMultiSlots[1].active = false; gMultiSlots[2].active = false; gMultiSlots[3].active = false;
+                gCartoonFX.boatScale = Vector3{ 1.0f, 1.0f, 1.0f };
+                gasP1.strain = 0.0f; gasP1.eyeBulge = 0.0f; gasP1.trembleOffset = 0.0f;
+                gPlacementDebugEyes = false;
+
+                Vector3 handPos = Vector3{ raftCenter.x, raftCenter.y + kRimSeatHeight + 0.02f, raftCenter.z + kRimSeatRadius - 0.50f };
+                camera.position = Vector3{ handPos.x + 0.95f, handPos.y + 0.12f, handPos.z + 0.05f };
+                camera.target   = handPos;
+                camera.fovy     = 32.0f;
+            } else if (sPlacementStep == 22) {
+                // Exact Side View: Strain = 1.0 WITH Tremble (+0.015m active)
+                gMultiSlots[0].active = true; p1RimAngle = 0.0f;
+                gMultiSlots[1].active = false; gMultiSlots[2].active = false; gMultiSlots[3].active = false;
+                gCartoonFX.boatScale = Vector3{ 1.0f, 1.0f, 1.0f };
+                gasP1.strain = 1.0f; gasP1.eyeBulge = 1.0f;
+                gasP1.trembleOffset = 0.015f;
+                gPlacementDebugEyes = false;
+
+                Vector3 sPos = Vector3Add(raftCenter, Vector3{ 0.0f, kRimSeatHeight, kRimSeatRadius });
+                camera.position = Vector3Add(sPos, Vector3{ 2.2f, 0.15f, 0.0f });
+                camera.target   = Vector3Add(sPos, Vector3{ 0.0f, 0.15f, 0.0f });
+                camera.fovy     = 50.0f;
+            }
+        }
+
         // Pass uniforms to Water Shader
 
         SetShaderValue(shaderWater, uTimeLoc, &runTime, SHADER_UNIFORM_FLOAT);
 
         SetShaderValue(shaderWater, camPosLoc, &camera.position, SHADER_UNIFORM_VEC3);
+        if (lightCamPosLoc != -1) SetShaderValue(shaderLighting, lightCamPosLoc, &camera.position, SHADER_UNIFORM_VEC3);
+        if (lightQualityLoc != -1) SetShaderValue(shaderLighting, lightQualityLoc, &gSettings.qualityLevel, SHADER_UNIFORM_INT);
 
         // =====================================================================
 
@@ -4573,6 +5279,8 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
             rlEnableBackfaceCulling();
             FrustumPlanes camFrustum = ExtractCameraFrustum(camera, (float)GetScreenWidth() / (float)GetScreenHeight());
+
+            // A. Draw In-Frustum Canyon Environment Sectors (Unified 1 draw call per sector!)
             for (int s = 0; s < ENV_SECTOR_COUNT; s++) {
                 if (envSectors[s].meshCount > 0) {
                     if (IsAABBInFrustum(camFrustum, envSectorBounds[s].min, envSectorBounds[s].max)) {
@@ -4581,8 +5289,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 }
             }
 
-            // B. Authentic Canyon Walls
-
+            // B. Authentic Canyon Walls (Guaranteed visible with authentic brown texture)
             DrawModel(wallModel, trackOffset, 1.0f, WHITE);
 
             // C. Authentic Water Surface
@@ -4593,7 +5300,10 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             rlPushMatrix();
                 rlTranslatef(startGatePos.x, startGatePos.y, startGatePos.z);
                 rlRotatef(0.0f, 0, 1, 0);
-                DrawModel(startModel, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
+                // B7: Smooth alpha fade when camera gets close to avoid clipping/blocking view
+                float distToCam = Vector3Distance(camera.position, startGatePos);
+                Color gateCol = (distToCam < 5.0f) ? ColorAlpha(WHITE, Clamp((distToCam - 1.5f) / 3.5f, 0.20f, 1.0f)) : WHITE;
+                DrawModel(startModel, Vector3{ 0, 0, 0 }, 1.0f, gateCol);
             rlPopMatrix();
 
             rlPushMatrix();
@@ -4661,7 +5371,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 continue;
             }
 
-            // Task 2: Checkpoint gate rendering with active green tint
+            // Task 2: Checkpoint gate rendering with active green tint + 3 Directional Navigation Chevrons (>>>)
             if (ent.type == ENT_CHECKPOINT) {
                 Color tint = ent.cpPassed ? COLOR_ACCENT_GREEN : WHITE;
                 rlPushMatrix();
@@ -4671,6 +5381,117 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 rlScalef(s * (float)ent.flipX, s * (float)ent.flipY, s * (float)ent.flipZ);
                 DrawModel(gObsModels.mCP, Vector3{ 0, 0, 0 }, 1.0f, tint);
                 rlPopMatrix();
+
+                // 3 Directional Navigation Chevrons (>>>) pointing down the canal path!
+                if (texArrowM.id != 0) {
+                    Vector3 cpTan;
+                    Vector3 cpRight;
+                    if (fabsf(ent.rotationY) > 0.01f) {
+                        float rotRad = ent.rotationY * DEG2RAD;
+                        cpTan = Vector3{ sinf(rotRad), 0.0f, cosf(rotRad) };
+                        cpRight = Vector3{ cosf(rotRad), 0.0f, -sinf(rotRad) };
+                    } else {
+                        float cpSplineT = FindClosestSplineT(ent.position);
+                        cpTan = GetSplineTangent(cpSplineT);
+                        cpRight = Vector3Normalize(Vector3{ cpTan.z, 0.0f, -cpTan.x });
+                    }
+                    float halfLen   = 0.95f * s; // Length along canal tangent
+                    float halfWidth = 0.65f * s; // Width across canal
+                    Vector3 vUp = Vector3{ 0.0f, 1.0f, 0.0f };
+
+                    rlDisableBackfaceCulling();
+                    rlSetTexture(texArrowM.id);
+
+                    for (int a = 0; a < 3; a++) {
+                        // Place 3 chevrons spaced across/through the checkpoint archway (-1.5m, 0.0m, +1.5m)
+                        float fwdOffset = -1.5f + (float)a * 1.5f;
+                        Vector3 arrowCenter = Vector3Add(ent.position, Vector3Scale(cpTan, fwdOffset));
+                        float arrWaterY = ent.position.y;
+                        float dummyD; Vector3 dummyPt;
+                        QueryActualWaterSurface(arrowCenter, arrWaterY, dummyD, dummyPt);
+
+                        // Sequential animated pulse flowing forward along track (>>>)
+                        float phase = fmodf(runTime * 4.0f - (float)a * 0.85f, 3.0f);
+                        if (phase < 0.0f) phase += 3.0f;
+                        float pulse = (phase < 1.0f) ? (1.0f - phase * 0.35f) : 0.60f;
+
+                        Color arrCol = ent.cpPassed 
+                            ? ColorAlpha(Color{ 74, 222, 128, 255 }, 0.80f * pulse)
+                            : ColorAlpha(Color{ 255, 230, 35, 255 }, 0.95f * pulse);
+
+                        // Water surface chevron quad (lying flat on water, pointing strictly forward along canal cpTan >>>)
+                        Vector3 cWater = Vector3{ arrowCenter.x, arrWaterY + 0.10f, arrowCenter.z };
+                        Vector3 w_v0 = Vector3Add(Vector3Subtract(cWater, Vector3Scale(cpTan, halfLen)), Vector3Scale(cpRight, -halfWidth)); // Base-left  (U=0, V=1)
+                        Vector3 w_v1 = Vector3Add(Vector3Add(cWater, Vector3Scale(cpTan, halfLen)),      Vector3Scale(cpRight, -halfWidth)); // Tip-left   (U=1, V=1)
+                        Vector3 w_v2 = Vector3Add(Vector3Add(cWater, Vector3Scale(cpTan, halfLen)),      Vector3Scale(cpRight,  halfWidth)); // Tip-right  (U=1, V=0)
+                        Vector3 w_v3 = Vector3Add(Vector3Subtract(cWater, Vector3Scale(cpTan, halfLen)), Vector3Scale(cpRight,  halfWidth)); // Base-right (U=0, V=0)
+
+                        rlBegin(RL_QUADS);
+                        rlColor4ub(arrCol.r, arrCol.g, arrCol.b, arrCol.a);
+                        rlTexCoord2f(0.0f, 1.0f); rlVertex3f(w_v0.x, w_v0.y, w_v0.z);
+                        rlTexCoord2f(1.0f, 1.0f); rlVertex3f(w_v1.x, w_v1.y, w_v1.z);
+                        rlTexCoord2f(1.0f, 0.0f); rlVertex3f(w_v2.x, w_v2.y, w_v2.z);
+                        rlTexCoord2f(0.0f, 0.0f); rlVertex3f(w_v3.x, w_v3.y, w_v3.z);
+                        rlEnd();
+                    }
+                    rlSetTexture(0);
+                    rlEnableBackfaceCulling();
+                }
+                continue;
+            }
+
+            // Standalone Placeable & Rotatable Navigation Arrow Chevrons (>>>)
+            if (ent.type == ENT_NAV_ARROW) {
+                if (texArrowM.id != 0) {
+                    float s = (ent.scale > 0.01f) ? ent.scale : 1.0f;
+                    float rotRad = ent.rotationY * DEG2RAD;
+                    Vector3 arrowTan = Vector3{ sinf(rotRad), 0.0f, cosf(rotRad) };
+                    Vector3 arrowRight = Vector3{ cosf(rotRad), 0.0f, -sinf(rotRad) };
+                    float halfLen   = 0.95f * s;
+                    float halfWidth = 0.65f * s;
+
+                    rlDisableBackfaceCulling();
+                    rlSetTexture(texArrowM.id);
+
+                    for (int a = 0; a < 3; a++) {
+                        float fwdOffset = (-1.5f + (float)a * 1.5f) * s;
+                        Vector3 arrowCenter = Vector3Add(ent.position, Vector3Scale(arrowTan, fwdOffset));
+                        float arrWaterY = ent.position.y;
+                        float dummyD; Vector3 dummyPt;
+                        QueryActualWaterSurface(arrowCenter, arrWaterY, dummyD, dummyPt);
+                        float yPos = fmaxf(arrWaterY + 0.10f, ent.position.y);
+
+                        float phase = fmodf(runTime * 4.0f - (float)a * 0.85f, 3.0f);
+                        if (phase < 0.0f) phase += 3.0f;
+                        float pulse = (phase < 1.0f) ? (1.0f - phase * 0.35f) : 0.60f;
+
+                        Color arrCol = ColorAlpha(Color{ 255, 230, 35, 255 }, 0.95f * pulse);
+
+                        Vector3 cWater = Vector3{ arrowCenter.x, yPos, arrowCenter.z };
+                        Vector3 w_v0 = Vector3Add(Vector3Subtract(cWater, Vector3Scale(arrowTan, halfLen)), Vector3Scale(arrowRight, -halfWidth));
+                        Vector3 w_v1 = Vector3Add(Vector3Add(cWater, Vector3Scale(arrowTan, halfLen)),      Vector3Scale(arrowRight, -halfWidth));
+                        Vector3 w_v2 = Vector3Add(Vector3Add(cWater, Vector3Scale(arrowTan, halfLen)),      Vector3Scale(arrowRight,  halfWidth));
+                        Vector3 w_v3 = Vector3Add(Vector3Subtract(cWater, Vector3Scale(arrowTan, halfLen)), Vector3Scale(arrowRight,  halfWidth));
+
+                        rlBegin(RL_QUADS);
+                        rlColor4ub(arrCol.r, arrCol.g, arrCol.b, arrCol.a);
+                        rlTexCoord2f(0.0f, 1.0f); rlVertex3f(w_v0.x, w_v0.y, w_v0.z);
+                        rlTexCoord2f(1.0f, 1.0f); rlVertex3f(w_v1.x, w_v1.y, w_v1.z);
+                        rlTexCoord2f(1.0f, 0.0f); rlVertex3f(w_v2.x, w_v2.y, w_v2.z);
+                        rlTexCoord2f(0.0f, 0.0f); rlVertex3f(w_v3.x, w_v3.y, w_v3.z);
+                        rlEnd();
+                    }
+                    rlSetTexture(0);
+                    rlEnableBackfaceCulling();
+                }
+
+                // Selection highlight ring & orientation guide when selected in Editor
+                if (editorMode && selectedObs >= 0 && selectedObs < (int)levelEntities.size() && levelEntities[selectedObs].id == ent.id) {
+                    DrawCircle3D(ent.position, 2.5f * ent.scale, Vector3{ 1, 0, 0 }, 90.0f, Color{ 255, 215, 0, 180 });
+                    float rRad = ent.rotationY * DEG2RAD;
+                    Vector3 tip = Vector3Add(ent.position, Vector3{ sinf(rRad) * 3.5f * ent.scale, 0.2f, cosf(rRad) * 3.5f * ent.scale });
+                    DrawLine3D(Vector3Add(ent.position, Vector3{ 0, 0.2f, 0 }), tip, Color{ 255, 230, 35, 255 });
+                }
                 continue;
             }
 
@@ -4777,54 +5598,63 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                     rlRotatef(raft.roll * RAD2DEG, 0, 0, 1);
 
                     // Authentic Boat Model (Scale 1.0f matches character proportions)
-
                     rlScalef(gCartoonFX.boatScale.x, gCartoonFX.boatScale.y, gCartoonFX.boatScale.z);
+
+                    // Step 2.2: Rotate boat mesh only by kBoatMeshYawDeg (45 deg) around Y
+                    // Posts move to 45/135/225/315 deg, leaving cardinal seats (0/90/180/270 deg) clear!
+                    rlPushMatrix();
+                    rlRotatef(kBoatMeshYawDeg, 0, 1, 0);
                     DrawModel(boatModel, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
+                    rlPopMatrix();
 
-                    // Left Pirate (Player 1: Green Hippo - SeatedB)
-            float p1Redness = gasP1.redness;
-            float p1ButtSwell = gasP1.boneScale - 1.0f; // 0.0 to 0.30 (*1.3 scale)
-            float p1EyeBulge = (gasP1.isPressing || gasP1.releaseTimer > 0.0f) ? Clamp(gasP1.pressTimer / 0.45f, 0.0f, 1.0f) : 0.0f;
-            SetShaderValue(shaderLighting, uRednessLoc,   &p1Redness,   SHADER_UNIFORM_FLOAT);
-            SetShaderValue(shaderLighting, uButtSwellLoc, &p1ButtSwell, SHADER_UNIFORM_FLOAT);
-            SetShaderValue(shaderLighting, uEyeBulgeLoc,  &p1EyeBulge,  SHADER_UNIFORM_FLOAT);
+                    // Step 2: Seated Pirates on Rim (Drawn inside boat matrix for shared cartoon squash)
+                    for (int p = 0; p < 4; p++) {
+                        if (!gMultiSlots[p].active) continue;
+                        float curAngle = (p == 0) ? p1RimAngle : ((p == 1) ? p2RimAngle : ((p == 2) ? p3RimAngle : p4RimAngle));
+                        float rStrain = (p == 0) ? gasP1.strain : gasP2.strain;
+                        float rTremble = (p == 0) ? gasP1.trembleOffset : ((p == 1) ? gasP2.trembleOffset : 0.0f);
+                        float rRedness = (p == 0) ? gasP1.redness : ((p == 1) ? gasP2.redness : 0.0f);
+                        float rSwell = (p == 0) ? (gasP1.boneScale - 1.0f) : ((p == 1) ? (gasP2.boneScale - 1.0f) : 0.0f);
+                        float rBulge = (p == 0) ? gasP1.eyeBulge : ((p == 1) ? gasP2.eyeBulge : 0.0f);
 
-            rlPushMatrix();
-            // Image 6 Authentic Outer Rim Seating (Legs and buttocks dangle outside over water!)
-            float rimSeatRadius = 1.10f;
-            float rimSeatHeight = 0.40f;
-            float p1X = sinf(p1RimAngle) * rimSeatRadius;
-            float p1Z = cosf(p1RimAngle) * rimSeatRadius;
-            rlTranslatef(p1X, rimSeatHeight + gasP1.trembleOffset, p1Z);
-            float p1FaceYaw = (p1RimAngle * RAD2DEG) + 180.0f;
-            rlRotatef(p1FaceYaw, 0, 1, 0);
-            DrawModel(charB, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
-            rlPopMatrix();
+                        SetShaderValue(shaderLighting, uRednessLoc,   &rRedness,   SHADER_UNIFORM_FLOAT);
+                        SetShaderValue(shaderLighting, uButtSwellLoc, &rSwell,     SHADER_UNIFORM_FLOAT);
+                        SetShaderValue(shaderLighting, uEyeBulgeLoc,  &rBulge,     SHADER_UNIFORM_FLOAT);
+                        float debugEyesVal = gPlacementDebugEyes ? 1.0f : 0.0f;
+                        if (uDebugEyesLoc != -1) SetShaderValue(shaderLighting, uDebugEyesLoc, &debugEyesVal, SHADER_UNIFORM_FLOAT);
 
-            if (!singlePirateMode) {
-                // Right Pirate (Player 2: Orange Hippo - Active in LAN mode!)
-                float p2Redness = gasP2.redness;
-                float p2ButtSwell = gasP2.boneScale - 1.0f; // 0.0 to 0.30 (*1.3 scale)
-                float p2EyeBulge = (gasP2.isPressing || gasP2.releaseTimer > 0.0f) ? Clamp(gasP2.pressTimer / 0.45f, 0.0f, 1.0f) : 0.0f;
-                SetShaderValue(shaderLighting, uRednessLoc,   &p2Redness,   SHADER_UNIFORM_FLOAT);
-                SetShaderValue(shaderLighting, uButtSwellLoc, &p2ButtSwell, SHADER_UNIFORM_FLOAT);
-                SetShaderValue(shaderLighting, uEyeBulgeLoc,  &p2EyeBulge,  SHADER_UNIFORM_FLOAT);
+                        rlPushMatrix();
+                        float px = sinf(curAngle) * kRimSeatRadius;
+                        float pz = cosf(curAngle) * kRimSeatRadius;
+                        rlTranslatef(px, kRimSeatHeight + rTremble, pz);
+                        float faceYaw = (curAngle * RAD2DEG) + 180.0f;
+                        rlRotatef(faceYaw, 0, 1, 0);
 
-                rlPushMatrix();
-                float p2X = sinf(p2RimAngle) * rimSeatRadius;
-                float p2Z = cosf(p2RimAngle) * rimSeatRadius;
-                rlTranslatef(p2X, rimSeatHeight + gasP2.trembleOffset, p2Z);
-                float p2FaceYaw = (p2RimAngle * RAD2DEG) + 180.0f;
-                rlRotatef(p2FaceYaw, 0, 1, 0);
-                DrawModel(charA, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
-                rlPopMatrix();
-            }
+                        // Step 2.3: Base lean is 0; max 6 deg on strain (reduced to prevent feet slip > 0.03m with grip pose)
+                        float lean = 6.0f * rStrain;
+                        rlTranslatef(0, 0.34f, 0);
+                        rlRotatef(lean, 1, 0, 0);
+                        rlTranslatef(0, -0.34f, 0);
+
+                        // Step 2.1: kPirateScale (1.0f)
+                        rlScalef(kPirateScale, kPirateScale, kPirateScale);
+
+                        Model& curM = (p % 2 == 0) ? charB : charA;
+                        DrawModel(curM, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
+                        if (gPlacementDebugEyes) {
+                            for (const auto& ev : sEyeVertsLocal) {
+                                DrawSphere(ev, 0.0035f, MAGENTA);
+                            }
+                        }
+                        rlPopMatrix();
+                    }
 
             // Reset uniforms for raft and all subsequent models
                     float zeroReset = 0.0f;
                     SetShaderValue(shaderLighting, uRednessLoc,   &zeroReset, SHADER_UNIFORM_FLOAT);
                     SetShaderValue(shaderLighting, uButtSwellLoc, &zeroReset, SHADER_UNIFORM_FLOAT);
                     SetShaderValue(shaderLighting, uEyeBulgeLoc,  &zeroReset, SHADER_UNIFORM_FLOAT);
+                    if (uDebugEyesLoc != -1) SetShaderValue(shaderLighting, uDebugEyesLoc, &zeroReset, SHADER_UNIFORM_FLOAT);
                     SetShaderValue(shaderLighting, uSkinULoc,     &zeroReset, SHADER_UNIFORM_FLOAT);
                     SetShaderValue(shaderLighting, uSkinVLoc,     &zeroReset, SHADER_UNIFORM_FLOAT);
 
@@ -4847,7 +5677,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
                         rlRotatef(ragdollA.rotation.y, 0, 1, 0);
 
-                        DrawModel(charA, Vector3{ 0, 0, 0 }, 1.15f, WHITE);
+                        DrawModel(charA, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
 
                     rlPopMatrix();
 
@@ -4863,7 +5693,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
                         rlRotatef(ragdollB.rotation.y, 0, 1, 0);
 
-                        DrawModel(charB, Vector3{ 0, 0, 0 }, 1.15f, WHITE);
+                        DrawModel(charB, Vector3{ 0, 0, 0 }, 1.0f, WHITE);
 
                     rlPopMatrix();
 
@@ -4907,31 +5737,36 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
             rlPopMatrix();
 
-            // I. Cartoon Billboard Fart Particles (Buttery Smooth Billows, Zero Water Clipping)
+            // I. Water Ripples & Cartoon Billboard Fart Particles (B5: Depth-tested, no player clipping)
+            // Draw Water Ripples expanding visibly on water plane
+            for (int r = 0; r < MAX_RIPPLES; r++) {
+                if (rippleRings[r].active) {
+                    float t = rippleRings[r].timer / 0.80f;
+                    float rad = 0.60f + 2.40f * t;
+                    float alpha = (1.0f - t) * 0.75f;
+                    DrawCircle3D(rippleRings[r].position, rad, Vector3{ 1, 0, 0 }, 90.0f, ColorAlpha(Color{ 230, 250, 255, 255 }, alpha));
+                    DrawCircle3D(rippleRings[r].position, rad * 0.86f, Vector3{ 1, 0, 0 }, 90.0f, ColorAlpha(Color{ 175, 230, 255, 255 }, alpha * 0.50f));
+                }
+            }
 
-            rlDisableDepthTest();
+            // Depth test enabled so particles do not render over the pirate character
+            rlEnableDepthTest();
+            rlEnableDepthMask();
 
             for (int p = 0; p < MAX_PARTICLES; p++) {
-
                 if (particles[p].active) {
-
                     Texture2D tex = (particles[p].spriteIndex == 4) ? texSkullGas : texFart[particles[p].spriteIndex % 4];
-            Rectangle srcRec = { 0, 0, (float)tex.width, (float)tex.height };
-            Color pTint = (particles[p].spriteIndex == 4) ? ColorAlpha(WHITE, particles[p].alpha)
-                                                         : ColorAlpha(Color{ 140, 255, 60, 255 }, particles[p].alpha);
-            DrawBillboardPro(camera, tex, srcRec, particles[p].position, Vector3{ 0, 1, 0 },
-                             Vector2{ particles[p].size, particles[p].size }, Vector2{ particles[p].size * 0.5f, particles[p].size * 0.5f },
-                             particles[p].rotation, pTint);
-
+                    Rectangle srcRec = { 0, 0, (float)tex.width, (float)tex.height };
+                    // Lime green opaque clumps (B5)
+                    Color pTint = (particles[p].spriteIndex == 4) ? ColorAlpha(WHITE, particles[p].alpha)
+                                                                 : ColorAlpha(Color{ 165, 250, 45, 255 }, particles[p].alpha);
+                    DrawBillboardPro(camera, tex, srcRec, particles[p].position, Vector3{ 0, 1, 0 },
+                                     Vector2{ particles[p].size, particles[p].size }, Vector2{ particles[p].size * 0.5f, particles[p].size * 0.5f },
+                                     particles[p].rotation, pTint);
                 }
-
             }
 
             EndBlendMode();
-
-            rlEnableDepthTest();
-
-            rlEnableDepthMask();
 
         
             // 3D Level Editor Visual Highlights & Gizmos (Unity / Godot style)
@@ -5000,6 +5835,25 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
         EndMode3D();
 
+        // Multiplayer Player Disconnected Notification Banner (User Feature Request)
+        if (gDisconnectBannerTimer > 0.0f) {
+            gDisconnectBannerTimer -= dt;
+            float bAlpha = Clamp(gDisconnectBannerTimer / 0.5f, 0.0f, 1.0f);
+            if (gDisconnectBannerTimer < 0.5f) bAlpha = gDisconnectBannerTimer / 0.5f;
+
+            float bannerW = 580.0f;
+            float bannerH = 46.0f;
+            float bannerX = ((float)GetScreenWidth() - bannerW) * 0.5f;
+            float bannerY = 70.0f;
+
+            Rectangle bRec = { bannerX, bannerY, bannerW, bannerH };
+            DrawRectangleRounded(bRec, 0.35f, 4, ColorAlpha(Color{ 185, 28, 28, 240 }, bAlpha));
+            DrawRectangleRoundedLinesEx(bRec, 0.35f, 4, 2.0f, ColorAlpha(Color{ 254, 202, 202, 255 }, bAlpha));
+
+            Vector2 tSz = MeasureTextEx(fontUIBold, gDisconnectBannerText.c_str(), 17.0f, 0.4f);
+            DrawTextEx(fontUIBold, gDisconnectBannerText.c_str(), Vector2{ bannerX + (bannerW - tSz.x) * 0.5f, bannerY + (bannerH - tSz.y) * 0.5f }, 17.0f, 0.4f, ColorAlpha(WHITE, bAlpha));
+        }
+
         // 1. Classic Cartoon Radial Speed Lines when speeding (> 10.5 m/s) or Super Sync
         if (!editorMode && !raft.isDestroyed && (raft.speed > 10.5f || isSuperSync)) {
             float spdAlpha = Clamp((raft.speed - 10.5f) / 6.0f, 0.15f, 0.65f);
@@ -5059,13 +5913,11 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
         // Player Names Floating in White above Pirates' Heads (Plan v8.3.1 User Request)
         if (!editorMode && !raft.isDestroyed) {
-            float rimSeatRadius = 0.95f;
-            float rimSeatHeight = 0.40f;
-
             // Pirate 1 (Local Player on Host, Remote Player on Client)
-            float p1X = sinf(p1RimAngle) * rimSeatRadius;
-            float p1Z = cosf(p1RimAngle) * rimSeatRadius;
-            Vector3 localP1 = Vector3{ p1X, rimSeatHeight + 1.25f, p1Z };
+            if (gMultiSlots[0].active) {
+            float p1X = sinf(p1RimAngle) * kRimSeatRadius;
+            float p1Z = cosf(p1RimAngle) * kRimSeatRadius;
+            Vector3 localP1 = Vector3{ p1X, kRimSeatHeight + 1.25f, p1Z };
             Vector3 rotP1 = Vector3RotateByAxisAngle(localP1, Vector3{ 0, 1, 0 }, raft.rotationY);
             Vector3 worldP1Head = Vector3Add(raft.position, rotP1);
 
@@ -5080,12 +5932,13 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 DrawRectangleRoundedLinesEx(Rectangle{ sP1.x - pillW * 0.5f, sP1.y - pillH * 0.5f, pillW, pillH }, 0.45f, 4, 1.2f, Color{ 255, 255, 255, 180 });
                 DrawTextEx(fontUIBold, nameP1, Vector2{ sP1.x - nmSz.x * 0.5f, sP1.y - nmSz.y * 0.5f }, 18, 0.4f, WHITE);
             }
+            }
 
-            if (!singlePirateMode) {
+            if (gMultiSlots[1].active) {
                 // Pirate 2 (Remote Player on Host, Local Player on Client)
-                float p2X = sinf(p2RimAngle) * rimSeatRadius;
-                float p2Z = cosf(p2RimAngle) * rimSeatRadius;
-                Vector3 localP2 = Vector3{ p2X, rimSeatHeight + 1.25f, p2Z };
+                float p2X = sinf(p2RimAngle) * kRimSeatRadius;
+                float p2Z = cosf(p2RimAngle) * kRimSeatRadius;
+                Vector3 localP2 = Vector3{ p2X, kRimSeatHeight + 1.25f, p2Z };
                 Vector3 rotP2 = Vector3RotateByAxisAngle(localP2, Vector3{ 0, 1, 0 }, raft.rotationY);
                 Vector3 worldP2Head = Vector3Add(raft.position, rotP2);
 
@@ -5119,7 +5972,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 DrawRectangleRounded(Rectangle{ 67, 12, 180.0f * gasFrac1, 14 }, 0.45f, 6, barFillCol1);
             }
 
-            if (!singlePirateMode) {
+            if (gMultiSlots[1].active) {
                 float gasFrac2 = Clamp(gasP2.gasEnergy / GAS_MAX, 0.0f, 1.0f);
                 Color barFillCol2 = gasP2.gasDepleted ? Color{ 239, 68, 68, 255 } : Color{ 56, 189, 248, 255 };
 
@@ -5130,8 +5983,30 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 }
             }
 
+            float activeStrain = (LanGetRole() == LAN_CLIENT) ? gasP2.strain : gasP1.strain;
+            float activeBulge  = (LanGetRole() == LAN_CLIENT) ? gasP2.eyeBulge : gasP1.eyeBulge;
+            Color hippoTint = Color{ 255, (unsigned char)(255 - activeStrain * 110), (unsigned char)(255 - activeStrain * 110), 255 };
+            float hippoScale = 1.0f + activeStrain * 0.10f;
+            Rectangle dstHipo = Rectangle{ 14.0f, 4.0f, 46.0f * hippoScale, 50.0f * hippoScale };
             DrawTexturePro(texHipo, Rectangle{ 0, 0, (float)texHipo.width, (float)texHipo.height },
-                           Rectangle{ 14, 4, 46, 50 }, Vector2{ 0, 0 }, 0.0f, WHITE);
+                           dstHipo, Vector2{ 0, 0 }, 0.0f, hippoTint);
+            if (activeStrain > 0.02f) {
+                float eyeLeftX  = dstHipo.x + (25.5f / 70.0f) * dstHipo.width;
+                float eyeRightX = dstHipo.x + (39.5f / 70.0f) * dstHipo.width;
+                float eyeY      = dstHipo.y + (19.2f / 76.0f) * dstHipo.height;
+                float eyeRad    = 3.2f + activeStrain * 6.5f;
+                Color scleraCol = Color{ 255, (unsigned char)(255 - activeStrain * 180), (unsigned char)(255 - activeStrain * 180), 255 };
+                Color rimCol    = Color{ 220, 20, 20, (unsigned char)(activeStrain * 220) };
+                DrawCircleV(Vector2{ eyeLeftX, eyeY }, eyeRad + 1.2f, rimCol);
+                DrawCircleV(Vector2{ eyeRightX, eyeY }, eyeRad + 1.2f, rimCol);
+                DrawCircleV(Vector2{ eyeLeftX, eyeY }, eyeRad, scleraCol);
+                DrawCircleV(Vector2{ eyeRightX, eyeY }, eyeRad, scleraCol);
+                float pupilRad = eyeRad * (0.42f - activeStrain * 0.08f);
+                DrawCircleV(Vector2{ eyeLeftX, eyeY }, pupilRad, BLACK);
+                DrawCircleV(Vector2{ eyeRightX, eyeY }, pupilRad, BLACK);
+                DrawCircleV(Vector2{ eyeLeftX - eyeRad * 0.25f, eyeY - eyeRad * 0.25f }, eyeRad * 0.22f, WHITE);
+                DrawCircleV(Vector2{ eyeRightX - eyeRad * 0.25f, eyeY - eyeRad * 0.25f }, eyeRad * 0.22f, WHITE);
+            }
         }
 
         // 2. Top-Center: Full Course Progress Bar Track & Lap Stopwatch (Spline-accurate!)
@@ -5270,12 +6145,12 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
         }
 
 #if !defined(__ANDROID__)
-        // 5. [F1] LEVEL EDITOR Toggle Handling (PC Only via F1 key - Completely removed from Mobile)
+        // 5. [F1] LEVEL EDITOR Toggle Handling (PC Only - Clickable or via F1 key)
         if (!isMobileTouchHUD)
         {
             Rectangle btnEditorRec = { (float)GetScreenWidth() - 175, (float)GetScreenHeight() - 44, 160, 32 };
             bool hoverEditor = CheckCollisionPointRec(mousePos, btnEditorRec);
-            if ((hoverEditor && editorMode && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) || IsKeyPressed(KEY_F1)) {
+            if (hoverEditor && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                 editorMode = !editorMode;
                 if (editorMode) {
                     editorCamPos = Vector3Add(raft.position, Vector3{ 0.0f, 4.5f, 6.0f });
@@ -5290,17 +6165,14 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 }
             }
 
-            // Only render button while INSIDE editorMode to allow returning to Play Mode!
-            // When !editorMode, button is hidden completely from in-game HUD!
-            if (editorMode) {
-                Color btnBg = Color{ 71, 140, 191, 245 };
-                Color btnBorder = Color{ 110, 180, 230, 255 };
-                DrawRectangleRounded(btnEditorRec, 0.25f, 4, btnBg);
-                DrawRectangleRoundedLinesEx(btnEditorRec, 0.25f, 4, 1.0f, btnBorder);
-                const char* toggleLbl = "Play Mode (F1)";
-                Vector2 tSz = MeasureTextEx(fontUIBold, toggleLbl, 14, 0.4f);
-                DrawTextEx(fontUIBold, toggleLbl, Vector2{ btnEditorRec.x + (btnEditorRec.width - tSz.x) * 0.5f, btnEditorRec.y + 8 }, 14, 0.4f, WHITE);
-            }
+            // Always render button on PC so players can click it even without F1 key!
+            Color btnBg = editorMode ? Color{ 71, 140, 191, 245 } : (hoverEditor ? Color{ 45, 65, 95, 230 } : Color{ 25, 35, 55, 210 });
+            Color btnBorder = editorMode ? Color{ 110, 180, 230, 255 } : (hoverEditor ? Color{ 90, 150, 220, 255 } : Color{ 70, 100, 150, 180 });
+            DrawRectangleRounded(btnEditorRec, 0.25f, 4, btnBg);
+            DrawRectangleRoundedLinesEx(btnEditorRec, 0.25f, 4, 1.2f, btnBorder);
+            const char* toggleLbl = editorMode ? "Play Mode (F1)" : "[F1] Level Editor";
+            Vector2 tSz = MeasureTextEx(fontUIBold, toggleLbl, 14, 0.4f);
+            DrawTextEx(fontUIBold, toggleLbl, Vector2{ btnEditorRec.x + (btnEditorRec.width - tSz.x) * 0.5f, btnEditorRec.y + 8 }, 14, 0.4f, WHITE);
 
             // Prominent Top Bar Natural Motion Toggle Button (Accessible anytime in Editor!)
             if (editorMode) {
@@ -5422,7 +6294,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             // Right side of top toolbar: Motion toggle, Save, Play Mode
             float rbx = screenW - 130.0f;
             Rectangle bPlay = { rbx, 7.0f, 118.0f, 28.0f }; rbx -= 150.0f;
-            if (DrawGButton(bPlay, "Play Mode (F1)", Color{ 37, 99, 235, 255 }, WHITE, true) || IsKeyPressed(KEY_F1)) {
+            if (DrawGButton(bPlay, "Play Mode (F1)", Color{ 37, 99, 235, 255 }, WHITE, true)) {
                 editorMode = false;
             }
 
@@ -5626,10 +6498,10 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                     "OBS_F3 Swing Gate", "OBS_F10 Hammer Gate", "OBS_F11 Spiked Drum", "OBS_F13 Rotating Arm",
                     "OBS_F14 Slider", "OBS_F18 Post", "OBS_F23 Dual Gate",
                     "Rock Dark 1", "Rock Dark 2", "Wind Gust",
-                    "CHECKPOINT Gate", "Jungle Tree"
+                    "CHECKPOINT Gate", "Jungle Tree", "Nav Arrow (Chevron >>>)"
                 };
 
-                for (int ci = catalogScroll; ci < 20 && ci < catalogScroll + 10; ci++) {
+                for (int ci = catalogScroll; ci < 21 && ci < catalogScroll + 10; ci++) {
                     Rectangle cCard = { catX + 8.0f, cy, catW - 16.0f, 48.0f };
                     DrawRectangleRounded(cCard, 0.15f, 3, Color{ 28, 34, 48, 255 });
                     DrawRectangleRoundedLinesEx(cCard, 0.15f, 3, 1.0f, Color{ 48, 58, 80, 255 });
@@ -5646,7 +6518,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                     if (DrawGButton(bSpawn, "+ Spawn", Color{ 36, 90, 150, 255 }, WHITE)) {
                         LevelEntity ne{};
                         ne.id = (int)levelEntities.size();
-                        ne.type = (EntityType)ci;
+                        ne.type = (ci == 20) ? ENT_NAV_ARROW : (EntityType)ci;
                         Vector3 fwd = { -sinf(editorCamYaw) * cosf(editorCamPitch), sinf(editorCamPitch), -cosf(editorCamYaw) * cosf(editorCamPitch) };
                         ne.position = Vector3Add(editorCamPos, Vector3Scale(fwd, 6.0f));
                         ne.scale = 1.0f;
@@ -5724,8 +6596,21 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                     Rectangle bRp = { rightRec.x + 230, ry, 68, 20 };
                     if (DrawGButton(bYm, "Y -", Color{ 36, 43, 58, 255 }, WHITE)) o.position.y -= 0.25f;
                     if (DrawGButton(bYp, "Y +", Color{ 36, 43, 58, 255 }, WHITE)) o.position.y += 0.25f;
-                    if (DrawGButton(bRm, "Rot -15", Color{ 36, 43, 58, 255 }, WHITE)) o.rotationY -= 15.0f;
-                    if (DrawGButton(bRp, "Rot +15", Color{ 36, 43, 58, 255 }, WHITE)) o.rotationY += 15.0f;
+                    if (DrawGButton(bRm, "Rot -15", Color{ 36, 43, 58, 255 }, WHITE)) o.rotationY = fmodf(o.rotationY - 15.0f + 360.0f, 360.0f);
+                    if (DrawGButton(bRp, "Rot +15", Color{ 36, 43, 58, 255 }, WHITE)) o.rotationY = fmodf(o.rotationY + 15.0f, 360.0f);
+                    ry += 24.0f;
+
+                    // Fine & Large Rotation Angle Controls
+                    DrawTextEx(fontUI, TextFormat("Heading Angle: %.1f deg", o.rotationY), Vector2{ rightRec.x + 14, ry }, 11, 0.3f, Color{ 255, 230, 80, 255 });
+                    ry += 15.0f;
+                    Rectangle bR45m = { rightRec.x + 12, ry, 68, 20 };
+                    Rectangle bR5m  = { rightRec.x + 84, ry, 68, 20 };
+                    Rectangle bR5p  = { rightRec.x + 158, ry, 68, 20 };
+                    Rectangle bR45p = { rightRec.x + 230, ry, 68, 20 };
+                    if (DrawGButton(bR45m, "Rot -45", Color{ 36, 43, 58, 255 }, WHITE)) o.rotationY = fmodf(o.rotationY - 45.0f + 360.0f, 360.0f);
+                    if (DrawGButton(bR5m,  "Rot -5",  Color{ 42, 65, 95, 255 }, WHITE)) o.rotationY = fmodf(o.rotationY - 5.0f + 360.0f, 360.0f);
+                    if (DrawGButton(bR5p,  "Rot +5",  Color{ 42, 65, 95, 255 }, WHITE)) o.rotationY = fmodf(o.rotationY + 5.0f, 360.0f);
+                    if (DrawGButton(bR45p, "Rot +45", Color{ 36, 43, 58, 255 }, WHITE)) o.rotationY = fmodf(o.rotationY + 45.0f, 360.0f);
                     ry += 26.0f;
 
                     // Scale & Size
@@ -5967,11 +6852,71 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             DrawRectangleRoundedLinesEx(Rectangle{ fpsX, fpsY, 110.0f, 28.0f }, 0.4f, 4, 1.5f, Color{ 34, 197, 94, 255 });
             DrawTextEx(fontUIBold, TextFormat("FPS: %d", GetFPS()), Vector2{ fpsX + 16.0f, fpsY + 6.0f }, 15, 0.4f, Color{ 34, 197, 94, 255 });
         }
+        } else if (currentScreen == SCREEN_INTRO) {
+            ClearBackground(BLACK);
+            float scrW = (float)GetScreenWidth();
+            float scrH = (float)GetScreenHeight();
+
+            if (introTimer < 1.8f) {
+                // Phase 1: M.GH Developer Logo (0.0s - 1.8s) - Razor Sharp HD
+                float logoAlpha = 1.0f;
+                if (introTimer < 0.45f) {
+                    logoAlpha = introTimer / 0.45f;
+                } else if (introTimer > 1.35f) {
+                    logoAlpha = (1.8f - introTimer) / 0.45f;
+                }
+                if (logoAlpha < 0.0f) logoAlpha = 0.0f;
+                if (logoAlpha > 1.0f) logoAlpha = 1.0f;
+
+                if (texIntroLogo.id != 0) {
+                    float zoom = 1.0f + (introTimer / 1.8f) * 0.04f;
+                    float baseScale = (scrH / (float)texIntroLogo.height) * zoom;
+                    float logoW = (float)texIntroLogo.width * baseScale;
+                    float logoH = (float)texIntroLogo.height * baseScale;
+                    float logoX = (scrW - logoW) * 0.5f;
+                    float logoY = (scrH - logoH) * 0.5f;
+                    Color tint = Color{ 255, 255, 255, (unsigned char)(logoAlpha * 255.0f) };
+                    DrawTexturePro(texIntroLogo,
+                                   Rectangle{ 0, 0, (float)texIntroLogo.width, (float)texIntroLogo.height },
+                                   Rectangle{ logoX, logoY, logoW, logoH },
+                                   Vector2{ 0, 0 }, 0.0f, tint);
+                }
+            } else {
+                // Phase 2 & 3: Redrawn 720p HD Cartoon Bomb & Epic Cartoon Explosion (1.8s - 6.8s)
+                if (texIntroAnim.id != 0) {
+                    float scale = fmaxf(scrW / (float)texIntroAnim.width, scrH / (float)texIntroAnim.height);
+                    float dstW = (float)texIntroAnim.width * scale;
+                    float dstH = (float)texIntroAnim.height * scale;
+                    float dstX = (scrW - dstW) * 0.5f;
+                    float dstY = (scrH - dstH) * 0.5f;
+                    Rectangle dstRec = { dstX, dstY, dstW, dstH };
+
+                    float fadeAlpha = 1.0f;
+                    if (introTimer > 6.4f) {
+                        fadeAlpha = (6.8f - introTimer) / 0.4f;
+                        if (fadeAlpha < 0.0f) fadeAlpha = 0.0f;
+                    }
+                    Color tint = Color{ 255, 255, 255, (unsigned char)(fadeAlpha * 255.0f) };
+
+                    DrawTexturePro(texIntroAnim,
+                                   Rectangle{ 0, 0, (float)texIntroAnim.width, (float)texIntroAnim.height },
+                                   dstRec,
+                                   Vector2{ 0, 0 }, 0.0f, tint);
+                }
+            }
+
+            // Discreet skip hint in the bottom corner (fades in smoothly)
+            if (introTimer > 1.2f) {
+                float hintAlpha = fminf((introTimer - 1.2f) * 0.6f, 0.45f);
+                const char* skipText = (gCurrentLanguage == LANG_AR) ? "انقر للتخطي" : "Click / Tap to Skip";
+                DrawTextEx(fontUIBold, skipText, Vector2{ scrW - 145.0f, scrH - 32.0f }, 15, 0.2f, Color{ 255, 255, 255, (unsigned char)(hintAlpha * 255.0f) });
+            }
         } else if (currentScreen == SCREEN_MAIN_MENU) {
             ClearBackground(Color{ 18, 22, 34, 255 });
 
             float scrW = (float)GetScreenWidth();
             float scrH = (float)GetScreenHeight();
+
 
             // Mute / Stop background beach and snore sounds in main menu as commanded
             if (IsSoundPlaying(sndMenuBeachOst)) StopSound(sndMenuBeachOst);
@@ -6038,6 +6983,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                     if (m == 0) { // PLAY SOLO (Single Pirate Mode, 360 degree rotation)
                         LanShutdown();
                         singlePirateMode = true;
+                        ResetMatchNetworkState(1);
                         p1RimAngle = -3.14159f;
                         raft.position = Vector3{ 15.55f, 0.58f, 90.80f };
                         raft.velocity = Vector3{ 0.0f, 0.0f, 0.0f };
@@ -6082,6 +7028,32 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
             if (hovLang && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                 gCurrentLanguage = (gCurrentLanguage == LANG_AR) ? LANG_EN : LANG_AR;
             }
+
+#if !defined(__ANDROID__)
+            // Top-Right Level Editor Button in Main Menu (Rendered on top of background!)
+            Rectangle btnMenuEd = { scrW - 370.0f, 20.0f, 168.0f, 42.0f };
+            bool hovMenuEd = CheckCollisionPointRec(mousePos, btnMenuEd);
+            Color edBg = hovMenuEd ? Color{ 48, 120, 200, 245 } : Color{ 22, 38, 62, 230 };
+            Color edBrd = hovMenuEd ? Color{ 110, 190, 255, 255 } : Color{ 70, 110, 170, 210 };
+            DrawSlantedRect(btnMenuEd.x, btnMenuEd.y, btnMenuEd.width, btnMenuEd.height, 10.0f, edBg);
+            DrawSlantedRectLines(btnMenuEd.x, btnMenuEd.y, btnMenuEd.width, btnMenuEd.height, 10.0f, 1.2f, edBrd);
+            const char* edLbl = "[F1] Level Editor";
+            Vector2 edSz = MeasureTextEx(fontUIBold, edLbl, 15, 0.4f);
+            DrawTextEx(fontUIBold, edLbl, Vector2{ btnMenuEd.x + (btnMenuEd.width - edSz.x) * 0.5f, btnMenuEd.y + 12.0f }, 15, 0.4f, WHITE);
+            if (hovMenuEd && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                currentScreen = SCREEN_GAMEPLAY;
+                editorMode = true;
+                editorCamPos = Vector3Add(raft.position, Vector3{ 0.0f, 4.5f, 6.0f });
+                editorCamYaw = raft.rotationY;
+                editorCamPitch = 0.35f;
+                editorMsg = "LEVEL EDITOR ACTIVE - GAMEPLAY FROZEN";
+                editorMsgTimer = 3.0f;
+                raft.velocity = Vector3Zero();
+                raft.angularVelocityY = 0.0f;
+                gasP1.isSustained = false; gasP1.pressTimer = 0.0f;
+                gasP2.isSustained = false; gasP2.pressTimer = 0.0f;
+            }
+#endif
 
             // Bottom-Left key hints
             DrawTextEx(fontUIBold, LocText(STR_ESC_BACK), Vector2{ 38.0f, scrH - 42.0f }, 15, 0.3f, Color{ 220, 230, 245, 220 });
@@ -6346,6 +7318,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 for (auto& ent : levelEntities) {
                     ent.animTimer = 0.0f;
                 }
+                ResetMatchNetworkState(gConnectedPlayers);
                 currentScreen = SCREEN_GAMEPLAY;
             } else if (LanGetRole() == LAN_CLIENT && LanIsMatchStarted()) {
                 singlePirateMode = false;
@@ -6362,6 +7335,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
                 for (auto& ent : levelEntities) {
                     ent.animTimer = 0.0f;
                 }
+                ResetMatchNetworkState(gConnectedPlayers);
                 currentScreen = SCREEN_GAMEPLAY;
             }
 
@@ -6907,6 +7881,55 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
 
         testFrameCount++;
 
+        // Step 3b: Placement test screenshot capture per step
+        if (gPlacementTestMode) {
+            sStepFrame++;
+            if (sStepFrame >= 3) {
+                std::string shotPath = "";
+                const char* seatNames[4] = { "seat0", "seat90", "seat180", "seat270" };
+                const char* camNames[3] = { "side", "top", "chase" };
+                if (sPlacementStep < 12) {
+                    int sIdx = sPlacementStep / 3;
+                    int cIdx = sPlacementStep % 3;
+                    shotPath = std::string("placement_out/") + seatNames[sIdx] + "_" + camNames[cIdx] + ".png";
+                } else if (sPlacementStep == 12) {
+                    shotPath = "placement_out/seat_all4_top.png";
+                } else if (sPlacementStep == 13) {
+                    shotPath = "placement_out/seat_squash_side.png";
+                } else if (sPlacementStep == 14) {
+                    shotPath = "placement_out/seat0_strain0_side.png";
+                } else if (sPlacementStep == 15) {
+                    shotPath = "placement_out/seat0_strain1_side.png";
+                } else if (sPlacementStep == 16) {
+                    shotPath = "placement_out/head_front_eyes.png";
+                } else if (sPlacementStep == 17) {
+                    shotPath = "placement_out/head_side_eyes.png";
+                } else if (sPlacementStep == 18) {
+                    shotPath = "placement_out/head_rear_bulge.png";
+                } else if (sPlacementStep == 19) {
+                    shotPath = "placement_out/hud_strain0.png";
+                } else if (sPlacementStep == 20) {
+                    shotPath = "placement_out/hud_strain1.png";
+                } else if (sPlacementStep == 21) {
+                    shotPath = "placement_out/hands_deck_contact.png";
+                } else if (sPlacementStep == 22) {
+                    shotPath = "placement_out/seat0_strain1_tremble.png";
+                }
+
+                if (!shotPath.empty()) {
+                    TakeScreenshot(shotPath.c_str());
+                    TraceLog(LOG_INFO, "[PLACEMENT TEST] Captured: %s", shotPath.c_str());
+                }
+
+                sPlacementStep++;
+                sStepFrame = 0;
+                if (sPlacementStep >= 23) {
+                    TraceLog(LOG_INFO, "[PLACEMENT TEST] All 23 test screenshots captured successfully!");
+                    break;
+                }
+            }
+        }
+
         if (testScreenshotMode && testFrameCount >= targetTestFrame) {
 
             TakeScreenshot(testShotName.c_str());
@@ -6975,6 +7998,7 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
     UnloadTexture(texCrashed);
     UnloadTexture(texRaftPin);
     UnloadTexture(texFinish);
+    if (texArrowM.id != 0) UnloadTexture(texArrowM);
     UnloadTexture(texEsc);
 
     for (int s = 0; s < ENV_SECTOR_COUNT; s++) {
@@ -7024,6 +8048,13 @@ float sharkWaterY = 0.55f, sharkDist = 0.0f;
     UnloadShader(shaderWater);
     UnloadRenderTexture(previewRT);
     UnloadShader(shaderLighting);
+
+    gJobSystem.Shutdown();
+    if (introAssetsLoaded) {
+        if (texIntroLogo.id != 0) UnloadTexture(texIntroLogo);
+        if (texIntroAnim.id != 0) UnloadTexture(texIntroAnim);
+        if (sndIntroFull.frameCount > 0) UnloadSound(sndIntroFull);
+    }
 
     CloseAudioDevice();
 
