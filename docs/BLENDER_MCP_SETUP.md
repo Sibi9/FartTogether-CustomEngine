@@ -58,3 +58,18 @@ For multi-step design, either:
 - The skill was downloaded from
   `https://raw.githubusercontent.com/sandraschi/blender-mcp/main/skills/blender-expert/SKILL.md`
   and installed in `.agents/skills/` and `~/.dsh/skills/`.
+
+## Live GUI bridge (implemented)
+
+- The addon lender_bridge_addon.py was patched from "blender": (4, 2, 0) to (3, 6, 0)
+  so Blender 3.6 lists and persists it; it is enabled in userpref.blend.
+- The running GUI starts the bridge on TCP 127.0.0.1:10850 (Properties > Scene > Blender MCP Bridge).
+- Execute code in the live GUI:
+
+`powershell
+P:\Blender\blender-mcp\.venv\Scripts\python.exe tools\blender_live.py ping
+P:\Blender\blender-mcp\.venv\Scripts\python.exe tools\blender_live.py path\to\script.py
+`
+
+- Design scene: Design/Blender/pirate_boat.blend (boat + standing pirates on the rim,
+  camera/lights/material preview). Opened in the live GUI.
